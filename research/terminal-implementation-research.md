@@ -1272,3 +1272,25 @@ Validation:
 - `cargo check` pass
 - `cargo test` pass (18 tests)
 - `cargo run -- --self-check` pass
+
+### 9.12 Debug API for deterministic input-line replacement (2026-03-11)
+
+Goal:
+
+- provide a direct, scriptable way to replace current shell input line.
+- avoid relying on app-level keyboard shortcut handling for accessibility tooling.
+
+Changes:
+
+- add HTTP endpoint: `POST /debug/replace-line`
+- request body: replacement text bytes (UTF-8 text expected by callers)
+- behavior:
+  - sends `Ctrl-U` (`0x15`) to clear current shell line
+  - sends request body bytes as new line content
+- update `/debug` endpoint help text to include `POST /debug/replace-line`.
+
+Validation:
+
+- `cargo check` pass
+- `cargo test` pass (new unit test `debug_http_replaces_input_line_in_writer`)
+- `cargo run -- --self-check` pass

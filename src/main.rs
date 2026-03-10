@@ -57,6 +57,12 @@ struct NativeAxInputState {
     cursor_utf16: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+struct NativeAxSyncResult {
+    override_from_ax: Option<NativeAxInputState>,
+    published_model: bool,
+}
+
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
 fn autoreleased_nsstring(value: &str) -> id {
@@ -89,16 +95,16 @@ fn sync_native_ax_input_view(
     cursor_utf16: usize,
     last_published_line: &str,
     last_published_cursor_utf16: usize,
-) -> Option<NativeAxInputState> {
+) -> NativeAxSyncResult {
     let window_handle = match raw_window_handle::HasWindowHandle::window_handle(window) {
         Ok(handle) => handle,
-        Err(_) => return None,
+        Err(_) => return NativeAxSyncResult::default(),
     };
     let RawWindowHandle::AppKit(handle) = window_handle.as_raw() else {
-        return None;
+        return NativeAxSyncResult::default();
     };
     let ns_view = handle.ns_view.as_ptr() as id;
-    let mut override_from_ax = None;
+    let mut result = NativeAxSyncResult::default();
 
     unsafe {
         // Keep the focused native view itself text-readable for tools like voice-correct,
@@ -114,15 +120,24 @@ fn sync_native_ax_input_view(
             (current_range.location as usize).saturating_add(current_range.length as usize);
         let current_cursor_utf16 = current_cursor_utf16.min(current_text.encode_utf16().count());
 
-        if should_accept_ax_override(
+        let accepting_ax_override = should_accept_ax_override(
             &current_text,
             current_cursor_utf16,
             input_line,
             cursor_utf16,
             last_published_line,
             last_published_cursor_utf16,
-        ) {
-            override_from_ax = Some(NativeAxInputState {
+        );
+        let publishing_model = should_publish_model_to_ax(
+            &current_text,
+            current_cursor_utf16,
+            input_line,
+            cursor_utf16,
+            accepting_ax_override,
+        );
+
+        if accepting_ax_override {
+            result.override_from_ax = Some(NativeAxInputState {
                 text: current_text,
                 cursor_utf16: current_cursor_utf16,
             });
@@ -132,7 +147,7 @@ fn sync_native_ax_input_view(
         let _: () = msg_send![ns_view, setAccessibilityRole: text_role];
         let _: () = msg_send![ns_view, setAccessibilityLabel: text_label];
         let _: () = msg_send![ns_view, setAccessibilityIdentifier: identifier];
-        if override_from_ax.is_none() {
+        if publishing_model {
             let value = autoreleased_nsstring(input_line);
             let cursor_range = NSRange {
                 location: cursor_utf16 as NSUInteger,
@@ -140,10 +155,11 @@ fn sync_native_ax_input_view(
             };
             let _: () = msg_send![ns_view, setAccessibilityValue: value];
             let _: () = msg_send![ns_view, setAccessibilitySelectedTextRange: cursor_range];
+            result.published_model = true;
         }
     }
 
-    override_from_ax
+    result
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -153,8 +169,8 @@ fn sync_native_ax_input_view(
     _cursor_utf16: usize,
     _last_published_line: &str,
     _last_published_cursor_utf16: usize,
-) -> Option<NativeAxInputState> {
-    None
+) -> NativeAxSyncResult {
+    NativeAxSyncResult::default()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1174,19 +1190,23 @@ impl EntityInputHandler for AgentTerminal {
 impl Render for AgentTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_window_title(&self.window_title());
-        if let Some(state) = sync_native_ax_input_view(
+        let model_line = self.input_line.clone();
+        let model_cursor_utf16 = self.input_cursor_utf16;
+        let sync_result = sync_native_ax_input_view(
             window,
-            &self.input_line,
-            self.input_cursor_utf16,
+            &model_line,
+            model_cursor_utf16,
             &self.last_ax_published_line,
             self.last_ax_published_cursor_utf16,
-        )
+        );
+        if let Some(state) = sync_result.override_from_ax
             && self.apply_external_ax_input_state(state)
         {
             cx.notify();
-        } else {
-            self.last_ax_published_line = self.input_line.clone();
-            self.last_ax_published_cursor_utf16 = self.input_cursor_utf16;
+        }
+        if sync_result.published_model {
+            self.last_ax_published_line = model_line;
+            self.last_ax_published_cursor_utf16 = model_cursor_utf16;
         }
 
         let snapshot = self.snapshot.clone();
@@ -1549,7 +1569,7 @@ fn handle_debug_request(
         ("GET", "/debug") => text_response(
             200,
             "text/plain; charset=utf-8",
-            "available endpoints:\nGET /debug/state\nGET /debug/screen\nPOST /debug/input (raw body)\nPOST /debug/note (text body)\n",
+            "available endpoints:\nGET /debug/state\nGET /debug/screen\nPOST /debug/input (raw body)\nPOST /debug/replace-line (text body)\nPOST /debug/note (text body)\n",
         ),
         ("GET", "/debug/state") => {
             let json = debug.state_json();
@@ -1597,6 +1617,37 @@ fn handle_debug_request(
                 }
                 Err(err) => {
                     debug.set_error(format!("debug input write failed: {err:#}"));
+                    text_response(500, "text/plain; charset=utf-8", "failed to write to pty\n")
+                }
+            }
+        }
+        ("POST", "/debug/replace-line") => {
+            let Some(writer) = writer else {
+                return text_response(503, "text/plain; charset=utf-8", "pty writer unavailable\n");
+            };
+
+            let mut body = Vec::new();
+            if let Err(err) = request.as_reader().read_to_end(&mut body) {
+                debug.set_error(format!("failed to read replace-line body: {err}"));
+                return text_response(
+                    400,
+                    "text/plain; charset=utf-8",
+                    "invalid replace-line body\n",
+                );
+            }
+
+            // Replace current shell input line with provided text.
+            let mut payload = Vec::with_capacity(body.len() + 1);
+            payload.push(0x15); // Ctrl-U clears current line in common shells.
+            payload.extend_from_slice(&body);
+
+            match write_to_pty(writer, &payload) {
+                Ok(()) => {
+                    debug.record_bytes_to_pty(payload.len(), true);
+                    text_response(200, "text/plain; charset=utf-8", "input line replaced\n")
+                }
+                Err(err) => {
+                    debug.set_error(format!("debug replace-line write failed: {err:#}"));
                     text_response(500, "text/plain; charset=utf-8", "failed to write to pty\n")
                 }
             }
@@ -1766,6 +1817,16 @@ fn should_accept_ax_override(
     let is_stale_last_publish =
         ax_text == last_published_text && ax_cursor_utf16 == last_published_cursor_utf16;
     differs_from_model && !is_stale_last_publish
+}
+
+fn should_publish_model_to_ax(
+    ax_text: &str,
+    ax_cursor_utf16: usize,
+    model_text: &str,
+    model_cursor_utf16: usize,
+    accepting_ax_override: bool,
+) -> bool {
+    !accepting_ax_override && (ax_text != model_text || ax_cursor_utf16 != model_cursor_utf16)
 }
 
 fn summarize_text_for_trace(text: &str) -> String {
@@ -2259,6 +2320,39 @@ mod tests {
     }
 
     #[test]
+    fn publish_model_when_ax_is_stale() {
+        assert!(should_publish_model_to_ax(
+            "hello",
+            5,
+            "hello world",
+            11,
+            false,
+        ));
+    }
+
+    #[test]
+    fn skip_publish_while_accepting_external_override() {
+        assert!(!should_publish_model_to_ax(
+            "Hello.",
+            6,
+            "你好.",
+            3,
+            true,
+        ));
+    }
+
+    #[test]
+    fn skip_publish_when_ax_already_matches_model() {
+        assert!(!should_publish_model_to_ax(
+            "synced",
+            6,
+            "synced",
+            6,
+            false,
+        ));
+    }
+
+    #[test]
     fn utf16_slice_supports_multibyte_chars() {
         let text = "ab你好z";
         assert_eq!(
@@ -2467,6 +2561,43 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("debug input bytes were not forwarded to PTY writer");
+    }
+
+    #[test]
+    fn debug_http_replaces_input_line_in_writer() {
+        let addr = reserve_local_addr();
+        let debug = SharedDebugState::new(
+            "test-shell".to_string(),
+            "connected".to_string(),
+            GridSize { cols: 80, rows: 24 },
+        );
+        let sink = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(BufferWriter { sink: sink.clone() })));
+
+        start_debug_http_server_at_addr(debug, Some(writer), addr.clone());
+        wait_for_server(&addr);
+
+        let payload = "replace with this";
+        let response = send_http(
+            &addr,
+            format!(
+                "POST /debug/replace-line HTTP/1.1\r\nHost: {addr}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            ),
+        );
+        assert!(response.contains("input line replaced"));
+
+        let mut expected = Vec::from([0x15]);
+        expected.extend_from_slice(payload.as_bytes());
+        for _ in 0..20 {
+            if sink.lock().as_slice() == expected.as_slice() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("debug replace-line bytes were not forwarded to PTY writer");
     }
 
     fn reserve_local_addr() -> String {
