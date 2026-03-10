@@ -1,0 +1,16 @@
+[package]
+name = "agent_terminal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4" }
+anyhow = "1"
+async-channel = "2"
+gpui = { path = "/Users/oker/Repos/zed/crates/gpui", default-features = false }
+gpui_platform = { path = "/Users/oker/Repos/zed/crates/gpui_platform", default-features = false, features = ["font-kit"] }
+parking_lot = "0.12"
+portable-pty = "0.9.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
