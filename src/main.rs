@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::ops::Range;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -6,15 +7,15 @@ use std::time::Instant;
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::Config;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, StdSyncHandler};
 use anyhow::{Context as _, Result, ensure};
 use async_channel::Receiver;
 use gpui::{
-    App, Bounds, Context, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Render,
-    Subscription, Task, Window, WindowBounds, WindowOptions, black, canvas, div, fill, font, point,
-    prelude::*, px, rgb, rgba, size,
+    App, Bounds, Context, EntityInputHandler, FocusHandle, InputHandler, KeyDownEvent, MouseButton,
+    MouseDownEvent, Pixels, Render, Subscription, Task, UTF16Selection, Window, WindowBounds,
+    WindowOptions, black, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_platform::application;
 use parking_lot::Mutex;
@@ -32,6 +33,7 @@ const TEXT_PADDING_X: Pixels = px(12.0);
 const TEXT_PADDING_Y: Pixels = px(12.0);
 const HEADER_ESTIMATED_HEIGHT: Pixels = px(42.0);
 const DEBUG_HTTP_DEFAULT_ADDR: &str = "127.0.0.1:7878";
+const INPUT_TRACE_ENV: &str = "AGENT_TUI_INPUT_TRACE";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 struct GridSize {
@@ -62,11 +64,29 @@ impl Dimensions for GridSize {
     }
 }
 
-#[derive(Clone)]
-struct NoopListener;
+#[derive(Clone, Default)]
+struct CliOptions {
+    self_check: bool,
+    show_status_bar: bool,
+}
 
-impl EventListener for NoopListener {
-    fn send_event(&self, _event: AlacTermEvent) {}
+#[derive(Clone)]
+struct TitleTrackingListener {
+    title: Arc<Mutex<Option<String>>>,
+}
+
+impl EventListener for TitleTrackingListener {
+    fn send_event(&self, event: AlacTermEvent) {
+        match event {
+            AlacTermEvent::Title(title) => {
+                *self.title.lock() = Some(title);
+            }
+            AlacTermEvent::ResetTitle => {
+                *self.title.lock() = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -91,6 +111,117 @@ struct ScreenSnapshot {
     cells: Vec<Vec<CellSnapshot>>,
     cursor_row: usize,
     cursor_col: usize,
+    alt_screen: bool,
+}
+
+struct AgentTerminalInputHandler {
+    terminal: gpui::Entity<AgentTerminal>,
+    element_bounds: Bounds<Pixels>,
+}
+
+impl AgentTerminalInputHandler {
+    fn new(element_bounds: Bounds<Pixels>, terminal: gpui::Entity<AgentTerminal>) -> Self {
+        Self {
+            terminal,
+            element_bounds,
+        }
+    }
+}
+
+impl InputHandler for AgentTerminalInputHandler {
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        self.terminal.update(cx, |terminal, cx| {
+            terminal.selected_text_range(ignore_disabled_input, window, cx)
+        })
+    }
+
+    fn marked_text_range(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<std::ops::Range<usize>> {
+        self.terminal
+            .update(cx, |terminal, cx| terminal.marked_text_range(window, cx))
+    }
+
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<String> {
+        self.terminal.update(cx, |terminal, cx| {
+            terminal.text_for_range(range_utf16, adjusted_range, window, cx)
+        })
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.terminal.update(cx, |terminal, cx| {
+            terminal.replace_text_in_range(replacement_range, text, window, cx)
+        });
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.terminal.update(cx, |terminal, cx| {
+            terminal.replace_and_mark_text_in_range(
+                range_utf16,
+                new_text,
+                new_selected_range,
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
+        self.terminal
+            .update(cx, |terminal, cx| terminal.unmark_text(window, cx));
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        self.terminal.update(cx, |terminal, cx| {
+            terminal.bounds_for_range(range_utf16, self.element_bounds, window, cx)
+        })
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<usize> {
+        self.terminal.update(cx, |terminal, cx| {
+            terminal.character_index_for_point(point, window, cx)
+        })
+    }
+
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -267,27 +398,38 @@ struct PtySession {
 
 struct AgentTerminal {
     focus_handle: FocusHandle,
-    term: Term<NoopListener>,
+    term: Term<TitleTrackingListener>,
     processor: Processor<StdSyncHandler>,
     grid_size: GridSize,
     snapshot: ScreenSnapshot,
     shell: String,
+    terminal_title: Arc<Mutex<Option<String>>>,
+    show_status_bar: bool,
     master: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     child: Option<Arc<Mutex<Box<dyn Child + Send>>>>,
+    marked_text_range: Option<Range<usize>>,
+    input_trace: bool,
     debug: SharedDebugState,
     _window_bounds_sub: Option<Subscription>,
     _pump_task: Task<Result<()>>,
 }
 
 impl AgentTerminal {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>, cli: CliOptions) -> Self {
         let focus_handle = cx.focus_handle();
         let cell_width = measure_cell_width(window);
         let viewport = window.viewport_size();
-        let grid_size = compute_grid_size(viewport, cell_width);
+        let grid_size = compute_grid_size(viewport, cell_width, cli.show_status_bar);
 
-        let term = Term::new(Config::default(), &grid_size, NoopListener);
+        let terminal_title = Arc::new(Mutex::new(None));
+        let term = Term::new(
+            Config::default(),
+            &grid_size,
+            TitleTrackingListener {
+                title: terminal_title.clone(),
+            },
+        );
         let processor = Processor::<StdSyncHandler>::new();
 
         match PtySession::spawn(grid_size) {
@@ -308,9 +450,13 @@ impl AgentTerminal {
                     grid_size,
                     snapshot: ScreenSnapshot::default(),
                     shell,
+                    terminal_title: terminal_title.clone(),
+                    show_status_bar: cli.show_status_bar,
                     master,
                     writer,
                     child,
+                    marked_text_range: None,
+                    input_trace: is_input_trace_enabled(),
                     debug,
                     _window_bounds_sub: None,
                     _pump_task: Task::ready(Ok(())),
@@ -352,9 +498,13 @@ impl AgentTerminal {
                     grid_size,
                     snapshot: ScreenSnapshot::default(),
                     shell: "<none>".to_string(),
+                    terminal_title: terminal_title.clone(),
+                    show_status_bar: cli.show_status_bar,
                     master: None,
                     writer: None,
                     child: None,
+                    marked_text_range: None,
+                    input_trace: is_input_trace_enabled(),
                     debug,
                     _window_bounds_sub: None,
                     _pump_task: Task::ready(Ok(())),
@@ -382,6 +532,7 @@ impl AgentTerminal {
         let content = self.term.renderable_content();
         let rows = self.grid_size.rows as usize;
         let cols = self.grid_size.cols as usize;
+        let alt_screen = content.mode.contains(TermMode::ALT_SCREEN);
         let mut cells = vec![
             vec![
                 CellSnapshot {
@@ -440,6 +591,7 @@ impl AgentTerminal {
             cells,
             cursor_row: cursor_row.min(rows.saturating_sub(1)),
             cursor_col,
+            alt_screen,
         };
 
         self.debug
@@ -449,7 +601,7 @@ impl AgentTerminal {
     fn sync_grid_to_window(&mut self, window: &mut Window) {
         let cell_width = measure_cell_width(window);
         let viewport = window.viewport_size();
-        let new_grid = compute_grid_size(viewport, cell_width);
+        let new_grid = compute_grid_size(viewport, cell_width, self.show_status_bar);
         self.apply_grid_size(new_grid);
     }
 
@@ -494,6 +646,33 @@ impl AgentTerminal {
         }
     }
 
+    fn write_text_input(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.trace_input(format!(
+            "text-input len={} value={}",
+            text.len(),
+            summarize_text_for_trace(text)
+        ));
+        self.write_bytes(text.as_bytes());
+    }
+
+    fn ime_cursor_bounds(
+        &self,
+        element_bounds: Bounds<Pixels>,
+        window: &mut Window,
+    ) -> Bounds<Pixels> {
+        let cell_width = measure_cell_width(window);
+        let cursor_origin = point(
+            element_bounds.origin.x + TEXT_PADDING_X + self.snapshot.cursor_col as f32 * cell_width,
+            element_bounds.origin.y
+                + TEXT_PADDING_Y
+                + self.snapshot.cursor_row as f32 * LINE_HEIGHT,
+        );
+        Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), LINE_HEIGHT))
+    }
+
     fn on_mouse_down(
         &mut self,
         _event: &MouseDownEvent,
@@ -504,11 +683,47 @@ impl AgentTerminal {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.trace_input(format!(
+            "keydown key={:?} key_char={:?} modifiers={:?}",
+            event.keystroke.key, event.keystroke.key_char, event.keystroke.modifiers
+        ));
+
+        if is_paste_shortcut(&event.keystroke) {
+            self.debug.record_key_event();
+            if let Some(item) = cx.read_from_clipboard()
+                && let Some(text) = item.text()
+            {
+                self.write_text_input(&text);
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        if should_defer_to_text_input(&event.keystroke) {
+            self.trace_input("keydown deferred to text input handler");
+            return;
+        }
+
         if let Some(bytes) = encode_keystroke(&event.keystroke) {
             self.debug.record_key_event();
             self.write_bytes(&bytes);
             cx.stop_propagation();
         }
+    }
+
+    fn trace_input(&self, message: impl AsRef<str>) {
+        if self.input_trace {
+            eprintln!("[input-trace] {}", message.as_ref());
+        }
+    }
+
+    fn window_title(&self) -> String {
+        if let Some(title) = self.terminal_title.lock().clone()
+            && !title.trim().is_empty()
+        {
+            return title;
+        }
+        format!("agent terminal | {}", self.shell)
     }
 }
 
@@ -520,120 +735,238 @@ impl Drop for AgentTerminal {
     }
 }
 
+impl EntityInputHandler for AgentTerminal {
+    fn text_for_range(
+        &mut self,
+        _range: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        *adjusted_range = None;
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        if self.snapshot.alt_screen {
+            None
+        } else {
+            Some(UTF16Selection {
+                range: 0..0,
+                reversed: false,
+            })
+        }
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.marked_text_range.clone()
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.marked_text_range = None;
+        self.trace_input("ime unmark_text");
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked_text_range = None;
+        self.trace_input(format!(
+            "ime replace_text_in_range len={} text={}",
+            text.len(),
+            summarize_text_for_trace(text)
+        ));
+        self.write_text_input(text);
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // IME composing text should not be flushed to PTY until committed by replace_text_in_range.
+        self.trace_input(format!(
+            "ime replace_and_mark_text len={} marked={:?}",
+            new_text.len(),
+            new_selected_range
+        ));
+        self.marked_text_range = if new_text.is_empty() {
+            None
+        } else {
+            Some(new_selected_range.unwrap_or(0..new_text.encode_utf16().count()))
+        };
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        Some(self.ime_cursor_bounds(element_bounds, window))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        true
+    }
+}
+
 impl Render for AgentTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_window_title(&self.window_title());
+
         let snapshot = self.snapshot.clone();
         let focused = self.focus_handle.is_focused(window);
+        let focus_handle = self.focus_handle.clone();
+        let entity = cx.entity();
         let status = self.debug.status_summary();
         let shell = self.shell.clone();
         let note = self.debug.note();
 
-        let title = if let Some(note) = note {
+        let status_line = if let Some(note) = note {
             format!("agent terminal | {} | {} | note: {}", shell, status, note)
         } else {
             format!("agent terminal | {} | {}", shell, status)
         };
 
-        div()
+        let root = div()
             .id("agent-terminal")
             .size_full()
             .bg(rgb(0x0f1115))
             .track_focus(&self.focus_handle)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_key_down(cx.listener(Self::on_key_down))
-            .child(
+            .on_key_down(cx.listener(Self::on_key_down));
+
+        let root = if self.show_status_bar {
+            root.child(
                 div()
                     .w_full()
                     .px_3()
                     .py_2()
                     .bg(rgb(0x171a21))
                     .text_color(rgb(0xa9b1c6))
-                    .child(title),
+                    .font_family("Menlo")
+                    .child(status_line),
             )
-            .child(
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window, cx| {
-                        window.paint_quad(fill(bounds, black()));
+        } else {
+            root
+        };
 
-                        let mono = font("Menlo");
-                        let font_size = FONT_SIZE;
-                        let run_template = gpui::TextRun {
-                            len: 0,
-                            font: mono.clone(),
-                            color: rgb(0xd7dae0).into(),
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
+        root.child(
+            canvas(
+                move |_, _, _| {},
+                move |bounds, _, window, cx| {
+                    window.handle_input(
+                        &focus_handle,
+                        AgentTerminalInputHandler::new(bounds, entity.clone()),
+                        cx,
+                    );
+                    window.paint_quad(fill(bounds, black()));
 
-                        let font_pixels = font_size;
-                        let font_id = window.text_system().resolve_font(&mono);
-                        let cell_width = window
-                            .text_system()
-                            .advance(font_id, font_pixels, 'M')
-                            .map(|advance| advance.width)
-                            .unwrap_or(px(8.0));
+                    let mono = font("Menlo");
+                    let font_size = FONT_SIZE;
+                    let run_template = gpui::TextRun {
+                        len: 0,
+                        font: mono.clone(),
+                        color: rgb(0xd7dae0).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
 
-                        let origin = bounds.origin + point(TEXT_PADDING_X, TEXT_PADDING_Y);
-                        for (row_index, row) in snapshot.cells.iter().enumerate() {
-                            let y = origin.y + row_index as f32 * LINE_HEIGHT;
+                    let font_pixels = font_size;
+                    let font_id = window.text_system().resolve_font(&mono);
+                    let cell_width = window
+                        .text_system()
+                        .advance(font_id, font_pixels, 'M')
+                        .map(|advance| advance.width)
+                        .unwrap_or(px(8.0));
 
-                            for (col_index, cell) in row.iter().enumerate() {
-                                let x = origin.x + col_index as f32 * cell_width;
-                                let cell_origin = point(x, y);
+                    let origin = bounds.origin + point(TEXT_PADDING_X, TEXT_PADDING_Y);
+                    for (row_index, row) in snapshot.cells.iter().enumerate() {
+                        let y = origin.y + row_index as f32 * LINE_HEIGHT;
 
-                                if let Some(bg) = cell.bg {
-                                    window.paint_quad(fill(
-                                        Bounds::new(
-                                            cell_origin,
-                                            size(cell_width.max(px(2.0)), LINE_HEIGHT),
-                                        ),
-                                        bg,
-                                    ));
-                                }
+                        for (col_index, cell) in row.iter().enumerate() {
+                            let x = origin.x + col_index as f32 * cell_width;
+                            let cell_origin = point(x, y);
 
-                                if cell.ch != ' ' {
-                                    let run = gpui::TextRun {
-                                        len: cell.ch.len_utf8(),
-                                        color: cell.fg,
-                                        ..run_template.clone()
-                                    };
-                                    let shaped = window.text_system().shape_line(
-                                        cell.ch.to_string().into(),
-                                        font_pixels,
-                                        &[run],
-                                        Some(cell_width),
-                                    );
-                                    let _ = shaped.paint(
+                            if let Some(bg) = cell.bg {
+                                window.paint_quad(fill(
+                                    Bounds::new(
                                         cell_origin,
-                                        LINE_HEIGHT,
-                                        gpui::TextAlign::Left,
-                                        None,
-                                        window,
-                                        cx,
-                                    );
-                                }
+                                        size(cell_width.max(px(2.0)), LINE_HEIGHT),
+                                    ),
+                                    bg,
+                                ));
+                            }
+
+                            if cell.ch != ' ' {
+                                let run = gpui::TextRun {
+                                    len: cell.ch.len_utf8(),
+                                    color: cell.fg,
+                                    ..run_template.clone()
+                                };
+                                let shaped = window.text_system().shape_line(
+                                    cell.ch.to_string().into(),
+                                    font_pixels,
+                                    &[run],
+                                    Some(cell_width),
+                                );
+                                let _ = shaped.paint(
+                                    cell_origin,
+                                    LINE_HEIGHT,
+                                    gpui::TextAlign::Left,
+                                    None,
+                                    window,
+                                    cx,
+                                );
                             }
                         }
+                    }
 
-                        if focused {
-                            let cursor_origin = point(
-                                origin.x + snapshot.cursor_col as f32 * cell_width,
-                                origin.y + snapshot.cursor_row as f32 * LINE_HEIGHT,
-                            );
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    cursor_origin,
-                                    size(cell_width.max(px(2.0)), LINE_HEIGHT),
-                                ),
-                                rgba(0x3b82f659),
-                            ));
-                        }
-                    },
-                )
-                .size_full(),
+                    if focused {
+                        let cursor_origin = point(
+                            origin.x + snapshot.cursor_col as f32 * cell_width,
+                            origin.y + snapshot.cursor_row as f32 * LINE_HEIGHT,
+                        );
+                        window.paint_quad(fill(
+                            Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), LINE_HEIGHT)),
+                            rgba(0x3b82f659),
+                        ));
+                    }
+                },
             )
+            .size_full(),
+        )
     }
 }
 
@@ -716,9 +1049,18 @@ fn measure_cell_width(window: &mut Window) -> Pixels {
         .unwrap_or(px(8.0))
 }
 
-fn compute_grid_size(viewport: gpui::Size<Pixels>, cell_width: Pixels) -> GridSize {
+fn compute_grid_size(
+    viewport: gpui::Size<Pixels>,
+    cell_width: Pixels,
+    show_status_bar: bool,
+) -> GridSize {
     let mut usable_width = viewport.width - (TEXT_PADDING_X * 2.0);
-    let mut usable_height = viewport.height - HEADER_ESTIMATED_HEIGHT - (TEXT_PADDING_Y * 2.0);
+    let header_height = if show_status_bar {
+        HEADER_ESTIMATED_HEIGHT
+    } else {
+        px(0.0)
+    };
+    let mut usable_height = viewport.height - header_height - (TEXT_PADDING_Y * 2.0);
 
     if usable_width < cell_width {
         usable_width = cell_width;
@@ -873,7 +1215,6 @@ fn text_response(
 
 fn encode_keystroke(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
     let key = keystroke.key.as_str();
-    let ctrl = keystroke.modifiers.control;
     let alt = keystroke.modifiers.alt;
 
     let mut bytes = match key {
@@ -888,14 +1229,7 @@ fn encode_keystroke(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
         "down" => b"\x1b[B".to_vec(),
         "home" => b"\x1b[H".to_vec(),
         "end" => b"\x1b[F".to_vec(),
-        _ if key.len() == 1 => {
-            let mut ch = key.as_bytes()[0];
-            if ctrl {
-                ch = ch.to_ascii_lowercase() & 0x1f;
-            }
-            vec![ch]
-        }
-        _ => return None,
+        _ => encode_printable_keystroke(keystroke)?,
     };
 
     if alt {
@@ -903,6 +1237,118 @@ fn encode_keystroke(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
     }
 
     Some(bytes)
+}
+
+fn encode_printable_keystroke(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
+    let key = keystroke.key.as_str();
+    let ctrl = keystroke.modifiers.control;
+
+    // Reserve platform/function chords for app-level shortcuts such as paste.
+    if keystroke.modifiers.platform || keystroke.modifiers.function {
+        return None;
+    }
+
+    // IME composition in progress (e.g. pinyin typing) should not leak intermediate ASCII
+    // keystrokes into PTY before key_char is committed.
+    if keystroke.is_ime_in_progress() {
+        return None;
+    }
+
+    if ctrl {
+        if key.len() == 1 {
+            let mut ch = key.as_bytes()[0];
+            ch = ch.to_ascii_lowercase() & 0x1f;
+            return Some(vec![ch]);
+        }
+        return None;
+    }
+
+    if let Some(key_char) = keystroke
+        .key_char
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(key_char.as_bytes().to_vec());
+    }
+
+    if key.chars().count() == 1 {
+        return Some(key.as_bytes().to_vec());
+    }
+
+    None
+}
+
+fn should_defer_to_text_input(keystroke: &gpui::Keystroke) -> bool {
+    // On macOS, route printable text keys through NSTextInputClient callbacks
+    // (insertText / setMarkedText) to preserve IME and accessibility behavior.
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+
+    let modifiers = keystroke.modifiers;
+    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+        return false;
+    }
+
+    if is_terminal_control_key_name(keystroke.key.as_str()) {
+        return false;
+    }
+
+    keystroke
+        .key_char
+        .as_ref()
+        .is_some_and(|ch| !ch.is_empty() && !ch.chars().any(|c| c.is_control()))
+}
+
+fn is_terminal_control_key_name(key: &str) -> bool {
+    matches!(
+        key,
+        "enter"
+            | "tab"
+            | "backspace"
+            | "escape"
+            | "left"
+            | "right"
+            | "up"
+            | "down"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
+            | "delete"
+            | "insert"
+    )
+}
+
+fn is_paste_shortcut(keystroke: &gpui::Keystroke) -> bool {
+    let is_v = keystroke.key.eq_ignore_ascii_case("v");
+    let modifiers = keystroke.modifiers;
+    let mac_paste = modifiers.platform && !modifiers.control && is_v;
+    let ctrl_shift_paste = modifiers.control && modifiers.shift && is_v;
+    mac_paste || ctrl_shift_paste
+}
+
+fn is_input_trace_enabled() -> bool {
+    std::env::var(INPUT_TRACE_ENV)
+        .ok()
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+fn summarize_text_for_trace(text: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 24;
+    let mut out = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= MAX_PREVIEW_CHARS {
+            out.push_str("…");
+            break;
+        }
+        out.push(ch);
+    }
+    format!("{out:?}")
 }
 
 fn ansi_bg_to_hsla(
@@ -1070,13 +1516,46 @@ fn run_self_check() -> Result<()> {
         "ctrl-c keystroke encoding mismatch"
     );
 
+    let chinese = gpui::Keystroke {
+        modifiers: gpui::Modifiers::none(),
+        key: "x".to_string(),
+        key_char: Some("你".to_string()),
+    };
+    ensure!(
+        encode_keystroke(&chinese) == Some("你".as_bytes().to_vec()),
+        "chinese ime keystroke encoding mismatch"
+    );
+
+    let ime_in_progress = gpui::Keystroke {
+        modifiers: gpui::Modifiers::none(),
+        key: "a".to_string(),
+        key_char: None,
+    };
+    ensure!(
+        encode_keystroke(&ime_in_progress).is_none(),
+        "ime in-progress keystroke should not emit bytes"
+    );
+
+    let cmd_v = gpui::Keystroke {
+        modifiers: gpui::Modifiers {
+            platform: true,
+            ..gpui::Modifiers::none()
+        },
+        key: "v".to_string(),
+        key_char: Some("v".to_string()),
+    };
+    ensure!(
+        encode_keystroke(&cmd_v).is_none(),
+        "cmd-v should not be forwarded as raw character"
+    );
+
     ensure!(indexed_to_rgb(16) == (0, 0, 0), "indexed color 16 mismatch");
     ensure!(
         indexed_to_rgb(231) == (255, 255, 255),
         "indexed color 231 mismatch"
     );
 
-    let grid = compute_grid_size(size(px(1000.0), px(520.0)), px(8.0));
+    let grid = compute_grid_size(size(px(1000.0), px(520.0)), px(8.0), false);
     ensure!(
         grid.cols >= 80,
         "computed columns too small for 1000px viewport"
@@ -1094,8 +1573,22 @@ fn run_self_check() -> Result<()> {
     Ok(())
 }
 
+fn parse_cli_options() -> CliOptions {
+    let mut options = CliOptions::default();
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--self-check" => options.self_check = true,
+            "--show-status-bar" => options.show_status_bar = true,
+            _ => {}
+        }
+    }
+    options
+}
+
 fn main() {
-    if std::env::args().skip(1).any(|arg| arg == "--self-check") {
+    let cli = parse_cli_options();
+
+    if cli.self_check {
         if let Err(err) = run_self_check() {
             eprintln!("self-check failed: {err:#}");
             std::process::exit(1);
@@ -1103,15 +1596,19 @@ fn main() {
         return;
     }
 
-    application().run(|cx: &mut App| {
+    application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1000.0), px(520.0)), cx);
+        let cli = cli.clone();
         cx.open_window(
             WindowOptions {
                 focus: true,
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| AgentTerminal::new(window, cx)),
+            move |window, cx| {
+                let cli = cli.clone();
+                cx.new(|cx| AgentTerminal::new(window, cx, cli))
+            },
         )
         .expect("failed to open window");
         cx.activate(true);
@@ -1148,6 +1645,171 @@ mod tests {
     }
 
     #[test]
+    fn encode_ime_key_char_supports_chinese() {
+        let keystroke = gpui::Keystroke {
+            modifiers: gpui::Modifiers::none(),
+            key: "x".to_string(),
+            key_char: Some("你".to_string()),
+        };
+        assert_eq!(encode_keystroke(&keystroke), Some("你".as_bytes().to_vec()));
+    }
+
+    #[test]
+    fn encode_alt_with_ime_key_char_prefixes_escape() {
+        let keystroke = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                alt: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "x".to_string(),
+            key_char: Some("你".to_string()),
+        };
+
+        let mut expected = vec![0x1b];
+        expected.extend_from_slice("你".as_bytes());
+        assert_eq!(encode_keystroke(&keystroke), Some(expected));
+    }
+
+    #[test]
+    fn encode_cmd_v_not_forwarded_to_pty() {
+        let keystroke = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "v".to_string(),
+            key_char: Some("v".to_string()),
+        };
+        assert_eq!(encode_keystroke(&keystroke), None);
+    }
+
+    #[test]
+    fn detects_paste_shortcuts() {
+        let cmd_v = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "v".to_string(),
+            key_char: None,
+        };
+        assert!(is_paste_shortcut(&cmd_v));
+
+        let ctrl_shift_v = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                control: true,
+                shift: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "v".to_string(),
+            key_char: None,
+        };
+        assert!(is_paste_shortcut(&ctrl_shift_v));
+    }
+
+    #[test]
+    fn printable_text_keys_defer_to_text_input_on_macos() {
+        let key = gpui::Keystroke {
+            modifiers: gpui::Modifiers::none(),
+            key: "a".to_string(),
+            key_char: Some("a".to_string()),
+        };
+        assert_eq!(should_defer_to_text_input(&key), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn modified_text_keys_do_not_defer_to_text_input() {
+        let key = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                control: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "a".to_string(),
+            key_char: Some("a".to_string()),
+        };
+        assert!(!should_defer_to_text_input(&key));
+    }
+
+    #[test]
+    fn non_text_keys_do_not_defer_to_text_input() {
+        let enter = gpui::Keystroke::parse("enter").expect("parse enter");
+        assert!(!should_defer_to_text_input(&enter));
+    }
+
+    #[test]
+    fn enter_with_newline_key_char_does_not_defer() {
+        let enter = gpui::Keystroke {
+            modifiers: gpui::Modifiers::none(),
+            key: "enter".to_string(),
+            key_char: Some("\n".to_string()),
+        };
+        assert!(!should_defer_to_text_input(&enter));
+    }
+
+    #[test]
+    fn chinese_text_still_defers_to_text_input_on_macos() {
+        let chinese = gpui::Keystroke {
+            modifiers: gpui::Modifiers::none(),
+            key: "a".to_string(),
+            key_char: Some("你".to_string()),
+        };
+        assert_eq!(
+            should_defer_to_text_input(&chinese),
+            cfg!(target_os = "macos")
+        );
+    }
+
+    #[test]
+    fn ime_in_progress_does_not_leak_seed_ascii() {
+        let ime_seed = gpui::Keystroke {
+            modifiers: gpui::Modifiers::none(),
+            key: "a".to_string(),
+            key_char: None,
+        };
+        assert_eq!(encode_keystroke(&ime_seed), None);
+    }
+
+    #[test]
+    fn english_then_ime_commit_does_not_append_stray_a() {
+        let mut stream = Vec::new();
+
+        for ch in "longenglishcommand".chars() {
+            let event = gpui::Keystroke {
+                modifiers: gpui::Modifiers::none(),
+                key: ch.to_string(),
+                key_char: Some(ch.to_string()),
+            };
+            if let Some(bytes) = encode_keystroke(&event) {
+                stream.extend_from_slice(&bytes);
+            }
+        }
+
+        // Start IME composition with seed key 'a': should not emit anything.
+        let ime_seed = gpui::Keystroke {
+            modifiers: gpui::Modifiers::none(),
+            key: "a".to_string(),
+            key_char: None,
+        };
+        if let Some(bytes) = encode_keystroke(&ime_seed) {
+            stream.extend_from_slice(&bytes);
+        }
+
+        // IME commit result.
+        let ime_commit = gpui::Keystroke {
+            modifiers: gpui::Modifiers::none(),
+            key: "a".to_string(),
+            key_char: Some("你好".to_string()),
+        };
+        if let Some(bytes) = encode_keystroke(&ime_commit) {
+            stream.extend_from_slice(&bytes);
+        }
+
+        let text = String::from_utf8(stream).expect("utf8 output");
+        assert_eq!(text, "longenglishcommand你好");
+        assert!(!text.contains("longenglishcommanda你好"));
+    }
+
+    #[test]
     fn indexed_color_cube_edges() {
         assert_eq!(indexed_to_rgb(16), (0, 0, 0));
         assert_eq!(indexed_to_rgb(231), (255, 255, 255));
@@ -1156,11 +1818,11 @@ mod tests {
 
     #[test]
     fn compute_grid_has_sane_minimums() {
-        let tiny = compute_grid_size(size(px(10.0), px(10.0)), px(8.0));
+        let tiny = compute_grid_size(size(px(10.0), px(10.0)), px(8.0), false);
         assert_eq!(tiny.cols, MIN_COLS);
         assert_eq!(tiny.rows, MIN_ROWS);
 
-        let normal = compute_grid_size(size(px(1000.0), px(520.0)), px(8.0));
+        let normal = compute_grid_size(size(px(1000.0), px(520.0)), px(8.0), false);
         assert!(normal.cols >= 80);
         assert!(normal.rows >= 20);
     }
@@ -1184,6 +1846,7 @@ mod tests {
             ],
             cursor_row: 0,
             cursor_col: 0,
+            alt_screen: false,
         };
 
         let lines = snapshot_to_lines(&snapshot);

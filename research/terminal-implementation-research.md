@@ -919,3 +919,178 @@ If work continues, the most valuable next steps are:
    - `terminal_model`
    - `terminal_snapshot`
    - `terminal_element`
+
+## 9. Progress Log (2026-03-10)
+
+This section records the latest validated status. It supersedes older limitation bullets in section 8 where they conflict.
+
+### 9.1 What is now working
+
+- Build and verification baseline:
+  - `cargo check` passes
+  - `cargo test` passes (13 tests)
+  - `cargo run -- --self-check` passes
+- Runtime stability:
+  - fixed startup panic caused by UTF-8 boundary misuse when rendering non-ASCII glyphs (e.g. `➜`)
+- Terminal interaction:
+  - English input works
+  - resize now updates both `Term` and PTY size
+- Observability / debugging:
+  - HTTP debug service added (`/debug/state`, `/debug/screen`, `/debug/input`, `/debug/note`)
+  - runtime counters and status summary exposed in UI and debug API
+- Chinese paste:
+  - pasting Chinese text works (confirmed in runtime)
+
+### 9.2 Key implementation attempts and outcomes
+
+1. Keystroke path update (`key_char` support)
+- Goal: allow IME-committed Unicode text to reach PTY.
+- Outcome: partial success.
+- Added UTF-8 forwarding for `key_char`; added regression tests.
+
+2. IME in-progress filtering
+- Goal: prevent composition seed key leakage (e.g. stray ASCII during composition).
+- Outcome: works for covered event shape.
+- Added guards using `is_ime_in_progress()` and tests for no-leak behavior.
+
+3. Accessibility / IME text input channel
+- Goal: handle platform `insertText`/`setMarkedText` path directly.
+- Outcome: integrated but still not fully solving direct accessibility input in this app.
+- Added GPUI `InputHandler` registration in paint (`window.handle_input(...)`) and minimal `EntityInputHandler` implementation.
+
+4. Paste fallback
+- Goal: provide reliable Chinese text entry path independent of direct IME event behavior.
+- Outcome: success.
+- Added `Cmd+V` (and `Ctrl+Shift+V`) paste handling via clipboard read and PTY write.
+
+### 9.3 Current unresolved issue
+
+- Direct Chinese input via Accessibility API is still not working reliably in this app.
+- User-observed symptom:
+  - using `axcli` (accessibility-based input simulation), Chinese input still fails;
+  - only a single `a` may appear, and no expected Chinese text is committed.
+  - direct key simulation also appears ineffective in current app runtime, e.g.:
+    - `axcli --pid 12462 press Enter`
+    - observed result: terminal did not reliably consume the simulated key event as expected.
+- Current judgment:
+  - paste path is validated and usable;
+  - direct accessibility text-injection path remains a blocker and needs deeper event-trace debugging.
+
+### 9.4 Next debugging focus
+
+1. capture traces with the new runtime switch:
+   - `AGENT_TUI_INPUT_TRACE=1 cargo run`
+   - then replay accessibility inputs (including `axcli`) and collect logs
+2. instrument and log raw key/input events around:
+   - `KeyDownEvent.keystroke` (`key`, `key_char`, modifiers)
+   - `EntityInputHandler::replace_text_in_range`
+   - `EntityInputHandler::replace_and_mark_text_in_range`
+3. capture one full `axcli` reproduction trace and map event order.
+4. verify whether `axcli` emits:
+   - key events only,
+   - `insertText` only,
+   - or mixed composition events.
+5. based on trace, decide whether to:
+   - adapt InputHandler range semantics further, or
+   - add a dedicated text-insert API path for accessibility automation.
+
+### 9.5 Zed comparison notes (2026-03-10)
+
+Source checked:
+
+- `/Users/oker/Repos/zed/crates/terminal_view/src/terminal_element.rs`
+- `/Users/oker/Repos/zed/crates/terminal_view/src/terminal_view.rs`
+- `/Users/oker/Repos/zed/crates/terminal/src/terminal.rs`
+
+Observed behavior in Zed terminal input layer:
+
+- Terminal registers a custom `InputHandler` in paint (`window.handle_input(...)`).
+- `replace_text_in_range` commits text to PTY; `replace_and_mark_text_in_range` only tracks composition text.
+- `text_for_range` returns `None`.
+- `character_index_for_point` returns `None`.
+- `selected_text_range` returns `None` in ALT_SCREEN mode, otherwise `Some(0..0)`.
+- `apple_press_and_hold_enabled` is explicitly `false`.
+
+Applied alignment in this project:
+
+- switched from `ElementInputHandler` default wrapper to custom input handler so `apple_press_and_hold_enabled = false` can be set explicitly.
+- aligned `text_for_range` and `character_index_for_point` return behavior with Zed (`None`).
+- added ALT_SCREEN-aware `selected_text_range` behavior.
+
+Important limitation confirmed:
+
+- If accessibility tooling only delivers plain key events like `keydown key=\"a\" key_char=Some(\"a\")` for Chinese input (without `insertText`/marked-text callbacks), app side cannot reconstruct intended Chinese commit text from that event alone.
+- In that case, reliable automation should use a direct text insertion path (e.g. existing debug HTTP input endpoint) instead of key simulation.
+
+### 9.6 Accessibility-first input routing adjustment (2026-03-10)
+
+To prioritize IME and accessibility compatibility, keyboard handling was changed to:
+
+- macOS printable text keys (`key_char` present, no ctrl/alt/platform/function):
+  - no longer written to PTY directly in `keydown`
+  - are deferred to NSTextInputClient callbacks (`insertText` / `setMarkedText`)
+- control/navigation keys remain in `keydown` terminal encoding path.
+
+Expected effect:
+
+- avoids leaking composition seed letters directly to PTY during IME input.
+- keeps terminal control key behavior unchanged.
+
+Verification after change:
+
+- `cargo check` pass
+- `cargo test` pass (16 tests)
+- `cargo run -- --self-check` pass
+
+### 9.7 Regression root cause and fix (Enter key) (2026-03-10)
+
+Observed regression:
+
+- `Enter` stopped working.
+- Trace showed:
+  - `keydown key="enter" key_char=Some("\n")`
+  - then `keydown deferred to text input handler`.
+
+Root cause:
+
+- The defer predicate only checked whether `key_char` was non-empty.
+- `Enter` carried `key_char = "\n"` in this runtime path, so it was misclassified as printable text and skipped terminal key encoding.
+
+Fix:
+
+- tighten `should_defer_to_text_input(...)`:
+  - do not defer for known terminal control keys (`enter`, `tab`, arrows, etc.)
+  - do not defer when `key_char` contains control characters.
+- keep deferring real printable text so IME/accessibility Chinese input remains supported.
+
+Added regression tests:
+
+- `enter_with_newline_key_char_does_not_defer`
+- `chinese_text_still_defers_to_text_input_on_macos`
+
+Validation:
+
+- `cargo check` pass
+- `cargo test` pass (18 tests)
+- `cargo run -- --self-check` pass
+
+### 9.8 Status bar visibility and window title integration (2026-03-10)
+
+Changes:
+
+- status bar (top line) is now hidden by default.
+- add CLI flag `--show-status-bar` to explicitly show the status bar.
+- when shown, status bar uses monospaced font (`Menlo`).
+- window title bar now reflects current terminal title (OSC title), with shell-based fallback.
+
+Implementation notes:
+
+- added CLI parsing for `--show-status-bar` and existing `--self-check`.
+- grid-size calculation now accounts for whether the status bar is visible.
+- wired terminal title events (`Title` / `ResetTitle`) through `EventListener` and synced them to `window.set_window_title(...)`.
+
+Validation:
+
+- `cargo check` pass
+- `cargo test` pass (18 tests)
+- `cargo run -- --self-check` pass
