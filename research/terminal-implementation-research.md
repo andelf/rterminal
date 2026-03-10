@@ -1074,6 +1074,184 @@ Validation:
 - `cargo test` pass (18 tests)
 - `cargo run -- --self-check` pass
 
+### 9.12 AX input support research and implementation plan (2026-03-11)
+
+Problem summary:
+
+- Current app can receive IME committed text and paste, but `axcli snapshot` still cannot discover editable text nodes under window content.
+- Direct accessibility-based typing reliability depends on text-input callbacks and does not imply a complete AX semantic tree.
+
+What Zed currently shows (as reference, not dependency):
+
+- Accessibility/Voice Control typing is still an open issue in Zed terminal (`#48285`, Open).
+- A Zed maintainer confirmed broader screen-reader support is not complete yet and stated a plan to add accessibility primitives in GPUI first.
+- In current Zed terminal input handler:
+  - `selected_text_range` returns `0..0` in normal terminal mode.
+  - `text_for_range` returns `None`.
+  - This means IME insertion can work while text retrieval for accessibility tooling remains limited.
+
+Relevant platform constraints from Apple APIs:
+
+- `NSTextInputClient` is the required protocol for full input-method cooperation (`insertText`, `setMarkedText`, `selectedRange`, `firstRectForCharacterRange`, `characterIndexForPoint`, etc.).
+- `NSTextInputContext` requires notifying coordinate/content changes (`invalidateCharacterCoordinates`) whenever geometry/selection/text changes outside normal event flow.
+- For custom-drawn controls (not backed by normal NSView widgets), AppKit expects explicit `NSAccessibilityElement` children to expose semantics such as role, value, selection, and frame.
+
+Practical patterns from existing terminal implementations:
+
+- WezTerm implements full `NSTextInputClient` callbacks for IME commit/marked text and cursor rect, but still returns `nil`/`NSNotFound` for some text-query APIs; this is enough for IME placement but not full text accessibility.
+- xterm.js uses two layers:
+  - hidden helper textarea for reliable input/IME path.
+  - separate accessibility tree/live region for discoverability and assistive reading/navigation.
+
+Proposed implementation path for this project (priority-ordered):
+
+1. AX input channel hardening (highest priority, short cycle)
+   - Keep current input-line mirror as source of truth for accessibility editing.
+   - Ensure every user-visible input-line mutation triggers text-input coordinate invalidation.
+   - Keep UTF-16 safe conversions for all external range-based edits.
+   - Acceptance: AX tooling can get/set current command line reliably (including CJK), and Enter/ctrl keys remain correct.
+
+2. Minimal AX semantic node for input line (next milestone)
+   - Expose one dedicated accessibility text element representing current command line.
+   - Provide:
+     - role + label
+     - value / selected text range / number of characters
+     - frame-for-range mapping (cursor-relative)
+   - Post value/selection/focus notifications when state changes.
+   - Acceptance: `axcli snapshot` shows an editable text node under window, not just app/window shell.
+
+3. Optional broader tree coverage (later)
+   - Add structured AX nodes for non-input controls (status/title/debug panels).
+   - Keep terminal output as optional scope; for this product, input assistance remains primary.
+
+Hard parts to control explicitly:
+
+- UTF-8/UTF-16 boundary correctness for CJK and emoji.
+- Event ordering between raw keydown and IME/accessibility text callbacks.
+- Keeping shell line rewrite idempotent when external AX clients modify text rapidly.
+
+Primary references:
+
+- Apple `NSTextInputClient.h` and `NSTextInputContext.h` (Xcode macOS SDK headers).
+- Apple `NSAccessibilityProtocols.h`, `NSAccessibilityElement.h`, `NSAccessibilityPostNotification` docs/comments in AppKit headers.
+- Zed issue and code references:
+  - `#48285` Voice Control typing in terminal (Open)
+  - `#41138` maintainer notes on current accessibility status and AccessKit plan
+  - `crates/terminal_view/src/terminal_element.rs` (`text_for_range -> None`, `selected_text_range -> 0..0`)
+  - `crates/gpui_macos/src/window.rs` (`NSTextInputClient` callback bridge)
+- WezTerm macOS view implementation (`window/src/os/macos/window.rs`)
+- xterm.js `CoreBrowserTerminal.ts` and `AccessibilityManager.ts`
+
+### 9.13 AX discoverable input node (app-level bridge) (2026-03-11)
+
+Goal:
+
+- make window content discoverable by accessibility snapshot tooling (`axcli snapshot`) without patching external `gpui` source.
+
+Implementation:
+
+- add a macOS-only bridge in app code to update native AX metadata on the underlying `NSView`:
+  - container role: `AXGroup` with label `Agent Terminal`
+  - child node: `NSAccessibilityElement` role `AXTextField`, label `Terminal Input Line`
+  - synchronize child value from current `input_line`
+  - synchronize child selected range from `input_cursor_utf16` (best-effort)
+- call bridge during render so AX metadata follows UI/input state updates.
+
+Observed result:
+
+- before: `axcli snapshot` showed window with no discoverable content nodes.
+- after: snapshot includes nested nodes under window:
+  - `group "Agent Terminal"`
+  - `textfield "Terminal Input Line"`
+
+Notes:
+
+- this is a discoverability milestone (AX tree presence), not full external-edit integration.
+- input editing remains primarily routed through existing `NSTextInputClient` + `EntityInputHandler` pipeline.
+
+Validation:
+
+- `cargo check` pass
+- `cargo test` pass (20 tests)
+- `cargo run -- --self-check` pass
+
+### 9.9 Custom terminal-style title bar (Option 2) (2026-03-10)
+
+Implemented:
+
+- switch to transparent system titlebar via `WindowOptions.titlebar.appears_transparent = true`.
+- render in-app custom title bar at top:
+  - full-width drag zone (`WindowControlArea::Drag`)
+  - mac-style traffic-light controls mapped to:
+    - close (`WindowControlArea::Close`)
+    - minimize (`WindowControlArea::Min`)
+    - maximize (`WindowControlArea::Max`)
+  - centered terminal title text (monospace).
+- keep debug/status row optional (`--show-status-bar`) and separate from custom title bar.
+
+Layout behavior:
+
+- terminal grid height now subtracts:
+  - custom title bar height (always)
+  - optional status bar height (only when enabled)
+
+Validation:
+
+- `cargo check` pass
+- `cargo test` pass (18 tests)
+- `cargo run -- --self-check` pass
+
+### 9.10 macOS menu bar wiring (2026-03-10)
+
+Issue:
+
+- App window was running with custom title bar, but macOS top menu bar entries were not explicitly configured.
+
+Change:
+
+- register app menu actions and set app menus through GPUI:
+  - `Agent Terminal` menu
+  - `Services` OS submenu
+  - `Quit Agent Terminal` action
+
+Validation:
+
+- `cargo check` pass
+- `cargo test` pass (18 tests)
+- `cargo run -- --self-check` pass
+
+### 9.11 Accessibility input-line text exposure (2026-03-11)
+
+Goal:
+
+- help accessibility tooling read and modify the current command line input.
+- prioritize input-assistance use case over terminal output reading.
+
+Changes:
+
+- add in-memory mirror for current input line:
+  - `input_line` (text)
+  - `input_cursor_utf16` (cursor position in UTF-16 units)
+- update mirror from user input events:
+  - printable text insertion
+  - backspace/delete
+  - cursor left/right/home/end
+  - Enter/Ctrl-U line clear
+- `InputHandler::text_for_range` now returns current input line content (or requested UTF-16 slice).
+- `selected_text_range` now reports current cursor position instead of fixed `0..0`.
+- `replace_text_in_range(range=Some)` now applies UTF-16 range replacement to the mirrored line and rewrites shell input line (`Ctrl-U` + full line + cursor reposition), enabling external tools to edit current line text.
+
+Scope limitation:
+
+- this focuses on editable input line only.
+- terminal output text remains outside accessibility text exposure by design.
+
+Validation:
+
+- `cargo check` pass
+- `cargo test` pass (20 tests)
+- `cargo run -- --self-check` pass
+
 ### 9.8 Status bar visibility and window title integration (2026-03-10)
 
 Changes:

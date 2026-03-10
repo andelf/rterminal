@@ -1,8 +1,12 @@
+#![allow(unexpected_cfgs)]
+
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+#[cfg(target_os = "macos")]
+use std::{ffi::CStr, os::raw::c_char};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
@@ -13,15 +17,26 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, S
 use anyhow::{Context as _, Result, ensure};
 use async_channel::Receiver;
 use gpui::{
-    App, Bounds, Context, EntityInputHandler, FocusHandle, InputHandler, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, Render, Subscription, Task, UTF16Selection, Window, WindowBounds,
-    WindowOptions, black, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
+    App, Bounds, Context, EntityInputHandler, FocusHandle, InputHandler, KeyDownEvent, Menu,
+    MenuItem, MouseButton, MouseDownEvent, Pixels, Render, Subscription, SystemMenuType, Task,
+    TitlebarOptions, UTF16Selection, Window, WindowBounds, WindowControlArea, WindowOptions,
+    actions, black, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 use gpui_platform::application;
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Serialize;
 use tiny_http::{Header, Response, Server, StatusCode};
+
+#[cfg(target_os = "macos")]
+use cocoa::{
+    base::{YES, id, nil},
+    foundation::{NSRange, NSString, NSUInteger},
+};
+#[cfg(target_os = "macos")]
+use objc::{msg_send, sel, sel_impl};
+#[cfg(target_os = "macos")]
+use raw_window_handle::RawWindowHandle;
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -31,9 +46,116 @@ const FONT_SIZE: Pixels = px(14.0);
 const LINE_HEIGHT: Pixels = px(18.0);
 const TEXT_PADDING_X: Pixels = px(12.0);
 const TEXT_PADDING_Y: Pixels = px(12.0);
-const HEADER_ESTIMATED_HEIGHT: Pixels = px(42.0);
+const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
+const STATUS_BAR_ESTIMATED_HEIGHT: Pixels = px(42.0);
 const DEBUG_HTTP_DEFAULT_ADDR: &str = "127.0.0.1:7878";
 const INPUT_TRACE_ENV: &str = "AGENT_TUI_INPUT_TRACE";
+
+#[derive(Clone, Debug)]
+struct NativeAxInputState {
+    text: String,
+    cursor_utf16: usize,
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+fn autoreleased_nsstring(value: &str) -> id {
+    unsafe {
+        let string = NSString::alloc(nil).init_str(value);
+        msg_send![string, autorelease]
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+fn nsstring_to_rust(value: id) -> Option<String> {
+    if value == nil {
+        return None;
+    }
+    unsafe {
+        let utf8: *const c_char = msg_send![value, UTF8String];
+        if utf8.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr(utf8).to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
+fn sync_native_ax_input_view(
+    window: &Window,
+    input_line: &str,
+    cursor_utf16: usize,
+    last_published_line: &str,
+    last_published_cursor_utf16: usize,
+) -> Option<NativeAxInputState> {
+    let window_handle = match raw_window_handle::HasWindowHandle::window_handle(window) {
+        Ok(handle) => handle,
+        Err(_) => return None,
+    };
+    let RawWindowHandle::AppKit(handle) = window_handle.as_raw() else {
+        return None;
+    };
+    let ns_view = handle.ns_view.as_ptr() as id;
+    let mut override_from_ax = None;
+
+    unsafe {
+        // Keep the focused native view itself text-readable for tools like voice-correct,
+        // which query AXFocusedUIElement -> AXValue/AXSelectedTextRange.
+        let text_role = autoreleased_nsstring("AXTextField");
+        let text_label = autoreleased_nsstring("Terminal Input Line");
+        let identifier = autoreleased_nsstring("agent-terminal-input-line");
+
+        let current_value: id = msg_send![ns_view, accessibilityValue];
+        let current_text = nsstring_to_rust(current_value).unwrap_or_default();
+        let current_range: NSRange = msg_send![ns_view, accessibilitySelectedTextRange];
+        let current_cursor_utf16 =
+            (current_range.location as usize).saturating_add(current_range.length as usize);
+        let current_cursor_utf16 = current_cursor_utf16.min(current_text.encode_utf16().count());
+
+        if should_accept_ax_override(
+            &current_text,
+            current_cursor_utf16,
+            input_line,
+            cursor_utf16,
+            last_published_line,
+            last_published_cursor_utf16,
+        ) {
+            override_from_ax = Some(NativeAxInputState {
+                text: current_text,
+                cursor_utf16: current_cursor_utf16,
+            });
+        }
+
+        let _: () = msg_send![ns_view, setAccessibilityElement: YES];
+        let _: () = msg_send![ns_view, setAccessibilityRole: text_role];
+        let _: () = msg_send![ns_view, setAccessibilityLabel: text_label];
+        let _: () = msg_send![ns_view, setAccessibilityIdentifier: identifier];
+        if override_from_ax.is_none() {
+            let value = autoreleased_nsstring(input_line);
+            let cursor_range = NSRange {
+                location: cursor_utf16 as NSUInteger,
+                length: 0,
+            };
+            let _: () = msg_send![ns_view, setAccessibilityValue: value];
+            let _: () = msg_send![ns_view, setAccessibilitySelectedTextRange: cursor_range];
+        }
+    }
+
+    override_from_ax
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sync_native_ax_input_view(
+    _window: &Window,
+    _input_line: &str,
+    _cursor_utf16: usize,
+    _last_published_line: &str,
+    _last_published_cursor_utf16: usize,
+) -> Option<NativeAxInputState> {
+    None
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 struct GridSize {
@@ -69,6 +191,8 @@ struct CliOptions {
     self_check: bool,
     show_status_bar: bool,
 }
+
+actions!(agent_tui_menu, [QuitApp]);
 
 #[derive(Clone)]
 struct TitleTrackingListener {
@@ -408,7 +532,11 @@ struct AgentTerminal {
     master: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     child: Option<Arc<Mutex<Box<dyn Child + Send>>>>,
+    input_line: String,
+    input_cursor_utf16: usize,
     marked_text_range: Option<Range<usize>>,
+    last_ax_published_line: String,
+    last_ax_published_cursor_utf16: usize,
     input_trace: bool,
     debug: SharedDebugState,
     _window_bounds_sub: Option<Subscription>,
@@ -455,7 +583,11 @@ impl AgentTerminal {
                     master,
                     writer,
                     child,
+                    input_line: String::new(),
+                    input_cursor_utf16: 0,
                     marked_text_range: None,
+                    last_ax_published_line: String::new(),
+                    last_ax_published_cursor_utf16: 0,
                     input_trace: is_input_trace_enabled(),
                     debug,
                     _window_bounds_sub: None,
@@ -503,7 +635,11 @@ impl AgentTerminal {
                     master: None,
                     writer: None,
                     child: None,
+                    input_line: String::new(),
+                    input_cursor_utf16: 0,
                     marked_text_range: None,
+                    last_ax_published_line: String::new(),
+                    last_ax_published_cursor_utf16: 0,
                     input_trace: is_input_trace_enabled(),
                     debug,
                     _window_bounds_sub: None,
@@ -658,6 +794,160 @@ impl AgentTerminal {
         self.write_bytes(text.as_bytes());
     }
 
+    fn input_line_len_utf16(&self) -> usize {
+        self.input_line.encode_utf16().count()
+    }
+
+    fn clamp_input_cursor(&mut self) {
+        self.input_cursor_utf16 = self.input_cursor_utf16.min(self.input_line_len_utf16());
+    }
+
+    fn insert_input_text_at_cursor(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        self.clamp_input_cursor();
+        let cursor_byte = utf16_to_byte_index(&self.input_line, self.input_cursor_utf16);
+        self.input_line.insert_str(cursor_byte, text);
+        self.input_cursor_utf16 += text.encode_utf16().count();
+    }
+
+    fn backspace_input_char(&mut self) {
+        self.clamp_input_cursor();
+        if self.input_cursor_utf16 == 0 {
+            return;
+        }
+
+        let cursor_byte = utf16_to_byte_index(&self.input_line, self.input_cursor_utf16);
+        let Some((start_byte, removed)) = self.input_line[..cursor_byte].char_indices().last()
+        else {
+            return;
+        };
+        self.input_line.replace_range(start_byte..cursor_byte, "");
+        self.input_cursor_utf16 = self.input_cursor_utf16.saturating_sub(removed.len_utf16());
+    }
+
+    fn delete_input_char_at_cursor(&mut self) {
+        self.clamp_input_cursor();
+        let cursor_byte = utf16_to_byte_index(&self.input_line, self.input_cursor_utf16);
+        let Some(ch) = self.input_line[cursor_byte..].chars().next() else {
+            return;
+        };
+        let end_byte = cursor_byte + ch.len_utf8();
+        self.input_line.replace_range(cursor_byte..end_byte, "");
+    }
+
+    fn move_input_cursor_left(&mut self) {
+        self.clamp_input_cursor();
+        if self.input_cursor_utf16 == 0 {
+            return;
+        }
+
+        let cursor_byte = utf16_to_byte_index(&self.input_line, self.input_cursor_utf16);
+        if let Some((_, ch)) = self.input_line[..cursor_byte].char_indices().last() {
+            self.input_cursor_utf16 = self.input_cursor_utf16.saturating_sub(ch.len_utf16());
+        } else {
+            self.input_cursor_utf16 = 0;
+        }
+    }
+
+    fn move_input_cursor_right(&mut self) {
+        self.clamp_input_cursor();
+        let len = self.input_line_len_utf16();
+        if self.input_cursor_utf16 >= len {
+            return;
+        }
+
+        let cursor_byte = utf16_to_byte_index(&self.input_line, self.input_cursor_utf16);
+        if let Some(ch) = self.input_line[cursor_byte..].chars().next() {
+            self.input_cursor_utf16 += ch.len_utf16();
+        } else {
+            self.input_cursor_utf16 = len;
+        }
+    }
+
+    fn clear_input_line(&mut self) {
+        self.input_line.clear();
+        self.input_cursor_utf16 = 0;
+    }
+
+    fn apply_terminal_bytes_to_input_line(&mut self, bytes: &[u8]) {
+        match bytes {
+            b"\r" => self.clear_input_line(),
+            [0x7f] => self.backspace_input_char(),
+            [0x15] => self.clear_input_line(), // Ctrl-U clears current line in common shells.
+            b"\x1b[D" => self.move_input_cursor_left(),
+            b"\x1b[C" => self.move_input_cursor_right(),
+            b"\x1b[H" => self.input_cursor_utf16 = 0,
+            b"\x1b[F" => self.input_cursor_utf16 = self.input_line_len_utf16(),
+            b"\x1b[3~" => self.delete_input_char_at_cursor(),
+            _ => {
+                if bytes.first() == Some(&0x1b) {
+                    return;
+                }
+
+                if let Ok(text) = std::str::from_utf8(bytes)
+                    && !text.chars().any(char::is_control)
+                {
+                    self.insert_input_text_at_cursor(text);
+                }
+            }
+        }
+    }
+
+    fn replace_input_range_utf16(&mut self, range: Range<usize>, text: &str) {
+        let len = self.input_line_len_utf16();
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        replace_range_utf16(&mut self.input_line, start..end, text);
+        self.input_cursor_utf16 = start + text.encode_utf16().count();
+        self.clamp_input_cursor();
+    }
+
+    fn rewrite_terminal_input_line(&mut self) {
+        self.write_bytes(&[0x15]); // Ctrl-U clears shell input line.
+        if !self.input_line.is_empty() {
+            let line = self.input_line.clone();
+            self.write_bytes(line.as_bytes());
+        }
+
+        let tail = self
+            .input_line_len_utf16()
+            .saturating_sub(self.input_cursor_utf16);
+        for _ in 0..tail {
+            self.write_bytes(b"\x1b[D");
+        }
+    }
+
+    fn current_input_line_text_for_range(
+        &self,
+        range: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+    ) -> String {
+        let len = self.input_line_len_utf16();
+        if len == 0 {
+            *adjusted_range = Some(0..0);
+            return String::new();
+        }
+
+        if range.start >= range.end || range.start >= len {
+            *adjusted_range = Some(0..len);
+            return self.input_line.clone();
+        }
+
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+        *adjusted_range = Some(start..end);
+        utf16_substring(&self.input_line, start..end).unwrap_or_default()
+    }
+
     fn ime_cursor_bounds(
         &self,
         element_bounds: Bounds<Pixels>,
@@ -688,11 +978,21 @@ impl AgentTerminal {
             event.keystroke.key, event.keystroke.key_char, event.keystroke.modifiers
         ));
 
+        if is_select_all_shortcut(&event.keystroke) {
+            self.debug.record_key_event();
+            self.clear_input_line();
+            self.write_bytes(&[0x15]); // Ctrl-U clears shell input line.
+            self.trace_input("keydown cmd-a clear current input line");
+            cx.stop_propagation();
+            return;
+        }
+
         if is_paste_shortcut(&event.keystroke) {
             self.debug.record_key_event();
             if let Some(item) = cx.read_from_clipboard()
                 && let Some(text) = item.text()
             {
+                self.insert_input_text_at_cursor(&text);
                 self.write_text_input(&text);
             }
             cx.stop_propagation();
@@ -706,6 +1006,7 @@ impl AgentTerminal {
 
         if let Some(bytes) = encode_keystroke(&event.keystroke) {
             self.debug.record_key_event();
+            self.apply_terminal_bytes_to_input_line(&bytes);
             self.write_bytes(&bytes);
             cx.stop_propagation();
         }
@@ -725,6 +1026,29 @@ impl AgentTerminal {
         }
         format!("agent terminal | {}", self.shell)
     }
+
+    fn apply_external_ax_input_state(&mut self, state: NativeAxInputState) -> bool {
+        if self.snapshot.alt_screen {
+            return false;
+        }
+
+        let cursor_utf16 = state.cursor_utf16.min(state.text.encode_utf16().count());
+        if self.input_line == state.text && self.input_cursor_utf16 == cursor_utf16 {
+            return false;
+        }
+
+        self.trace_input(format!(
+            "ax override text={} cursor_utf16={}",
+            summarize_text_for_trace(&state.text),
+            cursor_utf16
+        ));
+
+        self.input_line = state.text;
+        self.input_cursor_utf16 = cursor_utf16;
+        self.marked_text_range = None;
+        self.rewrite_terminal_input_line();
+        true
+    }
 }
 
 impl Drop for AgentTerminal {
@@ -738,13 +1062,12 @@ impl Drop for AgentTerminal {
 impl EntityInputHandler for AgentTerminal {
     fn text_for_range(
         &mut self,
-        _range: Range<usize>,
+        range: Range<usize>,
         adjusted_range: &mut Option<Range<usize>>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        *adjusted_range = None;
-        None
+        Some(self.current_input_line_text_for_range(range, adjusted_range))
     }
 
     fn selected_text_range(
@@ -756,8 +1079,9 @@ impl EntityInputHandler for AgentTerminal {
         if self.snapshot.alt_screen {
             None
         } else {
+            self.clamp_input_cursor();
             Some(UTF16Selection {
-                range: 0..0,
+                range: self.input_cursor_utf16..self.input_cursor_utf16,
                 reversed: false,
             })
         }
@@ -779,7 +1103,7 @@ impl EntityInputHandler for AgentTerminal {
 
     fn replace_text_in_range(
         &mut self,
-        _range: Option<Range<usize>>,
+        range: Option<Range<usize>>,
         text: &str,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -790,7 +1114,14 @@ impl EntityInputHandler for AgentTerminal {
             text.len(),
             summarize_text_for_trace(text)
         ));
-        self.write_text_input(text);
+
+        if let Some(range) = range {
+            self.replace_input_range_utf16(range, text);
+            self.rewrite_terminal_input_line();
+        } else {
+            self.insert_input_text_at_cursor(text);
+            self.write_text_input(text);
+        }
         cx.notify();
     }
 
@@ -843,6 +1174,20 @@ impl EntityInputHandler for AgentTerminal {
 impl Render for AgentTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_window_title(&self.window_title());
+        if let Some(state) = sync_native_ax_input_view(
+            window,
+            &self.input_line,
+            self.input_cursor_utf16,
+            &self.last_ax_published_line,
+            self.last_ax_published_cursor_utf16,
+        )
+            && self.apply_external_ax_input_state(state)
+        {
+            cx.notify();
+        } else {
+            self.last_ax_published_line = self.input_line.clone();
+            self.last_ax_published_cursor_utf16 = self.input_cursor_utf16;
+        }
 
         let snapshot = self.snapshot.clone();
         let focused = self.focus_handle.is_focused(window);
@@ -851,6 +1196,12 @@ impl Render for AgentTerminal {
         let status = self.debug.status_summary();
         let shell = self.shell.clone();
         let note = self.debug.note();
+        let terminal_title = self
+            .terminal_title
+            .lock()
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| shell.clone());
 
         let status_line = if let Some(note) = note {
             format!("agent terminal | {} | {} | note: {}", shell, status, note)
@@ -864,7 +1215,28 @@ impl Render for AgentTerminal {
             .bg(rgb(0x0f1115))
             .track_focus(&self.focus_handle)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_key_down(cx.listener(Self::on_key_down));
+            .on_key_down(cx.listener(Self::on_key_down))
+            .child(
+                div()
+                    .w_full()
+                    .h(CUSTOM_TITLE_BAR_HEIGHT)
+                    .px_3()
+                    .bg(rgb(0x171a21))
+                    .window_control_area(WindowControlArea::Drag)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().w(px(52.0)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(rgb(0xa9b1c6))
+                            .font_family("Menlo")
+                            .text_center()
+                            .child(terminal_title),
+                    )
+                    .child(div().w(px(52.0))),
+            );
 
         let root = if self.show_status_bar {
             root.child(
@@ -1055,12 +1427,13 @@ fn compute_grid_size(
     show_status_bar: bool,
 ) -> GridSize {
     let mut usable_width = viewport.width - (TEXT_PADDING_X * 2.0);
-    let header_height = if show_status_bar {
-        HEADER_ESTIMATED_HEIGHT
+    let status_height = if show_status_bar {
+        STATUS_BAR_ESTIMATED_HEIGHT
     } else {
         px(0.0)
     };
-    let mut usable_height = viewport.height - header_height - (TEXT_PADDING_Y * 2.0);
+    let mut usable_height =
+        viewport.height - CUSTOM_TITLE_BAR_HEIGHT - status_height - (TEXT_PADDING_Y * 2.0);
 
     if usable_width < cell_width {
         usable_width = cell_width;
@@ -1087,6 +1460,37 @@ fn snapshot_to_lines(snapshot: &ScreenSnapshot) -> Vec<String> {
             line
         })
         .collect()
+}
+
+fn utf16_to_byte_index(text: &str, utf16_index: usize) -> usize {
+    if utf16_index == 0 {
+        return 0;
+    }
+
+    let mut offset = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        let next_offset = offset + ch.len_utf16();
+        if next_offset > utf16_index {
+            return byte_idx;
+        }
+        if next_offset == utf16_index {
+            return byte_idx + ch.len_utf8();
+        }
+        offset = next_offset;
+    }
+    text.len()
+}
+
+fn utf16_substring(text: &str, range: Range<usize>) -> Option<String> {
+    let start = utf16_to_byte_index(text, range.start);
+    let end = utf16_to_byte_index(text, range.end);
+    text.get(start..end).map(ToString::to_string)
+}
+
+fn replace_range_utf16(text: &mut String, range: Range<usize>, replacement: &str) {
+    let start = utf16_to_byte_index(text, range.start);
+    let end = utf16_to_byte_index(text, range.end);
+    text.replace_range(start..end, replacement);
 }
 
 fn start_debug_http_server(
@@ -1328,6 +1732,18 @@ fn is_paste_shortcut(keystroke: &gpui::Keystroke) -> bool {
     mac_paste || ctrl_shift_paste
 }
 
+fn is_select_all_shortcut(keystroke: &gpui::Keystroke) -> bool {
+    let is_a = keystroke.key.eq_ignore_ascii_case("a");
+    let modifiers = keystroke.modifiers;
+    cfg!(target_os = "macos")
+        && modifiers.platform
+        && !modifiers.control
+        && !modifiers.alt
+        && !modifiers.shift
+        && !modifiers.function
+        && is_a
+}
+
 fn is_input_trace_enabled() -> bool {
     std::env::var(INPUT_TRACE_ENV)
         .ok()
@@ -1336,6 +1752,20 @@ fn is_input_trace_enabled() -> bool {
             value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
         })
         .unwrap_or(false)
+}
+
+fn should_accept_ax_override(
+    ax_text: &str,
+    ax_cursor_utf16: usize,
+    model_text: &str,
+    model_cursor_utf16: usize,
+    last_published_text: &str,
+    last_published_cursor_utf16: usize,
+) -> bool {
+    let differs_from_model = ax_text != model_text || ax_cursor_utf16 != model_cursor_utf16;
+    let is_stale_last_publish =
+        ax_text == last_published_text && ax_cursor_utf16 == last_published_cursor_utf16;
+    differs_from_model && !is_stale_last_publish
 }
 
 fn summarize_text_for_trace(text: &str) -> String {
@@ -1573,6 +2003,10 @@ fn run_self_check() -> Result<()> {
     Ok(())
 }
 
+fn quit_app(_: &QuitApp, cx: &mut App) {
+    cx.quit();
+}
+
 fn parse_cli_options() -> CliOptions {
     let mut options = CliOptions::default();
     for arg in std::env::args().skip(1) {
@@ -1597,12 +2031,27 @@ fn main() {
     }
 
     application().run(move |cx: &mut App| {
+        cx.on_action(quit_app);
+        cx.set_menus(vec![Menu {
+            name: "Agent Terminal".into(),
+            items: vec![
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Quit Agent Terminal", QuitApp),
+            ],
+        }]);
+
         let bounds = Bounds::centered(None, size(px(1000.0), px(520.0)), cx);
         let cli = cli.clone();
         cx.open_window(
             WindowOptions {
                 focus: true,
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("agent terminal".into()),
+                    appears_transparent: true,
+                    traffic_light_position: None,
+                }),
                 ..Default::default()
             },
             move |window, cx| {
@@ -1708,6 +2157,43 @@ mod tests {
     }
 
     #[test]
+    fn detects_select_all_shortcut() {
+        let cmd_a = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "a".to_string(),
+            key_char: None,
+        };
+        assert_eq!(is_select_all_shortcut(&cmd_a), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn select_all_shortcut_rejects_non_target_combos() {
+        let ctrl_a = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                control: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "a".to_string(),
+            key_char: None,
+        };
+        assert!(!is_select_all_shortcut(&ctrl_a));
+
+        let cmd_shift_a = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                shift: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "a".to_string(),
+            key_char: None,
+        };
+        assert!(!is_select_all_shortcut(&cmd_shift_a));
+    }
+
+    #[test]
     fn printable_text_keys_defer_to_text_input_on_macos() {
         let key = gpui::Keystroke {
             modifiers: gpui::Modifiers::none(),
@@ -1734,6 +2220,63 @@ mod tests {
     fn non_text_keys_do_not_defer_to_text_input() {
         let enter = gpui::Keystroke::parse("enter").expect("parse enter");
         assert!(!should_defer_to_text_input(&enter));
+    }
+
+    #[test]
+    fn ax_override_rejects_stale_last_published_value() {
+        assert!(!should_accept_ax_override(
+            "ab",
+            2,
+            "abc",
+            3,
+            "ab",
+            2,
+        ));
+    }
+
+    #[test]
+    fn ax_override_accepts_external_value_change() {
+        assert!(should_accept_ax_override(
+            "Test content.",
+            13,
+            "测试内容.",
+            5,
+            "测试内容.",
+            5,
+        ));
+    }
+
+    #[test]
+    fn ax_override_rejects_same_model_state() {
+        assert!(!should_accept_ax_override(
+            "hello",
+            5,
+            "hello",
+            5,
+            "hello",
+            5,
+        ));
+    }
+
+    #[test]
+    fn utf16_slice_supports_multibyte_chars() {
+        let text = "ab你好z";
+        assert_eq!(
+            utf16_substring(text, 2..3).expect("slice"),
+            "你".to_string()
+        );
+        assert_eq!(
+            utf16_substring(text, 2..6).expect("slice"),
+            "你好z".to_string()
+        );
+    }
+
+    #[test]
+    fn replace_utf16_range_supports_multibyte_chars() {
+        let mut text = "abc你好".to_string();
+        // Replace "你好" with "世界" by UTF-16 offsets.
+        replace_range_utf16(&mut text, 3..5, "世界");
+        assert_eq!(text, "abc世界");
     }
 
     #[test]
