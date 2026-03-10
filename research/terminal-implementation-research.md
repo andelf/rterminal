@@ -1294,3 +1294,30 @@ Validation:
 - `cargo check` pass
 - `cargo test` pass (new unit test `debug_http_replaces_input_line_in_writer`)
 - `cargo run -- --self-check` pass
+
+### 9.13 Indexed palette overrides and configurable font family (2026-03-11)
+
+Goals:
+
+- support dynamic indexed palette overrides (e.g. OSC 4 updates from terminal apps).
+- allow setting terminal font family via command-line argument.
+
+Changes:
+
+- color mapping:
+  - `AnsiColor::Indexed(index)` now prefers terminal runtime palette (`colors[index]`) when present.
+  - falls back to built-in 0..255 mapping only when no runtime override exists.
+- CLI:
+  - add `--font-family <name>`
+  - add `--font-family=<name>`
+  - default remains `Menlo`
+- rendering:
+  - terminal text shaping uses configured font family
+  - title bar and optional status bar font family also use configured value
+  - cell width measurement now uses configured font family
+
+Validation:
+
+- `cargo check` pass
+- `cargo test` pass (new tests for indexed override and CLI parsing)
+- `cargo run -- --self-check` pass

@@ -13,7 +13,9 @@ use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, TermMode};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{
+    Color as AnsiColor, CursorShape, NamedColor, Processor, StdSyncHandler,
+};
 use anyhow::{Context as _, Result, ensure};
 use async_channel::Receiver;
 use gpui::{
@@ -202,10 +204,21 @@ impl Dimensions for GridSize {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct CliOptions {
     self_check: bool,
     show_status_bar: bool,
+    font_family: String,
+}
+
+impl Default for CliOptions {
+    fn default() -> Self {
+        Self {
+            self_check: false,
+            show_status_bar: false,
+            font_family: "Menlo".to_string(),
+        }
+    }
 }
 
 actions!(agent_tui_menu, [QuitApp]);
@@ -234,6 +247,7 @@ struct CellSnapshot {
     ch: char,
     fg: gpui::Hsla,
     bg: Option<gpui::Hsla>,
+    width_cols: u8,
 }
 
 impl Default for CellSnapshot {
@@ -242,6 +256,7 @@ impl Default for CellSnapshot {
             ch: ' ',
             fg: gpui::Hsla::default(),
             bg: None,
+            width_cols: 1,
         }
     }
 }
@@ -251,6 +266,7 @@ struct ScreenSnapshot {
     cells: Vec<Vec<CellSnapshot>>,
     cursor_row: usize,
     cursor_col: usize,
+    cursor_visible: bool,
     alt_screen: bool,
 }
 
@@ -545,6 +561,7 @@ struct AgentTerminal {
     shell: String,
     terminal_title: Arc<Mutex<Option<String>>>,
     show_status_bar: bool,
+    font_family: String,
     master: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     child: Option<Arc<Mutex<Box<dyn Child + Send>>>>,
@@ -562,7 +579,7 @@ struct AgentTerminal {
 impl AgentTerminal {
     fn new(window: &mut Window, cx: &mut Context<Self>, cli: CliOptions) -> Self {
         let focus_handle = cx.focus_handle();
-        let cell_width = measure_cell_width(window);
+        let cell_width = measure_cell_width(window, &cli.font_family);
         let viewport = window.viewport_size();
         let grid_size = compute_grid_size(viewport, cell_width, cli.show_status_bar);
 
@@ -575,103 +592,79 @@ impl AgentTerminal {
             },
         );
         let processor = Processor::<StdSyncHandler>::new();
-
-        match PtySession::spawn(grid_size) {
+        let (shell, master, writer, child, output_rx, debug) = match PtySession::spawn(grid_size) {
             Ok(session) => {
                 let shell = session.shell.clone();
-                let master = Some(session.master);
-                let writer = Some(session.writer);
-                let child = Some(session.child);
-                let rx = session.output_rx;
                 let debug =
                     SharedDebugState::new(shell.clone(), "connected".to_string(), grid_size);
-                start_debug_http_server(debug.clone(), writer.clone());
-
-                let mut this = Self {
-                    focus_handle,
-                    term,
-                    processor,
-                    grid_size,
-                    snapshot: ScreenSnapshot::default(),
+                (
                     shell,
-                    terminal_title: terminal_title.clone(),
-                    show_status_bar: cli.show_status_bar,
-                    master,
-                    writer,
-                    child,
-                    input_line: String::new(),
-                    input_cursor_utf16: 0,
-                    marked_text_range: None,
-                    last_ax_published_line: String::new(),
-                    last_ax_published_cursor_utf16: 0,
-                    input_trace: is_input_trace_enabled(),
+                    Some(session.master),
+                    Some(session.writer),
+                    Some(session.child),
+                    Some(session.output_rx),
                     debug,
-                    _window_bounds_sub: None,
-                    _pump_task: Task::ready(Ok(())),
-                };
-
-                this.refresh_snapshot();
-                this._window_bounds_sub =
-                    Some(cx.observe_window_bounds(window, |this, window, cx| {
-                        this.sync_grid_to_window(window);
-                        cx.notify();
-                    }));
-                this.sync_grid_to_window(window);
-
-                this._pump_task = cx.spawn(async move |this, cx| {
-                    while let Ok(bytes) = rx.recv().await {
-                        this.update(cx, |this, cx| {
-                            this.ingest(&bytes);
-                            cx.notify();
-                        })?;
-                    }
-                    Ok(())
-                });
-
-                this
+                )
             }
             Err(err) => {
-                let debug = SharedDebugState::new(
-                    "<none>".to_string(),
-                    format!("failed to start shell: {err:#}"),
-                    grid_size,
-                );
-                debug.set_error(format!("failed to start shell: {err:#}"));
-                start_debug_http_server(debug.clone(), None);
-
-                let mut this = Self {
-                    focus_handle,
-                    term,
-                    processor,
-                    grid_size,
-                    snapshot: ScreenSnapshot::default(),
-                    shell: "<none>".to_string(),
-                    terminal_title: terminal_title.clone(),
-                    show_status_bar: cli.show_status_bar,
-                    master: None,
-                    writer: None,
-                    child: None,
-                    input_line: String::new(),
-                    input_cursor_utf16: 0,
-                    marked_text_range: None,
-                    last_ax_published_line: String::new(),
-                    last_ax_published_cursor_utf16: 0,
-                    input_trace: is_input_trace_enabled(),
-                    debug,
-                    _window_bounds_sub: None,
-                    _pump_task: Task::ready(Ok(())),
-                };
-
-                this.refresh_snapshot();
-                this._window_bounds_sub =
-                    Some(cx.observe_window_bounds(window, |this, window, cx| {
-                        this.sync_grid_to_window(window);
-                        cx.notify();
-                    }));
-                this.sync_grid_to_window(window);
-                this
+                let message = format!("failed to start shell: {err:#}");
+                let debug = SharedDebugState::new("<none>".to_string(), message.clone(), grid_size);
+                debug.set_error(message);
+                (String::from("<none>"), None, None, None, None, debug)
             }
+        };
+
+        start_debug_http_server(debug.clone(), writer.clone());
+
+        let mut this = Self {
+            focus_handle,
+            term,
+            processor,
+            grid_size,
+            snapshot: ScreenSnapshot::default(),
+            shell,
+            terminal_title: terminal_title.clone(),
+            show_status_bar: cli.show_status_bar,
+            font_family: cli.font_family.clone(),
+            master,
+            writer,
+            child,
+            input_line: String::new(),
+            input_cursor_utf16: 0,
+            marked_text_range: None,
+            last_ax_published_line: String::new(),
+            last_ax_published_cursor_utf16: 0,
+            input_trace: is_input_trace_enabled(),
+            debug,
+            _window_bounds_sub: None,
+            _pump_task: Task::ready(Ok(())),
+        };
+
+        this.refresh_snapshot();
+        this._window_bounds_sub = Some(cx.observe_window_bounds(window, |this, window, cx| {
+            this.sync_grid_to_window(window);
+            cx.notify();
+        }));
+        this.sync_grid_to_window(window);
+
+        if let Some(rx) = output_rx {
+            this._pump_task = cx.spawn(async move |this, cx| {
+                while let Ok(bytes) = rx.recv().await {
+                    this.update(cx, |this, cx| {
+                        this.ingest(&bytes);
+                        cx.notify();
+                    })?;
+                }
+                let _ = this.update(cx, |this, cx| {
+                    this.debug
+                        .set_note(Some("shell exited, closing application".to_string()));
+                    cx.quit();
+                });
+                Ok(())
+            });
         }
+
+        this
     }
 
     fn ingest(&mut self, bytes: &[u8]) {
@@ -696,6 +689,7 @@ impl AgentTerminal {
                         true,
                     ),
                     bg: None,
+                    width_cols: 1,
                 };
                 cols
             ];
@@ -732,6 +726,7 @@ impl AgentTerminal {
                 },
                 fg: ansi_to_hsla(fg, content.colors, indexed.cell.flags, true),
                 bg: ansi_bg_to_hsla(bg, content.colors),
+                width_cols: cell_display_width_cols(indexed.cell.flags),
             };
         }
 
@@ -743,6 +738,7 @@ impl AgentTerminal {
             cells,
             cursor_row: cursor_row.min(rows.saturating_sub(1)),
             cursor_col,
+            cursor_visible: cursor.shape != CursorShape::Hidden,
             alt_screen,
         };
 
@@ -751,7 +747,7 @@ impl AgentTerminal {
     }
 
     fn sync_grid_to_window(&mut self, window: &mut Window) {
-        let cell_width = measure_cell_width(window);
+        let cell_width = measure_cell_width(window, &self.font_family);
         let viewport = window.viewport_size();
         let new_grid = compute_grid_size(viewport, cell_width, self.show_status_bar);
         self.apply_grid_size(new_grid);
@@ -969,7 +965,7 @@ impl AgentTerminal {
         element_bounds: Bounds<Pixels>,
         window: &mut Window,
     ) -> Bounds<Pixels> {
-        let cell_width = measure_cell_width(window);
+        let cell_width = measure_cell_width(window, &self.font_family);
         let cursor_origin = point(
             element_bounds.origin.x + TEXT_PADDING_X + self.snapshot.cursor_col as f32 * cell_width,
             element_bounds.origin.y
@@ -1215,6 +1211,7 @@ impl Render for AgentTerminal {
         let entity = cx.entity();
         let status = self.debug.status_summary();
         let shell = self.shell.clone();
+        let font_family = self.font_family.clone();
         let note = self.debug.note();
         let terminal_title = self
             .terminal_title
@@ -1251,7 +1248,7 @@ impl Render for AgentTerminal {
                         div()
                             .flex_1()
                             .text_color(rgb(0xa9b1c6))
-                            .font_family("Menlo")
+                            .font_family(font_family.clone())
                             .text_center()
                             .child(terminal_title),
                     )
@@ -1266,7 +1263,7 @@ impl Render for AgentTerminal {
                     .py_2()
                     .bg(rgb(0x171a21))
                     .text_color(rgb(0xa9b1c6))
-                    .font_family("Menlo")
+                    .font_family(font_family.clone())
                     .child(status_line),
             )
         } else {
@@ -1284,7 +1281,7 @@ impl Render for AgentTerminal {
                     );
                     window.paint_quad(fill(bounds, black()));
 
-                    let mono = font("Menlo");
+                    let mono = font(font_family.clone());
                     let font_size = FONT_SIZE;
                     let run_template = gpui::TextRun {
                         len: 0,
@@ -1310,13 +1307,11 @@ impl Render for AgentTerminal {
                         for (col_index, cell) in row.iter().enumerate() {
                             let x = origin.x + col_index as f32 * cell_width;
                             let cell_origin = point(x, y);
+                            let cell_width_px = cell_width.max(px(2.0)) * cell.width_cols as f32;
 
                             if let Some(bg) = cell.bg {
                                 window.paint_quad(fill(
-                                    Bounds::new(
-                                        cell_origin,
-                                        size(cell_width.max(px(2.0)), LINE_HEIGHT),
-                                    ),
+                                    Bounds::new(cell_origin, size(cell_width_px, LINE_HEIGHT)),
                                     bg,
                                 ));
                             }
@@ -1331,7 +1326,7 @@ impl Render for AgentTerminal {
                                     cell.ch.to_string().into(),
                                     font_pixels,
                                     &[run],
-                                    Some(cell_width),
+                                    Some(cell_width_px),
                                 );
                                 let _ = shaped.paint(
                                     cell_origin,
@@ -1345,7 +1340,7 @@ impl Render for AgentTerminal {
                         }
                     }
 
-                    if focused {
+                    if focused && snapshot.cursor_visible {
                         let cursor_origin = point(
                             origin.x + snapshot.cursor_col as f32 * cell_width,
                             origin.y + snapshot.cursor_row as f32 * LINE_HEIGHT,
@@ -1431,8 +1426,8 @@ fn write_to_pty(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) -> Res
     Ok(())
 }
 
-fn measure_cell_width(window: &mut Window) -> Pixels {
-    let mono = font("Menlo");
+fn measure_cell_width(window: &mut Window, font_family: &str) -> Pixels {
+    let mono = font(font_family.to_string());
     let font_id = window.text_system().resolve_font(&mono);
     window
         .text_system()
@@ -1480,6 +1475,14 @@ fn snapshot_to_lines(snapshot: &ScreenSnapshot) -> Vec<String> {
             line
         })
         .collect()
+}
+
+fn cell_display_width_cols(flags: Flags) -> u8 {
+    if flags.contains(Flags::WIDE_CHAR) {
+        2
+    } else {
+        1
+    }
 }
 
 fn utf16_to_byte_index(text: &str, utf16_index: usize) -> usize {
@@ -1879,7 +1882,7 @@ fn ansi_to_rgb(
         AnsiColor::Named(named) => {
             named_to_rgb(named_color_variant(named, flags, is_foreground), colors)
         }
-        AnsiColor::Indexed(index) => indexed_to_rgb(index),
+        AnsiColor::Indexed(index) => indexed_to_rgb(index, colors),
     }
 }
 
@@ -1941,7 +1944,11 @@ fn named_to_rgb(
     }
 }
 
-fn indexed_to_rgb(index: u8) -> (u8, u8, u8) {
+fn indexed_to_rgb(index: u8, colors: &alacritty_terminal::term::color::Colors) -> (u8, u8, u8) {
+    if let Some(rgb) = colors[index as usize] {
+        return (rgb.r, rgb.g, rgb.b);
+    }
+
     match index {
         0 => named_to_rgb(NamedColor::Black, &Default::default()),
         1 => named_to_rgb(NamedColor::Red, &Default::default()),
@@ -2040,9 +2047,13 @@ fn run_self_check() -> Result<()> {
         "cmd-v should not be forwarded as raw character"
     );
 
-    ensure!(indexed_to_rgb(16) == (0, 0, 0), "indexed color 16 mismatch");
+    let default_colors = alacritty_terminal::term::color::Colors::default();
     ensure!(
-        indexed_to_rgb(231) == (255, 255, 255),
+        indexed_to_rgb(16, &default_colors) == (0, 0, 0),
+        "indexed color 16 mismatch"
+    );
+    ensure!(
+        indexed_to_rgb(231, &default_colors) == (255, 255, 255),
         "indexed color 231 mismatch"
     );
 
@@ -2068,16 +2079,38 @@ fn quit_app(_: &QuitApp, cx: &mut App) {
     cx.quit();
 }
 
-fn parse_cli_options() -> CliOptions {
+fn parse_cli_options_from<I>(args: I) -> CliOptions
+where
+    I: IntoIterator<Item = String>,
+{
     let mut options = CliOptions::default();
-    for arg in std::env::args().skip(1) {
+    let mut iter = args.into_iter().peekable();
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--self-check" => options.self_check = true,
             "--show-status-bar" => options.show_status_bar = true,
+            "--font-family" => {
+                if let Some(value) = iter.next() {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        options.font_family = value.to_string();
+                    }
+                }
+            }
+            _ if arg.starts_with("--font-family=") => {
+                let value = arg.trim_start_matches("--font-family=").trim();
+                if !value.is_empty() {
+                    options.font_family = value.to_string();
+                }
+            }
             _ => {}
         }
     }
     options
+}
+
+fn parse_cli_options() -> CliOptions {
+    parse_cli_options_from(std::env::args().skip(1))
 }
 
 fn main() {
@@ -2448,9 +2481,34 @@ mod tests {
 
     #[test]
     fn indexed_color_cube_edges() {
-        assert_eq!(indexed_to_rgb(16), (0, 0, 0));
-        assert_eq!(indexed_to_rgb(231), (255, 255, 255));
-        assert_eq!(indexed_to_rgb(232), (8, 8, 8));
+        let colors = alacritty_terminal::term::color::Colors::default();
+        assert_eq!(indexed_to_rgb(16, &colors), (0, 0, 0));
+        assert_eq!(indexed_to_rgb(231, &colors), (255, 255, 255));
+        assert_eq!(indexed_to_rgb(232, &colors), (8, 8, 8));
+    }
+
+    #[test]
+    fn indexed_color_prefers_terminal_palette_override() {
+        let mut colors = alacritty_terminal::term::color::Colors::default();
+        colors[196] = Some(alacritty_terminal::vte::ansi::Rgb { r: 1, g: 2, b: 3 });
+        assert_eq!(indexed_to_rgb(196, &colors), (1, 2, 3));
+    }
+
+    #[test]
+    fn parse_cli_options_supports_font_family() {
+        let options = parse_cli_options_from(vec![
+            "--show-status-bar".to_string(),
+            "--font-family".to_string(),
+            "JetBrains Mono".to_string(),
+        ]);
+        assert!(options.show_status_bar);
+        assert_eq!(options.font_family, "JetBrains Mono");
+    }
+
+    #[test]
+    fn parse_cli_options_supports_font_family_equals_form() {
+        let options = parse_cli_options_from(vec!["--font-family=Iosevka".to_string()]);
+        assert_eq!(options.font_family, "Iosevka");
     }
 
     #[test]
@@ -2483,12 +2541,19 @@ mod tests {
             ],
             cursor_row: 0,
             cursor_col: 0,
+            cursor_visible: true,
             alt_screen: false,
         };
 
         let lines = snapshot_to_lines(&snapshot);
         assert_eq!(lines[0], "ab");
         assert_eq!(lines[1], "");
+    }
+
+    #[test]
+    fn wide_char_cells_use_two_columns_for_render_width() {
+        assert_eq!(cell_display_width_cols(Flags::empty()), 1);
+        assert_eq!(cell_display_width_cols(Flags::WIDE_CHAR), 2);
     }
 
     #[test]
