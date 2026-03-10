@@ -1,12 +1,17 @@
 #![allow(unexpected_cfgs)]
 
-use std::io::{Read, Write};
+mod cli;
+mod color;
+mod keyboard;
+mod macos_ax;
+mod pty;
+mod text_utils;
+
+use std::io::Write;
 use std::ops::Range;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-#[cfg(target_os = "macos")]
-use std::{ffi::CStr, os::raw::c_char};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
@@ -17,7 +22,6 @@ use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, StdSyncHandler,
 };
 use anyhow::{Context as _, Result, ensure};
-use async_channel::Receiver;
 use gpui::{
     App, Bounds, Context, EntityInputHandler, FocusHandle, InputHandler, KeyDownEvent, Menu,
     MenuItem, MouseButton, MouseDownEvent, Pixels, Render, Subscription, SystemMenuType, Task,
@@ -26,19 +30,24 @@ use gpui::{
 };
 use gpui_platform::application;
 use parking_lot::Mutex;
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
 use tiny_http::{Header, Response, Server, StatusCode};
 
-#[cfg(target_os = "macos")]
-use cocoa::{
-    base::{YES, id, nil},
-    foundation::{NSRange, NSString, NSUInteger},
+use crate::cli::{CliOptions, parse_cli_options};
+#[cfg(test)]
+use crate::cli::parse_cli_options_from;
+use crate::color::{ansi_bg_to_hsla, ansi_to_hsla, indexed_to_rgb};
+use crate::keyboard::{
+    encode_keystroke, is_paste_shortcut, is_select_all_shortcut, should_defer_to_text_input,
 };
-#[cfg(target_os = "macos")]
-use objc::{msg_send, sel, sel_impl};
-#[cfg(target_os = "macos")]
-use raw_window_handle::RawWindowHandle;
+use crate::macos_ax::{NativeAxInputState, sync_native_ax_input_view};
+use crate::pty::{PtySession, write_to_pty};
+use crate::text_utils::{
+    replace_range_utf16, summarize_text_for_trace, utf16_substring, utf16_to_byte_index,
+};
+#[cfg(test)]
+use crate::text_utils::{should_accept_ax_override, should_publish_model_to_ax};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -52,128 +61,6 @@ const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
 const STATUS_BAR_ESTIMATED_HEIGHT: Pixels = px(42.0);
 const DEBUG_HTTP_DEFAULT_ADDR: &str = "127.0.0.1:7878";
 const INPUT_TRACE_ENV: &str = "AGENT_TUI_INPUT_TRACE";
-
-#[derive(Clone, Debug)]
-struct NativeAxInputState {
-    text: String,
-    cursor_utf16: usize,
-}
-
-#[derive(Clone, Debug, Default)]
-struct NativeAxSyncResult {
-    override_from_ax: Option<NativeAxInputState>,
-    published_model: bool,
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs)]
-fn autoreleased_nsstring(value: &str) -> id {
-    unsafe {
-        let string = NSString::alloc(nil).init_str(value);
-        msg_send![string, autorelease]
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs)]
-fn nsstring_to_rust(value: id) -> Option<String> {
-    if value == nil {
-        return None;
-    }
-    unsafe {
-        let utf8: *const c_char = msg_send![value, UTF8String];
-        if utf8.is_null() {
-            return None;
-        }
-        Some(CStr::from_ptr(utf8).to_string_lossy().into_owned())
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs)]
-fn sync_native_ax_input_view(
-    window: &Window,
-    input_line: &str,
-    cursor_utf16: usize,
-    last_published_line: &str,
-    last_published_cursor_utf16: usize,
-) -> NativeAxSyncResult {
-    let window_handle = match raw_window_handle::HasWindowHandle::window_handle(window) {
-        Ok(handle) => handle,
-        Err(_) => return NativeAxSyncResult::default(),
-    };
-    let RawWindowHandle::AppKit(handle) = window_handle.as_raw() else {
-        return NativeAxSyncResult::default();
-    };
-    let ns_view = handle.ns_view.as_ptr() as id;
-    let mut result = NativeAxSyncResult::default();
-
-    unsafe {
-        // Keep the focused native view itself text-readable for tools like voice-correct,
-        // which query AXFocusedUIElement -> AXValue/AXSelectedTextRange.
-        let text_role = autoreleased_nsstring("AXTextField");
-        let text_label = autoreleased_nsstring("Terminal Input Line");
-        let identifier = autoreleased_nsstring("agent-terminal-input-line");
-
-        let current_value: id = msg_send![ns_view, accessibilityValue];
-        let current_text = nsstring_to_rust(current_value).unwrap_or_default();
-        let current_range: NSRange = msg_send![ns_view, accessibilitySelectedTextRange];
-        let current_cursor_utf16 =
-            (current_range.location as usize).saturating_add(current_range.length as usize);
-        let current_cursor_utf16 = current_cursor_utf16.min(current_text.encode_utf16().count());
-
-        let accepting_ax_override = should_accept_ax_override(
-            &current_text,
-            current_cursor_utf16,
-            input_line,
-            cursor_utf16,
-            last_published_line,
-            last_published_cursor_utf16,
-        );
-        let publishing_model = should_publish_model_to_ax(
-            &current_text,
-            current_cursor_utf16,
-            input_line,
-            cursor_utf16,
-            accepting_ax_override,
-        );
-
-        if accepting_ax_override {
-            result.override_from_ax = Some(NativeAxInputState {
-                text: current_text,
-                cursor_utf16: current_cursor_utf16,
-            });
-        }
-
-        let _: () = msg_send![ns_view, setAccessibilityElement: YES];
-        let _: () = msg_send![ns_view, setAccessibilityRole: text_role];
-        let _: () = msg_send![ns_view, setAccessibilityLabel: text_label];
-        let _: () = msg_send![ns_view, setAccessibilityIdentifier: identifier];
-        if publishing_model {
-            let value = autoreleased_nsstring(input_line);
-            let cursor_range = NSRange {
-                location: cursor_utf16 as NSUInteger,
-                length: 0,
-            };
-            let _: () = msg_send![ns_view, setAccessibilityValue: value];
-            let _: () = msg_send![ns_view, setAccessibilitySelectedTextRange: cursor_range];
-            result.published_model = true;
-        }
-    }
-
-    result
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sync_native_ax_input_view(
-    _window: &Window,
-    _input_line: &str,
-    _cursor_utf16: usize,
-    _last_published_line: &str,
-    _last_published_cursor_utf16: usize,
-) -> NativeAxSyncResult {
-    NativeAxSyncResult::default()
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 struct GridSize {
@@ -201,23 +88,6 @@ impl Dimensions for GridSize {
 
     fn columns(&self) -> usize {
         self.cols as usize
-    }
-}
-
-#[derive(Clone)]
-struct CliOptions {
-    self_check: bool,
-    show_status_bar: bool,
-    font_family: String,
-}
-
-impl Default for CliOptions {
-    fn default() -> Self {
-        Self {
-            self_check: false,
-            show_status_bar: false,
-            font_family: "Menlo".to_string(),
-        }
     }
 }
 
@@ -544,14 +414,6 @@ impl SharedDebugState {
     }
 }
 
-struct PtySession {
-    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Arc<Mutex<Box<dyn Child + Send>>>,
-    output_rx: Receiver<Vec<u8>>,
-    shell: String,
-}
-
 struct AgentTerminal {
     focus_handle: FocusHandle,
     term: Term<TitleTrackingListener>,
@@ -592,7 +454,8 @@ impl AgentTerminal {
             },
         );
         let processor = Processor::<StdSyncHandler>::new();
-        let (shell, master, writer, child, output_rx, debug) = match PtySession::spawn(grid_size) {
+        let (shell, master, writer, child, output_rx, debug) =
+            match PtySession::spawn(grid_size.rows, grid_size.cols) {
             Ok(session) => {
                 let shell = session.shell.clone();
                 let debug =
@@ -608,7 +471,8 @@ impl AgentTerminal {
             }
             Err(err) => {
                 let message = format!("failed to start shell: {err:#}");
-                let debug = SharedDebugState::new("<none>".to_string(), message.clone(), grid_size);
+                let debug =
+                    SharedDebugState::new("<none>".to_string(), message.clone(), grid_size);
                 debug.set_error(message);
                 (String::from("<none>"), None, None, None, None, debug)
             }
@@ -1357,75 +1221,6 @@ impl Render for AgentTerminal {
     }
 }
 
-impl PtySession {
-    fn spawn(grid_size: GridSize) -> Result<Self> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let system = native_pty_system();
-        let pair = system
-            .openpty(PtySize {
-                rows: grid_size.rows,
-                cols: grid_size.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("failed to create PTY")?;
-
-        let mut command = CommandBuilder::new(shell.clone());
-        command.arg("-i");
-
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .context("failed to spawn shell")?;
-
-        let master = Arc::new(Mutex::new(pair.master));
-        let writer = {
-            let writer = master
-                .lock()
-                .take_writer()
-                .context("failed to get PTY writer")?;
-            Arc::new(Mutex::new(writer))
-        };
-
-        let mut reader = master
-            .lock()
-            .try_clone_reader()
-            .context("failed to clone PTY reader")?;
-        let (tx, rx) = async_channel::unbounded();
-        thread::spawn(move || {
-            let mut buf = vec![0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        if tx.send_blocking(buf[..read].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Ok(Self {
-            master,
-            writer,
-            child: Arc::new(Mutex::new(child)),
-            output_rx: rx,
-            shell,
-        })
-    }
-}
-
-fn write_to_pty(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) -> Result<()> {
-    let mut writer = writer.lock();
-    writer
-        .write_all(bytes)
-        .context("failed to write bytes to PTY")?;
-    writer.flush().context("failed to flush PTY writer")?;
-    Ok(())
-}
-
 fn measure_cell_width(window: &mut Window, font_family: &str) -> Pixels {
     let mono = font(font_family.to_string());
     let font_id = window.text_system().resolve_font(&mono);
@@ -1483,37 +1278,6 @@ fn cell_display_width_cols(flags: Flags) -> u8 {
     } else {
         1
     }
-}
-
-fn utf16_to_byte_index(text: &str, utf16_index: usize) -> usize {
-    if utf16_index == 0 {
-        return 0;
-    }
-
-    let mut offset = 0usize;
-    for (byte_idx, ch) in text.char_indices() {
-        let next_offset = offset + ch.len_utf16();
-        if next_offset > utf16_index {
-            return byte_idx;
-        }
-        if next_offset == utf16_index {
-            return byte_idx + ch.len_utf8();
-        }
-        offset = next_offset;
-    }
-    text.len()
-}
-
-fn utf16_substring(text: &str, range: Range<usize>) -> Option<String> {
-    let start = utf16_to_byte_index(text, range.start);
-    let end = utf16_to_byte_index(text, range.end);
-    text.get(start..end).map(ToString::to_string)
-}
-
-fn replace_range_utf16(text: &mut String, range: Range<usize>, replacement: &str) {
-    let start = utf16_to_byte_index(text, range.start);
-    let end = utf16_to_byte_index(text, range.end);
-    text.replace_range(start..end, replacement);
 }
 
 fn start_debug_http_server(
@@ -1671,133 +1435,6 @@ fn text_response(
     response
 }
 
-fn encode_keystroke(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
-    let key = keystroke.key.as_str();
-    let alt = keystroke.modifiers.alt;
-
-    let mut bytes = match key {
-        "space" => vec![b' '],
-        "enter" => vec![b'\r'],
-        "tab" => vec![b'\t'],
-        "backspace" => vec![0x7f],
-        "escape" => vec![0x1b],
-        "left" => b"\x1b[D".to_vec(),
-        "right" => b"\x1b[C".to_vec(),
-        "up" => b"\x1b[A".to_vec(),
-        "down" => b"\x1b[B".to_vec(),
-        "home" => b"\x1b[H".to_vec(),
-        "end" => b"\x1b[F".to_vec(),
-        _ => encode_printable_keystroke(keystroke)?,
-    };
-
-    if alt {
-        bytes.insert(0, 0x1b);
-    }
-
-    Some(bytes)
-}
-
-fn encode_printable_keystroke(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
-    let key = keystroke.key.as_str();
-    let ctrl = keystroke.modifiers.control;
-
-    // Reserve platform/function chords for app-level shortcuts such as paste.
-    if keystroke.modifiers.platform || keystroke.modifiers.function {
-        return None;
-    }
-
-    // IME composition in progress (e.g. pinyin typing) should not leak intermediate ASCII
-    // keystrokes into PTY before key_char is committed.
-    if keystroke.is_ime_in_progress() {
-        return None;
-    }
-
-    if ctrl {
-        if key.len() == 1 {
-            let mut ch = key.as_bytes()[0];
-            ch = ch.to_ascii_lowercase() & 0x1f;
-            return Some(vec![ch]);
-        }
-        return None;
-    }
-
-    if let Some(key_char) = keystroke
-        .key_char
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
-        return Some(key_char.as_bytes().to_vec());
-    }
-
-    if key.chars().count() == 1 {
-        return Some(key.as_bytes().to_vec());
-    }
-
-    None
-}
-
-fn should_defer_to_text_input(keystroke: &gpui::Keystroke) -> bool {
-    // On macOS, route printable text keys through NSTextInputClient callbacks
-    // (insertText / setMarkedText) to preserve IME and accessibility behavior.
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
-
-    let modifiers = keystroke.modifiers;
-    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
-        return false;
-    }
-
-    if is_terminal_control_key_name(keystroke.key.as_str()) {
-        return false;
-    }
-
-    keystroke
-        .key_char
-        .as_ref()
-        .is_some_and(|ch| !ch.is_empty() && !ch.chars().any(|c| c.is_control()))
-}
-
-fn is_terminal_control_key_name(key: &str) -> bool {
-    matches!(
-        key,
-        "enter"
-            | "tab"
-            | "backspace"
-            | "escape"
-            | "left"
-            | "right"
-            | "up"
-            | "down"
-            | "home"
-            | "end"
-            | "pageup"
-            | "pagedown"
-            | "delete"
-            | "insert"
-    )
-}
-
-fn is_paste_shortcut(keystroke: &gpui::Keystroke) -> bool {
-    let is_v = keystroke.key.eq_ignore_ascii_case("v");
-    let modifiers = keystroke.modifiers;
-    let mac_paste = modifiers.platform && !modifiers.control && is_v;
-    let ctrl_shift_paste = modifiers.control && modifiers.shift && is_v;
-    mac_paste || ctrl_shift_paste
-}
-
-fn is_select_all_shortcut(keystroke: &gpui::Keystroke) -> bool {
-    let is_a = keystroke.key.eq_ignore_ascii_case("a");
-    let modifiers = keystroke.modifiers;
-    cfg!(target_os = "macos")
-        && modifiers.platform
-        && !modifiers.control
-        && !modifiers.alt
-        && !modifiers.shift
-        && !modifiers.function
-        && is_a
-}
-
 fn is_input_trace_enabled() -> bool {
     std::env::var(INPUT_TRACE_ENV)
         .ok()
@@ -1806,193 +1443,6 @@ fn is_input_trace_enabled() -> bool {
             value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
         })
         .unwrap_or(false)
-}
-
-fn should_accept_ax_override(
-    ax_text: &str,
-    ax_cursor_utf16: usize,
-    model_text: &str,
-    model_cursor_utf16: usize,
-    last_published_text: &str,
-    last_published_cursor_utf16: usize,
-) -> bool {
-    let differs_from_model = ax_text != model_text || ax_cursor_utf16 != model_cursor_utf16;
-    let is_stale_last_publish =
-        ax_text == last_published_text && ax_cursor_utf16 == last_published_cursor_utf16;
-    differs_from_model && !is_stale_last_publish
-}
-
-fn should_publish_model_to_ax(
-    ax_text: &str,
-    ax_cursor_utf16: usize,
-    model_text: &str,
-    model_cursor_utf16: usize,
-    accepting_ax_override: bool,
-) -> bool {
-    !accepting_ax_override && (ax_text != model_text || ax_cursor_utf16 != model_cursor_utf16)
-}
-
-fn summarize_text_for_trace(text: &str) -> String {
-    const MAX_PREVIEW_CHARS: usize = 24;
-    let mut out = String::new();
-    for (idx, ch) in text.chars().enumerate() {
-        if idx >= MAX_PREVIEW_CHARS {
-            out.push_str("…");
-            break;
-        }
-        out.push(ch);
-    }
-    format!("{out:?}")
-}
-
-fn ansi_bg_to_hsla(
-    color: AnsiColor,
-    colors: &alacritty_terminal::term::color::Colors,
-) -> Option<gpui::Hsla> {
-    match color {
-        AnsiColor::Named(NamedColor::Background) => None,
-        other => Some(ansi_to_hsla(other, colors, Flags::empty(), false)),
-    }
-}
-
-fn ansi_to_hsla(
-    color: AnsiColor,
-    colors: &alacritty_terminal::term::color::Colors,
-    flags: Flags,
-    is_foreground: bool,
-) -> gpui::Hsla {
-    let resolved = ansi_to_rgb(color, colors, flags, is_foreground);
-    rgb(((resolved.0 as u32) << 16) | ((resolved.1 as u32) << 8) | resolved.2 as u32).into()
-}
-
-fn ansi_to_rgb(
-    color: AnsiColor,
-    colors: &alacritty_terminal::term::color::Colors,
-    flags: Flags,
-    is_foreground: bool,
-) -> (u8, u8, u8) {
-    match color {
-        AnsiColor::Spec(rgb) => {
-            let mut value = (rgb.r, rgb.g, rgb.b);
-            if is_foreground && flags.contains(Flags::DIM) && !flags.contains(Flags::BOLD) {
-                value = dim_rgb(value);
-            }
-            value
-        }
-        AnsiColor::Named(named) => {
-            named_to_rgb(named_color_variant(named, flags, is_foreground), colors)
-        }
-        AnsiColor::Indexed(index) => indexed_to_rgb(index, colors),
-    }
-}
-
-fn named_color_variant(named: NamedColor, flags: Flags, is_foreground: bool) -> NamedColor {
-    if !is_foreground {
-        return named;
-    }
-
-    match (
-        flags.contains(Flags::BOLD),
-        flags.contains(Flags::DIM),
-        named,
-    ) {
-        (true, false, NamedColor::Foreground) => NamedColor::BrightForeground,
-        (true, false, value) => value.to_bright(),
-        (false, true, value) => value.to_dim(),
-        _ => named,
-    }
-}
-
-fn named_to_rgb(
-    named: NamedColor,
-    colors: &alacritty_terminal::term::color::Colors,
-) -> (u8, u8, u8) {
-    if let Some(rgb) = colors[named] {
-        return (rgb.r, rgb.g, rgb.b);
-    }
-
-    match named {
-        NamedColor::Black => (0x1d, 0x1f, 0x21),
-        NamedColor::Red => (0xcc, 0x66, 0x66),
-        NamedColor::Green => (0xb5, 0xbd, 0x68),
-        NamedColor::Yellow => (0xf0, 0xc6, 0x74),
-        NamedColor::Blue => (0x81, 0xa2, 0xbe),
-        NamedColor::Magenta => (0xb2, 0x94, 0xbb),
-        NamedColor::Cyan => (0x8a, 0xbe, 0xb7),
-        NamedColor::White => (0xc5, 0xc8, 0xc6),
-        NamedColor::BrightBlack => (0x66, 0x66, 0x66),
-        NamedColor::BrightRed => (0xd5, 0x4e, 0x53),
-        NamedColor::BrightGreen => (0xb9, 0xca, 0x4a),
-        NamedColor::BrightYellow => (0xe7, 0xc5, 0x47),
-        NamedColor::BrightBlue => (0x7a, 0xa6, 0xda),
-        NamedColor::BrightMagenta => (0xc3, 0x97, 0xd8),
-        NamedColor::BrightCyan => (0x70, 0xc0, 0xba),
-        NamedColor::BrightWhite => (0xea, 0xea, 0xea),
-        NamedColor::Foreground => (0xd7, 0xda, 0xe0),
-        NamedColor::Background => (0x0f, 0x11, 0x15),
-        NamedColor::Cursor => (0x3b, 0x82, 0xf6),
-        NamedColor::DimBlack => dim_rgb((0x1d, 0x1f, 0x21)),
-        NamedColor::DimRed => dim_rgb((0xcc, 0x66, 0x66)),
-        NamedColor::DimGreen => dim_rgb((0xb5, 0xbd, 0x68)),
-        NamedColor::DimYellow => dim_rgb((0xf0, 0xc6, 0x74)),
-        NamedColor::DimBlue => dim_rgb((0x81, 0xa2, 0xbe)),
-        NamedColor::DimMagenta => dim_rgb((0xb2, 0x94, 0xbb)),
-        NamedColor::DimCyan => dim_rgb((0x8a, 0xbe, 0xb7)),
-        NamedColor::DimWhite => dim_rgb((0xc5, 0xc8, 0xc6)),
-        NamedColor::BrightForeground => (0xff, 0xff, 0xff),
-        NamedColor::DimForeground => dim_rgb((0xd7, 0xda, 0xe0)),
-    }
-}
-
-fn indexed_to_rgb(index: u8, colors: &alacritty_terminal::term::color::Colors) -> (u8, u8, u8) {
-    if let Some(rgb) = colors[index as usize] {
-        return (rgb.r, rgb.g, rgb.b);
-    }
-
-    match index {
-        0 => named_to_rgb(NamedColor::Black, &Default::default()),
-        1 => named_to_rgb(NamedColor::Red, &Default::default()),
-        2 => named_to_rgb(NamedColor::Green, &Default::default()),
-        3 => named_to_rgb(NamedColor::Yellow, &Default::default()),
-        4 => named_to_rgb(NamedColor::Blue, &Default::default()),
-        5 => named_to_rgb(NamedColor::Magenta, &Default::default()),
-        6 => named_to_rgb(NamedColor::Cyan, &Default::default()),
-        7 => named_to_rgb(NamedColor::White, &Default::default()),
-        8 => named_to_rgb(NamedColor::BrightBlack, &Default::default()),
-        9 => named_to_rgb(NamedColor::BrightRed, &Default::default()),
-        10 => named_to_rgb(NamedColor::BrightGreen, &Default::default()),
-        11 => named_to_rgb(NamedColor::BrightYellow, &Default::default()),
-        12 => named_to_rgb(NamedColor::BrightBlue, &Default::default()),
-        13 => named_to_rgb(NamedColor::BrightMagenta, &Default::default()),
-        14 => named_to_rgb(NamedColor::BrightCyan, &Default::default()),
-        15 => named_to_rgb(NamedColor::BrightWhite, &Default::default()),
-        16..=231 => {
-            let index = index - 16;
-            let r = index / 36;
-            let g = (index % 36) / 6;
-            let b = index % 6;
-            (cube_value(r), cube_value(g), cube_value(b))
-        }
-        232..=255 => {
-            let gray = 8 + (index - 232) * 10;
-            (gray, gray, gray)
-        }
-    }
-}
-
-fn cube_value(step: u8) -> u8 {
-    match step {
-        0 => 0,
-        n => 55 + n * 40,
-    }
-}
-
-fn dim_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
-    (
-        ((r as f32) * 0.66) as u8,
-        ((g as f32) * 0.66) as u8,
-        ((b as f32) * 0.66) as u8,
-    )
 }
 
 fn run_self_check() -> Result<()> {
@@ -2077,40 +1527,6 @@ fn run_self_check() -> Result<()> {
 
 fn quit_app(_: &QuitApp, cx: &mut App) {
     cx.quit();
-}
-
-fn parse_cli_options_from<I>(args: I) -> CliOptions
-where
-    I: IntoIterator<Item = String>,
-{
-    let mut options = CliOptions::default();
-    let mut iter = args.into_iter().peekable();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--self-check" => options.self_check = true,
-            "--show-status-bar" => options.show_status_bar = true,
-            "--font-family" => {
-                if let Some(value) = iter.next() {
-                    let value = value.trim();
-                    if !value.is_empty() {
-                        options.font_family = value.to_string();
-                    }
-                }
-            }
-            _ if arg.starts_with("--font-family=") => {
-                let value = arg.trim_start_matches("--font-family=").trim();
-                if !value.is_empty() {
-                    options.font_family = value.to_string();
-                }
-            }
-            _ => {}
-        }
-    }
-    options
-}
-
-fn parse_cli_options() -> CliOptions {
-    parse_cli_options_from(std::env::args().skip(1))
 }
 
 fn main() {
