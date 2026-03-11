@@ -45,7 +45,8 @@ use crate::keyboard::{
 use crate::macos_ax::{NativeAxInputState, sync_native_ax_input_view};
 use crate::pty::{PtySession, write_to_pty};
 use crate::text_utils::{
-    replace_range_utf16, summarize_text_for_trace, utf16_substring, utf16_to_byte_index,
+    delete_next_word_utf16, delete_previous_word_utf16, delete_to_end_utf16, replace_range_utf16,
+    summarize_text_for_trace, utf16_substring, utf16_to_byte_index,
 };
 #[cfg(test)]
 use crate::text_utils::{should_accept_ax_override, should_publish_model_to_ax};
@@ -781,16 +782,42 @@ impl AgentTerminal {
         self.input_cursor_utf16 = 0;
     }
 
+    fn delete_previous_input_word(&mut self) {
+        delete_previous_word_utf16(&mut self.input_line, &mut self.input_cursor_utf16);
+        self.clamp_input_cursor();
+    }
+
+    fn delete_next_input_word(&mut self) {
+        delete_next_word_utf16(&mut self.input_line, &mut self.input_cursor_utf16);
+        self.clamp_input_cursor();
+    }
+
+    fn delete_to_end_of_input_line(&mut self) {
+        delete_to_end_utf16(&mut self.input_line, self.input_cursor_utf16);
+        self.clamp_input_cursor();
+    }
+
     fn apply_terminal_bytes_to_input_line(&mut self, bytes: &[u8]) {
         match bytes {
             b"\r" => self.clear_input_line(),
             [0x7f] => self.backspace_input_char(),
-            [0x15] => self.clear_input_line(), // Ctrl-U clears current line in common shells.
+            [0x08] => self.backspace_input_char(), // Ctrl-H
+            [0x01] => self.input_cursor_utf16 = 0, // Ctrl-A
+            [0x05] => self.input_cursor_utf16 = self.input_line_len_utf16(), // Ctrl-E
+            [0x02] => self.move_input_cursor_left(), // Ctrl-B
+            [0x06] => self.move_input_cursor_right(), // Ctrl-F
+            [0x03] => self.clear_input_line(),     // Ctrl-C
+            [0x04] => self.delete_input_char_at_cursor(), // Ctrl-D
+            [0x0b] => self.delete_to_end_of_input_line(), // Ctrl-K
+            [0x17] => self.delete_previous_input_word(), // Ctrl-W
+            [0x15] => self.clear_input_line(),     // Ctrl-U clears current line in common shells.
             b"\x1b[D" => self.move_input_cursor_left(),
             b"\x1b[C" => self.move_input_cursor_right(),
             b"\x1b[H" => self.input_cursor_utf16 = 0,
             b"\x1b[F" => self.input_cursor_utf16 = self.input_line_len_utf16(),
             b"\x1b[3~" => self.delete_input_char_at_cursor(),
+            b"\x1b\x7f" => self.delete_previous_input_word(), // Alt-Backspace
+            b"\x1bd" => self.delete_next_input_word(),        // Alt-D
             _ => {
                 if bytes.first() == Some(&0x1b) {
                     return;
@@ -910,6 +937,7 @@ impl AgentTerminal {
             self.write_bytes(&[0x15]); // Ctrl-U clears shell input line.
             self.trace_input("keydown cmd-a clear current input line");
             cx.stop_propagation();
+            cx.notify();
             return;
         }
 
@@ -922,6 +950,7 @@ impl AgentTerminal {
                 self.write_text_input(&text);
             }
             cx.stop_propagation();
+            cx.notify();
             return;
         }
 
@@ -935,6 +964,7 @@ impl AgentTerminal {
             self.apply_terminal_bytes_to_input_line(&bytes);
             self.write_bytes(&bytes);
             cx.stop_propagation();
+            cx.notify();
         }
     }
 
@@ -1907,6 +1937,32 @@ mod tests {
         // Replace "你好" with "世界" by UTF-16 offsets.
         replace_range_utf16(&mut text, 3..5, "世界");
         assert_eq!(text, "abc世界");
+    }
+
+    #[test]
+    fn delete_previous_word_supports_multibyte_text() {
+        let mut text = "first 第二段".to_string();
+        let mut cursor = text.encode_utf16().count();
+        delete_previous_word_utf16(&mut text, &mut cursor);
+        assert_eq!(text, "first ");
+        assert_eq!(cursor, "first ".encode_utf16().count());
+    }
+
+    #[test]
+    fn delete_next_word_from_cursor_keeps_cursor_stable() {
+        let mut text = "one two 三".to_string();
+        let mut cursor = "one ".encode_utf16().count();
+        delete_next_word_utf16(&mut text, &mut cursor);
+        assert_eq!(text, "one  三");
+        assert_eq!(cursor, "one ".encode_utf16().count());
+    }
+
+    #[test]
+    fn delete_to_end_truncates_from_cursor() {
+        let mut text = "hello world".to_string();
+        let cursor = "hello ".encode_utf16().count();
+        delete_to_end_utf16(&mut text, cursor);
+        assert_eq!(text, "hello ");
     }
 
     #[test]

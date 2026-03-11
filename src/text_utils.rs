@@ -67,3 +67,96 @@ pub(crate) fn summarize_text_for_trace(text: &str) -> String {
     }
     format!("{out:?}")
 }
+
+fn byte_index_to_utf16(text: &str, byte_index: usize) -> usize {
+    if byte_index == 0 {
+        return 0;
+    }
+
+    let mut utf16 = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if idx >= byte_index {
+            break;
+        }
+        utf16 += ch.len_utf16();
+    }
+    utf16
+}
+
+pub(crate) fn delete_previous_word_utf16(text: &mut String, cursor_utf16: &mut usize) {
+    if *cursor_utf16 == 0 || text.is_empty() {
+        return;
+    }
+
+    let cursor_byte = utf16_to_byte_index(text, *cursor_utf16);
+    if cursor_byte == 0 {
+        *cursor_utf16 = 0;
+        return;
+    }
+
+    let mut start = cursor_byte;
+    while start > 0 {
+        let Some((prev, ch)) = text[..start].char_indices().last() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        start = prev;
+    }
+
+    while start > 0 {
+        let Some((prev, ch)) = text[..start].char_indices().last() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            break;
+        }
+        start = prev;
+    }
+
+    text.replace_range(start..cursor_byte, "");
+    *cursor_utf16 = byte_index_to_utf16(text, start);
+}
+
+pub(crate) fn delete_next_word_utf16(text: &mut String, cursor_utf16: &mut usize) {
+    if text.is_empty() {
+        *cursor_utf16 = 0;
+        return;
+    }
+
+    let cursor_byte = utf16_to_byte_index(text, *cursor_utf16);
+    if cursor_byte >= text.len() {
+        *cursor_utf16 = text.encode_utf16().count();
+        return;
+    }
+
+    let mut end = cursor_byte;
+    while end < text.len() {
+        let Some(ch) = text[end..].chars().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+
+    while end < text.len() {
+        let Some(ch) = text[end..].chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+
+    text.replace_range(cursor_byte..end, "");
+    *cursor_utf16 = (*cursor_utf16).min(text.encode_utf16().count());
+}
+
+pub(crate) fn delete_to_end_utf16(text: &mut String, cursor_utf16: usize) {
+    let cursor_byte = utf16_to_byte_index(text, cursor_utf16);
+    text.truncate(cursor_byte);
+}
