@@ -1,50 +1,24 @@
-#[derive(Clone)]
+use clap::Parser;
+
+#[derive(Clone, Parser)]
+#[command(name = "agent_terminal")]
 pub(crate) struct CliOptions {
+    #[arg(long)]
     pub(crate) self_check: bool,
+    #[arg(long)]
     pub(crate) show_status_bar: bool,
+    #[arg(long, default_value = "Menlo")]
     pub(crate) font_family: String,
 }
 
-impl Default for CliOptions {
-    fn default() -> Self {
-        Self {
-            self_check: false,
-            show_status_bar: false,
-            font_family: "Menlo".to_string(),
-        }
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn parse_cli_options_from<I>(args: I) -> CliOptions
 where
     I: IntoIterator<Item = String>,
 {
-    let mut options = CliOptions::default();
-    let mut iter = args.into_iter().peekable();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--self-check" => options.self_check = true,
-            "--show-status-bar" => options.show_status_bar = true,
-            "--font-family" => {
-                if let Some(value) = iter.next() {
-                    let value = value.trim();
-                    if !value.is_empty() {
-                        options.font_family = value.to_string();
-                    }
-                }
-            }
-            _ if arg.starts_with("--font-family=") => {
-                let value = arg.trim_start_matches("--font-family=").trim();
-                if !value.is_empty() {
-                    options.font_family = value.to_string();
-                }
-            }
-            _ => {}
-        }
-    }
-    options
+    CliOptions::parse_from(std::iter::once("agent_terminal".to_string()).chain(args))
 }
 
 pub(crate) fn parse_cli_options() -> CliOptions {
-    parse_cli_options_from(std::env::args().skip(1))
+    CliOptions::parse()
 }

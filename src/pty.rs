@@ -75,10 +75,7 @@ impl PtySession {
     }
 }
 
-pub(crate) fn write_to_pty(
-    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
-    bytes: &[u8],
-) -> Result<()> {
+pub(crate) fn write_to_pty(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) -> Result<()> {
     let mut writer = writer.lock();
     writer
         .write_all(bytes)

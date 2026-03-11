@@ -48,7 +48,11 @@ fn encode_printable_keystroke(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
         return None;
     }
 
-    if let Some(key_char) = keystroke.key_char.as_ref().filter(|value| !value.is_empty()) {
+    if let Some(key_char) = keystroke
+        .key_char
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
         return Some(key_char.as_bytes().to_vec());
     }
 
@@ -119,4 +123,44 @@ pub(crate) fn is_select_all_shortcut(keystroke: &gpui::Keystroke) -> bool {
         && !modifiers.shift
         && !modifiers.function
         && is_a
+}
+
+pub(crate) fn is_zoom_in_shortcut(keystroke: &gpui::Keystroke) -> bool {
+    if !is_platform_shortcut(keystroke.modifiers) {
+        return false;
+    }
+
+    if key_matches(&keystroke.key, &["=", "equal", "plus", "+"]) {
+        return true;
+    }
+
+    keystroke
+        .key_char
+        .as_ref()
+        .is_some_and(|ch| ch == "=" || ch == "+")
+}
+
+pub(crate) fn is_zoom_out_shortcut(keystroke: &gpui::Keystroke) -> bool {
+    if !is_platform_shortcut(keystroke.modifiers) {
+        return false;
+    }
+
+    if key_matches(&keystroke.key, &["-", "minus", "_"]) {
+        return true;
+    }
+
+    keystroke
+        .key_char
+        .as_ref()
+        .is_some_and(|ch| ch == "-" || ch == "_")
+}
+
+fn is_platform_shortcut(modifiers: gpui::Modifiers) -> bool {
+    modifiers.platform && !modifiers.control && !modifiers.alt && !modifiers.function
+}
+
+fn key_matches(key: &str, accepted: &[&str]) -> bool {
+    accepted
+        .iter()
+        .any(|candidate| key.eq_ignore_ascii_case(candidate))
 }

@@ -19,7 +19,12 @@ pub(crate) fn ansi_to_hsla(
     gpui::rgb(((resolved.0 as u32) << 16) | ((resolved.1 as u32) << 8) | resolved.2 as u32).into()
 }
 
-fn ansi_to_rgb(color: AnsiColor, colors: &Colors, flags: Flags, is_foreground: bool) -> (u8, u8, u8) {
+fn ansi_to_rgb(
+    color: AnsiColor,
+    colors: &Colors,
+    flags: Flags,
+    is_foreground: bool,
+) -> (u8, u8, u8) {
     match color {
         AnsiColor::Spec(rgb) => {
             let mut value = (rgb.r, rgb.g, rgb.b);
@@ -28,7 +33,9 @@ fn ansi_to_rgb(color: AnsiColor, colors: &Colors, flags: Flags, is_foreground: b
             }
             value
         }
-        AnsiColor::Named(named) => named_to_rgb(named_color_variant(named, flags, is_foreground), colors),
+        AnsiColor::Named(named) => {
+            named_to_rgb(named_color_variant(named, flags, is_foreground), colors)
+        }
         AnsiColor::Indexed(index) => indexed_to_rgb(index, colors),
     }
 }

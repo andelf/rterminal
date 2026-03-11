@@ -34,12 +34,13 @@ use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
 use tiny_http::{Header, Response, Server, StatusCode};
 
-use crate::cli::{CliOptions, parse_cli_options};
 #[cfg(test)]
 use crate::cli::parse_cli_options_from;
+use crate::cli::{CliOptions, parse_cli_options};
 use crate::color::{ansi_bg_to_hsla, ansi_to_hsla, indexed_to_rgb};
 use crate::keyboard::{
-    encode_keystroke, is_paste_shortcut, is_select_all_shortcut, should_defer_to_text_input,
+    encode_keystroke, is_paste_shortcut, is_select_all_shortcut, is_zoom_in_shortcut,
+    is_zoom_out_shortcut, should_defer_to_text_input,
 };
 use crate::macos_ax::{NativeAxInputState, sync_native_ax_input_view};
 use crate::pty::{PtySession, write_to_pty};
@@ -53,8 +54,11 @@ const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 1;
-const FONT_SIZE: Pixels = px(14.0);
-const LINE_HEIGHT: Pixels = px(18.0);
+const DEFAULT_FONT_SIZE: Pixels = px(14.0);
+const MIN_FONT_SIZE: Pixels = px(8.0);
+const MAX_FONT_SIZE: Pixels = px(48.0);
+const FONT_SIZE_STEP: f32 = 1.0;
+const LINE_HEIGHT_SCALE: f32 = 18.0 / 14.0;
 const TEXT_PADDING_X: Pixels = px(12.0);
 const TEXT_PADDING_Y: Pixels = px(12.0);
 const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
@@ -424,6 +428,7 @@ struct AgentTerminal {
     terminal_title: Arc<Mutex<Option<String>>>,
     show_status_bar: bool,
     font_family: String,
+    font_size: Pixels,
     master: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
     child: Option<Arc<Mutex<Box<dyn Child + Send>>>>,
@@ -441,9 +446,15 @@ struct AgentTerminal {
 impl AgentTerminal {
     fn new(window: &mut Window, cx: &mut Context<Self>, cli: CliOptions) -> Self {
         let focus_handle = cx.focus_handle();
-        let cell_width = measure_cell_width(window, &cli.font_family);
+        let font_size = DEFAULT_FONT_SIZE;
+        let cell_width = measure_cell_width(window, &cli.font_family, font_size);
         let viewport = window.viewport_size();
-        let grid_size = compute_grid_size(viewport, cell_width, cli.show_status_bar);
+        let grid_size = compute_grid_size(
+            viewport,
+            cell_width,
+            line_height_for(font_size),
+            cli.show_status_bar,
+        );
 
         let terminal_title = Arc::new(Mutex::new(None));
         let term = Term::new(
@@ -456,27 +467,27 @@ impl AgentTerminal {
         let processor = Processor::<StdSyncHandler>::new();
         let (shell, master, writer, child, output_rx, debug) =
             match PtySession::spawn(grid_size.rows, grid_size.cols) {
-            Ok(session) => {
-                let shell = session.shell.clone();
-                let debug =
-                    SharedDebugState::new(shell.clone(), "connected".to_string(), grid_size);
-                (
-                    shell,
-                    Some(session.master),
-                    Some(session.writer),
-                    Some(session.child),
-                    Some(session.output_rx),
-                    debug,
-                )
-            }
-            Err(err) => {
-                let message = format!("failed to start shell: {err:#}");
-                let debug =
-                    SharedDebugState::new("<none>".to_string(), message.clone(), grid_size);
-                debug.set_error(message);
-                (String::from("<none>"), None, None, None, None, debug)
-            }
-        };
+                Ok(session) => {
+                    let shell = session.shell.clone();
+                    let debug =
+                        SharedDebugState::new(shell.clone(), "connected".to_string(), grid_size);
+                    (
+                        shell,
+                        Some(session.master),
+                        Some(session.writer),
+                        Some(session.child),
+                        Some(session.output_rx),
+                        debug,
+                    )
+                }
+                Err(err) => {
+                    let message = format!("failed to start shell: {err:#}");
+                    let debug =
+                        SharedDebugState::new("<none>".to_string(), message.clone(), grid_size);
+                    debug.set_error(message);
+                    (String::from("<none>"), None, None, None, None, debug)
+                }
+            };
 
         start_debug_http_server(debug.clone(), writer.clone());
 
@@ -490,6 +501,7 @@ impl AgentTerminal {
             terminal_title: terminal_title.clone(),
             show_status_bar: cli.show_status_bar,
             font_family: cli.font_family.clone(),
+            font_size,
             master,
             writer,
             child,
@@ -611,10 +623,31 @@ impl AgentTerminal {
     }
 
     fn sync_grid_to_window(&mut self, window: &mut Window) {
-        let cell_width = measure_cell_width(window, &self.font_family);
+        let cell_width = measure_cell_width(window, &self.font_family, self.font_size);
         let viewport = window.viewport_size();
-        let new_grid = compute_grid_size(viewport, cell_width, self.show_status_bar);
+        let new_grid = compute_grid_size(
+            viewport,
+            cell_width,
+            self.line_height(),
+            self.show_status_bar,
+        );
         self.apply_grid_size(new_grid);
+    }
+
+    fn line_height(&self) -> Pixels {
+        line_height_for(self.font_size)
+    }
+
+    fn adjust_font_size(&mut self, delta: Pixels, window: &mut Window) {
+        let next_size = (self.font_size + delta)
+            .max(MIN_FONT_SIZE)
+            .min(MAX_FONT_SIZE);
+        if next_size == self.font_size {
+            return;
+        }
+
+        self.font_size = next_size;
+        self.sync_grid_to_window(window);
     }
 
     fn apply_grid_size(&mut self, new_grid: GridSize) {
@@ -829,14 +862,15 @@ impl AgentTerminal {
         element_bounds: Bounds<Pixels>,
         window: &mut Window,
     ) -> Bounds<Pixels> {
-        let cell_width = measure_cell_width(window, &self.font_family);
+        let cell_width = measure_cell_width(window, &self.font_family, self.font_size);
+        let line_height = self.line_height();
         let cursor_origin = point(
             element_bounds.origin.x + TEXT_PADDING_X + self.snapshot.cursor_col as f32 * cell_width,
             element_bounds.origin.y
                 + TEXT_PADDING_Y
-                + self.snapshot.cursor_row as f32 * LINE_HEIGHT,
+                + self.snapshot.cursor_row as f32 * line_height,
         );
-        Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), LINE_HEIGHT))
+        Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height))
     }
 
     fn on_mouse_down(
@@ -848,11 +882,27 @@ impl AgentTerminal {
         window.focus(&self.focus_handle, cx);
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.trace_input(format!(
             "keydown key={:?} key_char={:?} modifiers={:?}",
             event.keystroke.key, event.keystroke.key_char, event.keystroke.modifiers
         ));
+
+        if is_zoom_in_shortcut(&event.keystroke) {
+            self.debug.record_key_event();
+            self.adjust_font_size(px(FONT_SIZE_STEP), window);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
+        if is_zoom_out_shortcut(&event.keystroke) {
+            self.debug.record_key_event();
+            self.adjust_font_size(px(-FONT_SIZE_STEP), window);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
 
         if is_select_all_shortcut(&event.keystroke) {
             self.debug.record_key_event();
@@ -1076,6 +1126,8 @@ impl Render for AgentTerminal {
         let status = self.debug.status_summary();
         let shell = self.shell.clone();
         let font_family = self.font_family.clone();
+        let font_size = self.font_size;
+        let line_height = self.line_height();
         let note = self.debug.note();
         let terminal_title = self
             .terminal_title
@@ -1146,7 +1198,6 @@ impl Render for AgentTerminal {
                     window.paint_quad(fill(bounds, black()));
 
                     let mono = font(font_family.clone());
-                    let font_size = FONT_SIZE;
                     let run_template = gpui::TextRun {
                         len: 0,
                         font: mono.clone(),
@@ -1166,7 +1217,7 @@ impl Render for AgentTerminal {
 
                     let origin = bounds.origin + point(TEXT_PADDING_X, TEXT_PADDING_Y);
                     for (row_index, row) in snapshot.cells.iter().enumerate() {
-                        let y = origin.y + row_index as f32 * LINE_HEIGHT;
+                        let y = origin.y + row_index as f32 * line_height;
 
                         for (col_index, cell) in row.iter().enumerate() {
                             let x = origin.x + col_index as f32 * cell_width;
@@ -1175,7 +1226,7 @@ impl Render for AgentTerminal {
 
                             if let Some(bg) = cell.bg {
                                 window.paint_quad(fill(
-                                    Bounds::new(cell_origin, size(cell_width_px, LINE_HEIGHT)),
+                                    Bounds::new(cell_origin, size(cell_width_px, line_height)),
                                     bg,
                                 ));
                             }
@@ -1194,7 +1245,7 @@ impl Render for AgentTerminal {
                                 );
                                 let _ = shaped.paint(
                                     cell_origin,
-                                    LINE_HEIGHT,
+                                    line_height,
                                     gpui::TextAlign::Left,
                                     None,
                                     window,
@@ -1207,10 +1258,10 @@ impl Render for AgentTerminal {
                     if focused && snapshot.cursor_visible {
                         let cursor_origin = point(
                             origin.x + snapshot.cursor_col as f32 * cell_width,
-                            origin.y + snapshot.cursor_row as f32 * LINE_HEIGHT,
+                            origin.y + snapshot.cursor_row as f32 * line_height,
                         );
                         window.paint_quad(fill(
-                            Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), LINE_HEIGHT)),
+                            Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height)),
                             rgba(0x3b82f659),
                         ));
                     }
@@ -1221,19 +1272,24 @@ impl Render for AgentTerminal {
     }
 }
 
-fn measure_cell_width(window: &mut Window, font_family: &str) -> Pixels {
+fn measure_cell_width(window: &mut Window, font_family: &str, font_size: Pixels) -> Pixels {
     let mono = font(font_family.to_string());
     let font_id = window.text_system().resolve_font(&mono);
     window
         .text_system()
-        .advance(font_id, FONT_SIZE, 'M')
+        .advance(font_id, font_size, 'M')
         .map(|advance| advance.width)
         .unwrap_or(px(8.0))
+}
+
+fn line_height_for(font_size: Pixels) -> Pixels {
+    (font_size * LINE_HEIGHT_SCALE).max(font_size + px(2.0))
 }
 
 fn compute_grid_size(
     viewport: gpui::Size<Pixels>,
     cell_width: Pixels,
+    line_height: Pixels,
     show_status_bar: bool,
 ) -> GridSize {
     let mut usable_width = viewport.width - (TEXT_PADDING_X * 2.0);
@@ -1248,12 +1304,12 @@ fn compute_grid_size(
     if usable_width < cell_width {
         usable_width = cell_width;
     }
-    if usable_height < LINE_HEIGHT {
-        usable_height = LINE_HEIGHT;
+    if usable_height < line_height {
+        usable_height = line_height;
     }
 
     let cols = ((usable_width / cell_width).floor() as u32).max(MIN_COLS as u32) as u16;
-    let rows = ((usable_height / LINE_HEIGHT).floor() as u32).max(MIN_ROWS as u32) as u16;
+    let rows = ((usable_height / line_height).floor() as u32).max(MIN_ROWS as u32) as u16;
 
     GridSize { cols, rows }
 }
@@ -1507,7 +1563,12 @@ fn run_self_check() -> Result<()> {
         "indexed color 231 mismatch"
     );
 
-    let grid = compute_grid_size(size(px(1000.0), px(520.0)), px(8.0), false);
+    let grid = compute_grid_size(
+        size(px(1000.0), px(520.0)),
+        px(8.0),
+        line_height_for(DEFAULT_FONT_SIZE),
+        false,
+    );
     ensure!(
         grid.cols >= 80,
         "computed columns too small for 1000px viewport"
@@ -1704,6 +1765,56 @@ mod tests {
     }
 
     #[test]
+    fn detects_zoom_shortcuts() {
+        let cmd_equal = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "=".to_string(),
+            key_char: Some("=".to_string()),
+        };
+        assert!(is_zoom_in_shortcut(&cmd_equal));
+        assert!(!is_zoom_out_shortcut(&cmd_equal));
+
+        let cmd_minus = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "-".to_string(),
+            key_char: Some("-".to_string()),
+        };
+        assert!(is_zoom_out_shortcut(&cmd_minus));
+        assert!(!is_zoom_in_shortcut(&cmd_minus));
+
+        let cmd_shift_equal = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                platform: true,
+                shift: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "=".to_string(),
+            key_char: Some("+".to_string()),
+        };
+        assert!(is_zoom_in_shortcut(&cmd_shift_equal));
+    }
+
+    #[test]
+    fn zoom_shortcuts_reject_non_platform_combos() {
+        let ctrl_equal = gpui::Keystroke {
+            modifiers: gpui::Modifiers {
+                control: true,
+                ..gpui::Modifiers::none()
+            },
+            key: "=".to_string(),
+            key_char: Some("=".to_string()),
+        };
+        assert!(!is_zoom_in_shortcut(&ctrl_equal));
+        assert!(!is_zoom_out_shortcut(&ctrl_equal));
+    }
+
+    #[test]
     fn printable_text_keys_defer_to_text_input_on_macos() {
         let key = gpui::Keystroke {
             modifiers: gpui::Modifiers::none(),
@@ -1734,14 +1845,7 @@ mod tests {
 
     #[test]
     fn ax_override_rejects_stale_last_published_value() {
-        assert!(!should_accept_ax_override(
-            "ab",
-            2,
-            "abc",
-            3,
-            "ab",
-            2,
-        ));
+        assert!(!should_accept_ax_override("ab", 2, "abc", 3, "ab", 2,));
     }
 
     #[test]
@@ -1759,12 +1863,7 @@ mod tests {
     #[test]
     fn ax_override_rejects_same_model_state() {
         assert!(!should_accept_ax_override(
-            "hello",
-            5,
-            "hello",
-            5,
-            "hello",
-            5,
+            "hello", 5, "hello", 5, "hello", 5,
         ));
     }
 
@@ -1781,24 +1880,12 @@ mod tests {
 
     #[test]
     fn skip_publish_while_accepting_external_override() {
-        assert!(!should_publish_model_to_ax(
-            "Hello.",
-            6,
-            "你好.",
-            3,
-            true,
-        ));
+        assert!(!should_publish_model_to_ax("Hello.", 6, "你好.", 3, true,));
     }
 
     #[test]
     fn skip_publish_when_ax_already_matches_model() {
-        assert!(!should_publish_model_to_ax(
-            "synced",
-            6,
-            "synced",
-            6,
-            false,
-        ));
+        assert!(!should_publish_model_to_ax("synced", 6, "synced", 6, false,));
     }
 
     #[test]
@@ -1929,11 +2016,21 @@ mod tests {
 
     #[test]
     fn compute_grid_has_sane_minimums() {
-        let tiny = compute_grid_size(size(px(10.0), px(10.0)), px(8.0), false);
+        let tiny = compute_grid_size(
+            size(px(10.0), px(10.0)),
+            px(8.0),
+            line_height_for(DEFAULT_FONT_SIZE),
+            false,
+        );
         assert_eq!(tiny.cols, MIN_COLS);
         assert_eq!(tiny.rows, MIN_ROWS);
 
-        let normal = compute_grid_size(size(px(1000.0), px(520.0)), px(8.0), false);
+        let normal = compute_grid_size(
+            size(px(1000.0), px(520.0)),
+            px(8.0),
+            line_height_for(DEFAULT_FONT_SIZE),
+            false,
+        );
         assert!(normal.cols >= 80);
         assert!(normal.rows >= 20);
     }
