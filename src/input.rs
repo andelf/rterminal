@@ -4,7 +4,7 @@ use alacritty_terminal::term::TermMode;
 use gpui::{
     App, Bounds, Context, EntityInputHandler, InputHandler, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent,
-    UTF16Selection, Window, point, px, size,
+    PromptLevel, UTF16Selection, Window, point, px, size,
 };
 
 use crate::keyboard::{
@@ -23,6 +23,16 @@ use crate::text_utils::{
 use crate::AgentTerminal;
 
 const FONT_SIZE_STEP: f32 = 1.0;
+const PASTE_GUARD_MIN_LINES: usize = 4;
+const PASTE_GUARD_MIN_CHARS: usize = 120;
+const PASTE_GUARD_NON_ASCII_RATIO: f32 = 0.35;
+
+#[derive(Clone, Copy, Debug)]
+struct PasteRisk {
+    line_count: usize,
+    char_count: usize,
+    non_ascii_ratio: f32,
+}
 
 pub(crate) struct AgentTerminalInputHandler {
     terminal: gpui::Entity<AgentTerminal>,
@@ -628,6 +638,54 @@ impl AgentTerminal {
             if let Some(item) = cx.read_from_clipboard()
                 && let Some(text) = item.text()
             {
+                if let Some(risk) = evaluate_paste_risk(&text) {
+                    if self.paste_guard_prompt_open {
+                        self.debug
+                            .set_note(Some("paste confirmation already open".to_string()));
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+
+                    self.paste_guard_prompt_open = true;
+                    let detail = format!(
+                        "{} lines, {} chars, {:.0}% non-ASCII text.\nPaste anyway?",
+                        risk.line_count,
+                        risk.char_count,
+                        risk.non_ascii_ratio * 100.0
+                    );
+                    let answer = window.prompt(
+                        PromptLevel::Warning,
+                        "Large multi-line paste detected",
+                        Some(&detail),
+                        &["Paste", "Cancel"],
+                        cx,
+                    );
+                    let text_to_paste = text.to_string();
+
+                    cx.spawn(async move |this: gpui::WeakEntity<AgentTerminal>, cx: &mut gpui::AsyncApp| {
+                        let paste_allowed = answer.await.ok() == Some(0);
+                        let _ = this.update(cx, move |this, cx| {
+                            this.paste_guard_prompt_open = false;
+                            if paste_allowed {
+                                this.insert_input_text_at_cursor(&text_to_paste);
+                                this.write_text_input(&text_to_paste);
+                                this.debug
+                                    .set_note(Some("large paste confirmed".to_string()));
+                            } else {
+                                this.debug
+                                    .set_note(Some("large paste canceled".to_string()));
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+
                 self.insert_input_text_at_cursor(&text);
                 self.write_text_input(&text);
             }
@@ -804,6 +862,61 @@ fn encode_alt_scroll_bytes(x_steps: i32, y_steps: i32) -> Vec<u8> {
     }
 
     content
+}
+
+fn evaluate_paste_risk(text: &str) -> Option<PasteRisk> {
+    let line_count = text.lines().count().max(1);
+    let char_count = text.chars().count();
+    if line_count < PASTE_GUARD_MIN_LINES || char_count < PASTE_GUARD_MIN_CHARS {
+        return None;
+    }
+
+    let mut visible_chars = 0usize;
+    let mut non_ascii_chars = 0usize;
+    for ch in text.chars() {
+        if ch.is_control() || ch.is_whitespace() {
+            continue;
+        }
+        visible_chars += 1;
+        if !ch.is_ascii() {
+            non_ascii_chars += 1;
+        }
+    }
+
+    if visible_chars == 0 {
+        return None;
+    }
+
+    let non_ascii_ratio = non_ascii_chars as f32 / visible_chars as f32;
+    if non_ascii_ratio < PASTE_GUARD_NON_ASCII_RATIO {
+        return None;
+    }
+
+    Some(PasteRisk {
+        line_count,
+        char_count,
+        non_ascii_ratio,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::evaluate_paste_risk;
+
+    #[test]
+    fn paste_risk_requires_multiline_and_non_ascii_heavy_content() {
+        let safe = "line1\nline2\nline3\nline4";
+        assert!(evaluate_paste_risk(safe).is_none());
+
+        let risky = "中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第二行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第三行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第四行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n";
+        assert!(evaluate_paste_risk(risky).is_some());
+    }
+
+    #[test]
+    fn paste_risk_ignores_short_text_even_if_non_ascii() {
+        let short = "你好\n你好\n你好\n你好\n";
+        assert!(evaluate_paste_risk(short).is_none());
+    }
 }
 
 impl EntityInputHandler for AgentTerminal {
