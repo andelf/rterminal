@@ -39,6 +39,15 @@ pub(crate) fn should_accept_ax_override(
     last_published_text: &str,
     last_published_cursor_utf16: usize,
 ) -> bool {
+    // Fresh terminals can inherit stale AX value from a previously focused tab/window.
+    // When the local model and publish baseline are both empty, prefer clearing AX state
+    // instead of importing unrelated text.
+    let has_local_publish_baseline =
+        !last_published_text.is_empty() || last_published_cursor_utf16 > 0;
+    if !has_local_publish_baseline && model_text.is_empty() && model_cursor_utf16 == 0 {
+        return false;
+    }
+
     let differs_from_model = ax_text != model_text || ax_cursor_utf16 != model_cursor_utf16;
     let is_stale_last_publish =
         ax_text == last_published_text && ax_cursor_utf16 == last_published_cursor_utf16;
@@ -159,4 +168,19 @@ pub(crate) fn delete_next_word_utf16(text: &mut String, cursor_utf16: &mut usize
 pub(crate) fn delete_to_end_utf16(text: &mut String, cursor_utf16: usize) {
     let cursor_byte = utf16_to_byte_index(text, cursor_utf16);
     text.truncate(cursor_byte);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_accept_ax_override;
+
+    #[test]
+    fn rejects_stale_ax_state_for_fresh_terminal_model() {
+        assert!(!should_accept_ax_override("PNPN", 4, "", 0, "", 0,));
+    }
+
+    #[test]
+    fn accepts_ax_override_after_local_baseline_exists() {
+        assert!(should_accept_ax_override("abcd", 4, "abc", 3, "abc", 3,));
+    }
 }
