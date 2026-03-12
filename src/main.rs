@@ -29,7 +29,23 @@ pub(crate) use crate::terminal::{
 
 actions!(
     agent_tui_menu,
-    [QuitApp, NewTab, CloseTab, NextTab, PrevTab]
+    [
+        QuitApp,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        SwitchToTab1,
+        SwitchToTab2,
+        SwitchToTab3,
+        SwitchToTab4,
+        SwitchToTab5,
+        SwitchToTab6,
+        SwitchToTab7,
+        SwitchToTab8,
+        SwitchToTab9,
+        SwitchToTab10
+    ]
 );
 
 fn main() {
@@ -52,6 +68,16 @@ fn main() {
             KeyBinding::new("ctrl-shift-tab", PrevTab, None),
             KeyBinding::new("cmd-shift-]", NextTab, None),
             KeyBinding::new("cmd-shift-[", PrevTab, None),
+            KeyBinding::new("cmd-1", SwitchToTab1, None),
+            KeyBinding::new("cmd-2", SwitchToTab2, None),
+            KeyBinding::new("cmd-3", SwitchToTab3, None),
+            KeyBinding::new("cmd-4", SwitchToTab4, None),
+            KeyBinding::new("cmd-5", SwitchToTab5, None),
+            KeyBinding::new("cmd-6", SwitchToTab6, None),
+            KeyBinding::new("cmd-7", SwitchToTab7, None),
+            KeyBinding::new("cmd-8", SwitchToTab8, None),
+            KeyBinding::new("cmd-9", SwitchToTab9, None),
+            KeyBinding::new("cmd-0", SwitchToTab10, None),
         ]);
         cx.set_menus(vec![Menu {
             name: "Agent Terminal".into(),

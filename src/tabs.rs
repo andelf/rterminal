@@ -130,6 +130,16 @@ impl TerminalTabs {
         cx.notify();
     }
 
+    fn activate_tab_by_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() || self.active_tab == index {
+            return;
+        }
+
+        self.active_tab = index;
+        self.request_focus_active_tab(window, cx);
+        cx.notify();
+    }
+
     fn focus_active_tab_now(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
             tab.terminal.update(cx, |terminal, cx| {
@@ -159,6 +169,96 @@ impl TerminalTabs {
 
     fn on_prev_tab(&mut self, _: &crate::PrevTab, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_relative_tab(-1, window, cx);
+    }
+
+    fn on_switch_to_tab1(
+        &mut self,
+        _: &crate::SwitchToTab1,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(0, window, cx);
+    }
+
+    fn on_switch_to_tab2(
+        &mut self,
+        _: &crate::SwitchToTab2,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(1, window, cx);
+    }
+
+    fn on_switch_to_tab3(
+        &mut self,
+        _: &crate::SwitchToTab3,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(2, window, cx);
+    }
+
+    fn on_switch_to_tab4(
+        &mut self,
+        _: &crate::SwitchToTab4,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(3, window, cx);
+    }
+
+    fn on_switch_to_tab5(
+        &mut self,
+        _: &crate::SwitchToTab5,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(4, window, cx);
+    }
+
+    fn on_switch_to_tab6(
+        &mut self,
+        _: &crate::SwitchToTab6,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(5, window, cx);
+    }
+
+    fn on_switch_to_tab7(
+        &mut self,
+        _: &crate::SwitchToTab7,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(6, window, cx);
+    }
+
+    fn on_switch_to_tab8(
+        &mut self,
+        _: &crate::SwitchToTab8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(7, window, cx);
+    }
+
+    fn on_switch_to_tab9(
+        &mut self,
+        _: &crate::SwitchToTab9,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(8, window, cx);
+    }
+
+    fn on_switch_to_tab10(
+        &mut self,
+        _: &crate::SwitchToTab10,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_tab_by_index(9, window, cx);
     }
 }
 
@@ -244,6 +344,16 @@ impl Render for TerminalTabs {
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_prev_tab))
+            .on_action(cx.listener(Self::on_switch_to_tab1))
+            .on_action(cx.listener(Self::on_switch_to_tab2))
+            .on_action(cx.listener(Self::on_switch_to_tab3))
+            .on_action(cx.listener(Self::on_switch_to_tab4))
+            .on_action(cx.listener(Self::on_switch_to_tab5))
+            .on_action(cx.listener(Self::on_switch_to_tab6))
+            .on_action(cx.listener(Self::on_switch_to_tab7))
+            .on_action(cx.listener(Self::on_switch_to_tab8))
+            .on_action(cx.listener(Self::on_switch_to_tab9))
+            .on_action(cx.listener(Self::on_switch_to_tab10))
             .flex()
             .flex_col()
             .child(tabs_row)
