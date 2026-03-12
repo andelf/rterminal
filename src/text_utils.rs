@@ -69,7 +69,7 @@ pub(crate) fn summarize_text_for_trace(text: &str) -> String {
     let mut out = String::new();
     for (idx, ch) in text.chars().enumerate() {
         if idx >= MAX_PREVIEW_CHARS {
-            out.push_str("…");
+            out.push('…');
             break;
         }
         out.push(ch);

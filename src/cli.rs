@@ -12,6 +12,7 @@ pub(crate) struct CliOptions {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn parse_cli_options_from<I>(args: I) -> CliOptions
 where
     I: IntoIterator<Item = String>,

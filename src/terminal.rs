@@ -410,15 +410,15 @@ impl AgentTerminal {
         self.grid_size = new_grid;
         self.term.resize(new_grid);
 
-        if let Some(master) = &self.master {
-            if let Err(err) = master.lock().resize(PtySize {
+        if let Some(master) = &self.master
+            && let Err(err) = master.lock().resize(PtySize {
                 rows: new_grid.rows,
                 cols: new_grid.cols,
                 pixel_width: 0,
                 pixel_height: 0,
-            }) {
-                self.debug.set_error(format!("pty resize failed: {err:#}"));
-            }
+            })
+        {
+            self.debug.set_error(format!("pty resize failed: {err:#}"));
         }
 
         self.debug.record_resize();

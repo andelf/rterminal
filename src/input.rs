@@ -39,6 +39,30 @@ pub(crate) struct AgentTerminalInputHandler {
     element_bounds: Bounds<Pixels>,
 }
 
+macro_rules! define_mouse_forwarders {
+    ($(($down:ident, $up:ident)),+ $(,)?) => {
+        $(
+            pub(crate) fn $down(
+                &mut self,
+                event: &MouseDownEvent,
+                window: &mut Window,
+                cx: &mut Context<Self>,
+            ) {
+                self.on_mouse_down(event, window, cx);
+            }
+
+            pub(crate) fn $up(
+                &mut self,
+                event: &MouseUpEvent,
+                window: &mut Window,
+                cx: &mut Context<Self>,
+            ) {
+                self.on_mouse_up(event, window, cx);
+            }
+        )+
+    };
+}
+
 impl AgentTerminalInputHandler {
     pub(crate) fn new(
         element_bounds: Bounds<Pixels>,
@@ -356,59 +380,11 @@ impl AgentTerminal {
         Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height))
     }
 
-    pub(crate) fn on_mouse_down_left(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.on_mouse_down(event, window, cx);
-    }
-
-    pub(crate) fn on_mouse_down_middle(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.on_mouse_down(event, window, cx);
-    }
-
-    pub(crate) fn on_mouse_down_right(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.on_mouse_down(event, window, cx);
-    }
-
-    pub(crate) fn on_mouse_up_left(
-        &mut self,
-        event: &MouseUpEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.on_mouse_up(event, window, cx);
-    }
-
-    pub(crate) fn on_mouse_up_middle(
-        &mut self,
-        event: &MouseUpEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.on_mouse_up(event, window, cx);
-    }
-
-    pub(crate) fn on_mouse_up_right(
-        &mut self,
-        event: &MouseUpEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.on_mouse_up(event, window, cx);
-    }
+    define_mouse_forwarders!(
+        (on_mouse_down_left, on_mouse_up_left),
+        (on_mouse_down_middle, on_mouse_up_middle),
+        (on_mouse_down_right, on_mouse_up_right),
+    );
 
     pub(crate) fn on_mouse_move(
         &mut self,
@@ -909,26 +885,6 @@ fn evaluate_paste_risk(text: &str) -> Option<PasteRisk> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::evaluate_paste_risk;
-
-    #[test]
-    fn paste_risk_requires_multiline_and_non_ascii_heavy_content() {
-        let safe = "line1\nline2\nline3\nline4";
-        assert!(evaluate_paste_risk(safe).is_none());
-
-        let risky = "中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第二行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第三行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第四行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n";
-        assert!(evaluate_paste_risk(risky).is_some());
-    }
-
-    #[test]
-    fn paste_risk_ignores_short_text_even_if_non_ascii() {
-        let short = "你好\n你好\n你好\n你好\n";
-        assert!(evaluate_paste_risk(short).is_none());
-    }
-}
-
 impl EntityInputHandler for AgentTerminal {
     fn text_for_range(
         &mut self,
@@ -1037,5 +993,25 @@ impl EntityInputHandler for AgentTerminal {
 
     fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::evaluate_paste_risk;
+
+    #[test]
+    fn paste_risk_requires_multiline_and_non_ascii_heavy_content() {
+        let safe = "line1\nline2\nline3\nline4";
+        assert!(evaluate_paste_risk(safe).is_none());
+
+        let risky = "中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第二行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第三行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n第四行中文内容一二三四五六七八九十中文内容一二三四五六七八九十\n";
+        assert!(evaluate_paste_risk(risky).is_some());
+    }
+
+    #[test]
+    fn paste_risk_ignores_short_text_even_if_non_ascii() {
+        let short = "你好\n你好\n你好\n你好\n";
+        assert!(evaluate_paste_risk(short).is_none());
     }
 }

@@ -13,11 +13,27 @@ struct TerminalTab {
     _exit_subscription: Subscription,
 }
 
+macro_rules! define_tab_switch_handlers {
+    ($(($method:ident, $action:ty, $index:expr)),+ $(,)?) => {
+        $(
+            fn $method(
+                &mut self,
+                _: &$action,
+                window: &mut Window,
+                cx: &mut Context<Self>,
+            ) {
+                self.activate_tab_by_index($index, window, cx);
+            }
+        )+
+    };
+}
+
 pub(crate) struct TerminalTabs {
     cli: CliOptions,
     tabs: Vec<TerminalTab>,
     active_tab: usize,
     next_tab_id: usize,
+    pending_focus_sync: bool,
 }
 
 impl TerminalTabs {
@@ -27,6 +43,7 @@ impl TerminalTabs {
             tabs: Vec::new(),
             active_tab: 0,
             next_tab_id: 1,
+            pending_focus_sync: false,
         };
 
         this.open_new_tab(window, cx);
@@ -76,6 +93,10 @@ impl TerminalTabs {
         };
 
         self.close_tab_at_index(index, cx);
+        if !self.tabs.is_empty() {
+            self.pending_focus_sync = true;
+            cx.notify();
+        }
     }
 
     fn close_tab_at_index(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -90,11 +111,7 @@ impl TerminalTabs {
             return;
         }
 
-        if self.active_tab > index {
-            self.active_tab -= 1;
-        } else if self.active_tab >= self.tabs.len() {
-            self.active_tab = self.tabs.len() - 1;
-        }
+        self.active_tab = next_active_tab_index(self.active_tab, index, self.tabs.len());
 
         cx.notify();
     }
@@ -105,6 +122,7 @@ impl TerminalTabs {
         };
 
         if self.active_tab == index {
+            self.request_focus_active_tab(window, cx);
             return;
         }
 
@@ -131,7 +149,12 @@ impl TerminalTabs {
     }
 
     fn activate_tab_by_index(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.tabs.len() || self.active_tab == index {
+        if index >= self.tabs.len() {
+            return;
+        }
+
+        if self.active_tab == index {
+            self.request_focus_active_tab(window, cx);
             return;
         }
 
@@ -171,99 +194,27 @@ impl TerminalTabs {
         self.activate_relative_tab(-1, window, cx);
     }
 
-    fn on_switch_to_tab1(
-        &mut self,
-        _: &crate::SwitchToTab1,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(0, window, cx);
-    }
-
-    fn on_switch_to_tab2(
-        &mut self,
-        _: &crate::SwitchToTab2,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(1, window, cx);
-    }
-
-    fn on_switch_to_tab3(
-        &mut self,
-        _: &crate::SwitchToTab3,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(2, window, cx);
-    }
-
-    fn on_switch_to_tab4(
-        &mut self,
-        _: &crate::SwitchToTab4,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(3, window, cx);
-    }
-
-    fn on_switch_to_tab5(
-        &mut self,
-        _: &crate::SwitchToTab5,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(4, window, cx);
-    }
-
-    fn on_switch_to_tab6(
-        &mut self,
-        _: &crate::SwitchToTab6,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(5, window, cx);
-    }
-
-    fn on_switch_to_tab7(
-        &mut self,
-        _: &crate::SwitchToTab7,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(6, window, cx);
-    }
-
-    fn on_switch_to_tab8(
-        &mut self,
-        _: &crate::SwitchToTab8,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(7, window, cx);
-    }
-
-    fn on_switch_to_tab9(
-        &mut self,
-        _: &crate::SwitchToTab9,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(8, window, cx);
-    }
-
-    fn on_switch_to_tab10(
-        &mut self,
-        _: &crate::SwitchToTab10,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab_by_index(9, window, cx);
-    }
+    define_tab_switch_handlers!(
+        (on_switch_to_tab1, crate::SwitchToTab1, 0),
+        (on_switch_to_tab2, crate::SwitchToTab2, 1),
+        (on_switch_to_tab3, crate::SwitchToTab3, 2),
+        (on_switch_to_tab4, crate::SwitchToTab4, 3),
+        (on_switch_to_tab5, crate::SwitchToTab5, 4),
+        (on_switch_to_tab6, crate::SwitchToTab6, 5),
+        (on_switch_to_tab7, crate::SwitchToTab7, 6),
+        (on_switch_to_tab8, crate::SwitchToTab8, 7),
+        (on_switch_to_tab9, crate::SwitchToTab9, 8),
+        (on_switch_to_tab10, crate::SwitchToTab10, 9),
+    );
 }
 
 impl Render for TerminalTabs {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_focus_sync {
+            self.pending_focus_sync = false;
+            self.request_focus_active_tab(window, cx);
+        }
+
         let this = cx.entity();
         let tabs_data: Vec<(usize, String, bool)> = self
             .tabs
@@ -358,5 +309,37 @@ impl Render for TerminalTabs {
             .flex_col()
             .child(tabs_row)
             .child(content)
+    }
+}
+
+fn next_active_tab_index(active: usize, removed: usize, remaining_len: usize) -> usize {
+    debug_assert!(remaining_len > 0);
+
+    if active > removed {
+        active - 1
+    } else if active >= remaining_len {
+        remaining_len - 1
+    } else {
+        active
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_active_tab_index;
+
+    #[test]
+    fn closing_tab_before_active_shifts_active_left() {
+        assert_eq!(next_active_tab_index(3, 1, 4), 2);
+    }
+
+    #[test]
+    fn closing_active_last_tab_selects_previous() {
+        assert_eq!(next_active_tab_index(2, 2, 2), 1);
+    }
+
+    #[test]
+    fn closing_tab_after_active_keeps_active() {
+        assert_eq!(next_active_tab_index(1, 3, 4), 1);
     }
 }
