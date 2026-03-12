@@ -8,24 +8,29 @@ mod keyboard;
 mod macos_ax;
 mod pty;
 mod render;
+mod tabs;
 mod terminal;
 mod text_utils;
 
 use gpui::{
-    App, Bounds, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds, WindowOptions,
-    actions, prelude::*, px, size,
+    App, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds,
+    WindowOptions, actions, prelude::*, px, size,
 };
 use gpui_platform::application;
 
 use crate::cli::parse_cli_options;
 pub(crate) use crate::input::AgentTerminalInputHandler;
+use crate::tabs::TerminalTabs;
 #[allow(unused_imports)]
 pub(crate) use crate::terminal::{
-    AgentTerminal, CellSnapshot, GridSize, ScreenSnapshot, cell_display_width_cols,
-    compute_grid_size, run_self_check, snapshot_to_lines, DEFAULT_FONT_SIZE,
+    AgentTerminal, CellSnapshot, DEFAULT_FONT_SIZE, GridSize, ScreenSnapshot,
+    cell_display_width_cols, compute_grid_size, run_self_check, snapshot_to_lines,
 };
 
-actions!(agent_tui_menu, [QuitApp]);
+actions!(
+    agent_tui_menu,
+    [QuitApp, NewTab, CloseTab, NextTab, PrevTab]
+);
 
 fn main() {
     let cli = parse_cli_options();
@@ -40,9 +45,23 @@ fn main() {
 
     application().run(move |cx: &mut App| {
         cx.on_action(|_: &QuitApp, cx: &mut App| cx.quit());
+        cx.bind_keys([
+            KeyBinding::new("cmd-t", NewTab, None),
+            KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("ctrl-tab", NextTab, None),
+            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+            KeyBinding::new("cmd-shift-]", NextTab, None),
+            KeyBinding::new("cmd-shift-[", PrevTab, None),
+        ]);
         cx.set_menus(vec![Menu {
             name: "Agent Terminal".into(),
             items: vec![
+                MenuItem::action("New Tab", NewTab),
+                MenuItem::action("Close Tab", CloseTab),
+                MenuItem::separator(),
+                MenuItem::action("Next Tab", NextTab),
+                MenuItem::action("Previous Tab", PrevTab),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Quit Agent Terminal", QuitApp),
@@ -64,7 +83,7 @@ fn main() {
             },
             move |window, cx| {
                 let cli = cli.clone();
-                cx.new(|cx| AgentTerminal::new(window, cx, cli))
+                cx.new(|cx| TerminalTabs::new(window, cx, cli))
             },
         )
         .expect("failed to open window");

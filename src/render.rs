@@ -1,6 +1,6 @@
 use gpui::{
-    Bounds, Context, MouseButton, Pixels, Render, Window, WindowControlArea,
-    black, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
+    Bounds, Context, MouseButton, Pixels, Render, Window, WindowControlArea, black, canvas, div,
+    fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 
 use crate::{AgentTerminal, AgentTerminalInputHandler};
@@ -11,7 +11,11 @@ pub(crate) const TEXT_PADDING_Y: Pixels = px(12.0);
 pub(crate) const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
 pub(crate) const STATUS_BAR_ESTIMATED_HEIGHT: Pixels = px(42.0);
 
-pub(crate) fn measure_cell_width(window: &mut Window, font_family: &str, font_size: Pixels) -> Pixels {
+pub(crate) fn measure_cell_width(
+    window: &mut Window,
+    font_family: &str,
+    font_size: Pixels,
+) -> Pixels {
     let mono = font(font_family.to_string());
     let font_id = window.text_system().resolve_font(&mono);
     window
@@ -117,7 +121,8 @@ impl Render for AgentTerminal {
                             for (col_index, cell) in row.iter().enumerate() {
                                 let x = origin.x + col_index as f32 * cell_width;
                                 let cell_origin = point(x, y);
-                                let cell_width_px = cell_width.max(px(2.0)) * cell.width_cols as f32;
+                                let cell_width_px =
+                                    cell_width.max(px(2.0)) * cell.width_cols as f32;
 
                                 if let Some(bg) = cell.bg {
                                     window.paint_quad(fill(
@@ -156,7 +161,10 @@ impl Render for AgentTerminal {
                                 origin.y + snapshot.cursor_row as f32 * line_height,
                             );
                             window.paint_quad(fill(
-                                Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height)),
+                                Bounds::new(
+                                    cursor_origin,
+                                    size(cell_width.max(px(2.0)), line_height),
+                                ),
                                 rgba(0xffea00a6),
                             ));
                         }
@@ -165,33 +173,38 @@ impl Render for AgentTerminal {
                 .size_full(),
             );
 
+        let title_bar = div()
+            .w_full()
+            .h(CUSTOM_TITLE_BAR_HEIGHT)
+            .px_3()
+            .bg(rgb(0x171a21))
+            .window_control_area(WindowControlArea::Drag)
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(div().w(px(52.0)))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(rgb(0xa9b1c6))
+                    .font_family(font_family.clone())
+                    .text_center()
+                    .child(terminal_title),
+            )
+            .child(div().w(px(52.0)));
+
         let root = div()
             .id("agent-terminal")
             .size_full()
             .bg(rgb(0x0f1115))
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::on_key_down))
-            .child(
-                div()
-                    .w_full()
-                    .h(CUSTOM_TITLE_BAR_HEIGHT)
-                    .px_3()
-                    .bg(rgb(0x171a21))
-                    .window_control_area(WindowControlArea::Drag)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().w(px(52.0)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(rgb(0xa9b1c6))
-                            .font_family(font_family.clone())
-                            .text_center()
-                            .child(terminal_title),
-                    )
-                    .child(div().w(px(52.0))),
-            );
+            .on_key_down(cx.listener(Self::on_key_down));
+
+        let root = if self.show_title_bar {
+            root.child(title_bar)
+        } else {
+            root
+        };
 
         let root = if self.show_status_bar {
             root.child(
@@ -221,8 +234,7 @@ mod tests {
     #[test]
     fn render_keeps_keydown_binding_on_root() {
         let source = include_str!("render.rs");
-        let keydown_binding =
-            [".on_key_down(", "cx.listener(Self::on_key_down)", ")"].concat();
+        let keydown_binding = [".on_key_down(", "cx.listener(Self::on_key_down)", ")"].concat();
         assert!(
             source.contains(&keydown_binding),
             "render root must bind keydown so Backspace/Ctrl combos reach terminal"
@@ -232,8 +244,7 @@ mod tests {
     #[test]
     fn render_binds_keydown_exactly_once() {
         let source = include_str!("render.rs");
-        let keydown_binding =
-            [".on_key_down(", "cx.listener(Self::on_key_down)", ")"].concat();
+        let keydown_binding = [".on_key_down(", "cx.listener(Self::on_key_down)", ")"].concat();
         assert_eq!(
             count_occurrences(source, &keydown_binding),
             1,

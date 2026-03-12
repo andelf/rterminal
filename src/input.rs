@@ -3,10 +3,11 @@ use std::ops::Range;
 use alacritty_terminal::term::TermMode;
 use gpui::{
     App, Bounds, Context, EntityInputHandler, InputHandler, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent,
-    PromptLevel, UTF16Selection, Window, point, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, ScrollDelta,
+    ScrollWheelEvent, UTF16Selection, Window, point, px, size,
 };
 
+use crate::AgentTerminal;
 use crate::keyboard::{
     encode_keystroke, is_paste_shortcut, is_select_all_shortcut, is_zoom_in_shortcut,
     is_zoom_out_shortcut, should_defer_to_text_input,
@@ -20,7 +21,6 @@ use crate::text_utils::{
     delete_next_word_utf16, delete_previous_word_utf16, delete_to_end_utf16, replace_range_utf16,
     summarize_text_for_trace, utf16_substring, utf16_to_byte_index,
 };
-use crate::AgentTerminal;
 
 const FONT_SIZE_STEP: f32 = 1.0;
 const PASTE_GUARD_MIN_LINES: usize = 4;
@@ -40,7 +40,10 @@ pub(crate) struct AgentTerminalInputHandler {
 }
 
 impl AgentTerminalInputHandler {
-    pub(crate) fn new(element_bounds: Bounds<Pixels>, terminal: gpui::Entity<AgentTerminal>) -> Self {
+    pub(crate) fn new(
+        element_bounds: Bounds<Pixels>,
+        terminal: gpui::Entity<AgentTerminal>,
+    ) -> Self {
         Self {
             terminal,
             element_bounds,
@@ -432,8 +435,7 @@ impl AgentTerminal {
             return;
         }
 
-        if let Some(bytes) =
-            encode_mouse_report(row, col, button_code, true, event.modifiers, mode)
+        if let Some(bytes) = encode_mouse_report(row, col, button_code, true, event.modifiers, mode)
         {
             self.write_bytes(&bytes);
             self.last_mouse_report = Some((row, col, button_code));
@@ -571,7 +573,11 @@ impl AgentTerminal {
         }
     }
 
-    fn mouse_grid_point(&self, position: gpui::Point<Pixels>, window: &mut Window) -> (usize, usize) {
+    fn mouse_grid_point(
+        &self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+    ) -> (usize, usize) {
         let status_height = if self.show_status_bar {
             STATUS_BAR_ESTIMATED_HEIGHT
         } else {
@@ -663,22 +669,25 @@ impl AgentTerminal {
                     );
                     let text_to_paste = text.to_string();
 
-                    cx.spawn(async move |this: gpui::WeakEntity<AgentTerminal>, cx: &mut gpui::AsyncApp| {
-                        let paste_allowed = answer.await.ok() == Some(0);
-                        let _ = this.update(cx, move |this, cx| {
-                            this.paste_guard_prompt_open = false;
-                            if paste_allowed {
-                                this.insert_input_text_at_cursor(&text_to_paste);
-                                this.write_text_input(&text_to_paste);
-                                this.debug
-                                    .set_note(Some("large paste confirmed".to_string()));
-                            } else {
-                                this.debug
-                                    .set_note(Some("large paste canceled".to_string()));
-                            }
-                            cx.notify();
-                        });
-                    })
+                    cx.spawn(
+                        async move |this: gpui::WeakEntity<AgentTerminal>,
+                                    cx: &mut gpui::AsyncApp| {
+                            let paste_allowed = answer.await.ok() == Some(0);
+                            let _ = this.update(cx, move |this, cx| {
+                                this.paste_guard_prompt_open = false;
+                                if paste_allowed {
+                                    this.insert_input_text_at_cursor(&text_to_paste);
+                                    this.write_text_input(&text_to_paste);
+                                    this.debug
+                                        .set_note(Some("large paste confirmed".to_string()));
+                                } else {
+                                    this.debug
+                                        .set_note(Some("large paste canceled".to_string()));
+                                }
+                                cx.notify();
+                            });
+                        },
+                    )
                     .detach();
 
                     cx.stop_propagation();
@@ -715,12 +724,7 @@ impl AgentTerminal {
     }
 
     pub(crate) fn window_title(&self) -> String {
-        if let Some(title) = self.terminal_title.lock().clone()
-            && !title.trim().is_empty()
-        {
-            return title;
-        }
-        format!("agent terminal | {}", self.shell)
+        format!("agent terminal | {}", self.tab_title())
     }
 
     pub(crate) fn apply_external_ax_input_state(&mut self, state: NativeAxInputState) -> bool {
@@ -798,7 +802,12 @@ fn encode_mouse_report(
         } else {
             3u8.saturating_add(mods)
         };
-        encode_normal_mouse_report(row, col, effective_button, mode.contains(TermMode::UTF8_MOUSE))
+        encode_normal_mouse_report(
+            row,
+            col,
+            effective_button,
+            mode.contains(TermMode::UTF8_MOUSE),
+        )
     }
 }
 
@@ -847,7 +856,8 @@ fn encode_normal_mouse_pos(pos: usize) -> [u8; 2] {
 }
 
 fn encode_alt_scroll_bytes(x_steps: i32, y_steps: i32) -> Vec<u8> {
-    let mut content = Vec::with_capacity(3 * (x_steps.unsigned_abs() + y_steps.unsigned_abs()) as usize);
+    let mut content =
+        Vec::with_capacity(3 * (x_steps.unsigned_abs() + y_steps.unsigned_abs()) as usize);
 
     for _ in 0..y_steps.unsigned_abs() {
         content.push(0x1b);

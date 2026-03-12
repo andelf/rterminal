@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::thread;
 use std::time::Instant;
 
@@ -10,7 +11,9 @@ use tiny_http::{Header, Response, Server, StatusCode};
 use crate::GridSize;
 use crate::pty::write_to_pty;
 
-const DEBUG_HTTP_DEFAULT_ADDR: &str = "127.0.0.1:7878";
+const DEBUG_HTTP_DEFAULT_HOST: &str = "127.0.0.1";
+const DEBUG_HTTP_DEFAULT_PORT: u16 = 7878;
+static NEXT_DEBUG_HTTP_PORT: AtomicU16 = AtomicU16::new(DEBUG_HTTP_DEFAULT_PORT);
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct DebugCounters {
@@ -189,7 +192,10 @@ pub(crate) fn start_debug_http_server(
     let addr = std::env::var("AGENT_TUI_DEBUG_ADDR")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEBUG_HTTP_DEFAULT_ADDR.to_string());
+        .unwrap_or_else(|| {
+            let port = NEXT_DEBUG_HTTP_PORT.fetch_add(1, Ordering::Relaxed);
+            format!("{DEBUG_HTTP_DEFAULT_HOST}:{port}")
+        });
     start_debug_http_server_at_addr(debug, writer, addr);
 }
 

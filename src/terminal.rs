@@ -11,12 +11,13 @@ use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, StdSyncHandler,
 };
 use anyhow::{Context as _, Result, ensure};
-use gpui::{Context, FocusHandle, Pixels, Subscription, Task, Window, px};
+use gpui::{Context, EventEmitter, FocusHandle, Pixels, Subscription, Task, Window, px};
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
 
 use crate::cli::CliOptions;
+use crate::color::indexed_to_rgb;
 use crate::color::{ansi_bg_to_hsla, ansi_to_hsla};
 use crate::debug_server::{SharedDebugState, start_debug_http_server};
 use crate::keyboard::encode_keystroke;
@@ -25,7 +26,6 @@ use crate::render::{
     CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_ESTIMATED_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
     line_height_for, measure_cell_width,
 };
-use crate::color::indexed_to_rgb;
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -35,6 +35,22 @@ pub(crate) const DEFAULT_FONT_SIZE: Pixels = px(14.0);
 pub(crate) const MIN_FONT_SIZE: Pixels = px(8.0);
 pub(crate) const MAX_FONT_SIZE: Pixels = px(48.0);
 const INPUT_TRACE_ENV: &str = "AGENT_TUI_INPUT_TRACE";
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AgentTerminalOptions {
+    pub(crate) show_title_bar: bool,
+}
+
+impl Default for AgentTerminalOptions {
+    fn default() -> Self {
+        Self {
+            show_title_bar: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TerminalExitedEvent;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct GridSize {
@@ -120,6 +136,7 @@ pub(crate) struct AgentTerminal {
     pub(crate) snapshot: ScreenSnapshot,
     pub(crate) shell: String,
     pub(crate) terminal_title: Arc<Mutex<Option<String>>>,
+    pub(crate) show_title_bar: bool,
     pub(crate) show_status_bar: bool,
     pub(crate) font_family: String,
     pub(crate) font_size: Pixels,
@@ -136,13 +153,39 @@ pub(crate) struct AgentTerminal {
     pub(crate) mouse_scroll_accum_y: f32,
     pub(crate) last_mouse_report: Option<(usize, usize, u8)>,
     pub(crate) paste_guard_prompt_open: bool,
+    pub(crate) shell_exited: bool,
     pub(crate) debug: SharedDebugState,
     pub(crate) _window_bounds_sub: Option<Subscription>,
     pub(crate) _pump_task: Task<Result<()>>,
 }
 
 impl AgentTerminal {
+    #[allow(dead_code)]
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>, cli: CliOptions) -> Self {
+        Self::new_with_options(window, cx, cli, AgentTerminalOptions::default())
+    }
+
+    pub(crate) fn new_embedded(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        cli: CliOptions,
+    ) -> Self {
+        Self::new_with_options(
+            window,
+            cx,
+            cli,
+            AgentTerminalOptions {
+                show_title_bar: false,
+            },
+        )
+    }
+
+    pub(crate) fn new_with_options(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        cli: CliOptions,
+        options: AgentTerminalOptions,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_size = DEFAULT_FONT_SIZE;
         let cell_width = measure_cell_width(window, &cli.font_family, font_size);
@@ -180,7 +223,8 @@ impl AgentTerminal {
                 }
                 Err(err) => {
                     let message = format!("failed to start shell: {err:#}");
-                    let debug = SharedDebugState::new("<none>".to_string(), message.clone(), grid_size);
+                    let debug =
+                        SharedDebugState::new("<none>".to_string(), message.clone(), grid_size);
                     debug.set_error(message);
                     (String::from("<none>"), None, None, None, None, debug)
                 }
@@ -196,6 +240,7 @@ impl AgentTerminal {
             snapshot: ScreenSnapshot::default(),
             shell,
             terminal_title: terminal_title.clone(),
+            show_title_bar: options.show_title_bar,
             show_status_bar: cli.show_status_bar,
             font_family: cli.font_family.clone(),
             font_size,
@@ -212,6 +257,7 @@ impl AgentTerminal {
             mouse_scroll_accum_y: 0.0,
             last_mouse_report: None,
             paste_guard_prompt_open: false,
+            shell_exited: false,
             debug,
             _window_bounds_sub: None,
             _pump_task: Task::ready(Ok(())),
@@ -233,9 +279,10 @@ impl AgentTerminal {
                     })?;
                 }
                 let _ = this.update(cx, |this, cx| {
-                    this.debug
-                        .set_note(Some("shell exited, closing application".to_string()));
-                    cx.quit();
+                    this.shell_exited = true;
+                    this.debug.set_note(Some("shell exited".to_string()));
+                    cx.emit(TerminalExitedEvent);
+                    cx.notify();
                 });
                 Ok(())
             });
@@ -395,7 +442,17 @@ impl AgentTerminal {
             }
         }
     }
+
+    pub(crate) fn tab_title(&self) -> String {
+        self.terminal_title
+            .lock()
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| self.shell.clone())
+    }
 }
+
+impl EventEmitter<TerminalExitedEvent> for AgentTerminal {}
 
 impl Drop for AgentTerminal {
     fn drop(&mut self) {
