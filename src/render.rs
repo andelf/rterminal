@@ -63,6 +63,7 @@ impl Render for AgentTerminal {
             .clone()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| shell.clone());
+        let canvas_font_family = font_family.clone();
 
         let status_line = if let Some(note) = note {
             format!("agent terminal | {} | {} | note: {}", shell, status, note)
@@ -70,12 +71,105 @@ impl Render for AgentTerminal {
             format!("agent terminal | {} | {}", shell, status)
         };
 
+        let terminal_surface = div()
+            .size_full()
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down_left))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down_middle))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down_right))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up_left))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up_middle))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up_right))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .child(
+                canvas(
+                    move |_, _, _| {},
+                    move |bounds, _, window, cx| {
+                        window.handle_input(
+                            &focus_handle,
+                            AgentTerminalInputHandler::new(bounds, entity.clone()),
+                            cx,
+                        );
+                        window.paint_quad(fill(bounds, black()));
+
+                        let mono = font(canvas_font_family.clone());
+                        let run_template = gpui::TextRun {
+                            len: 0,
+                            font: mono.clone(),
+                            color: rgb(0xd7dae0).into(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+
+                        let font_pixels = font_size;
+                        let font_id = window.text_system().resolve_font(&mono);
+                        let cell_width = window
+                            .text_system()
+                            .advance(font_id, font_pixels, 'M')
+                            .map(|advance| advance.width)
+                            .unwrap_or(px(8.0));
+
+                        let origin = bounds.origin + point(TEXT_PADDING_X, TEXT_PADDING_Y);
+                        for (row_index, row) in snapshot.cells.iter().enumerate() {
+                            let y = origin.y + row_index as f32 * line_height;
+
+                            for (col_index, cell) in row.iter().enumerate() {
+                                let x = origin.x + col_index as f32 * cell_width;
+                                let cell_origin = point(x, y);
+                                let cell_width_px = cell_width.max(px(2.0)) * cell.width_cols as f32;
+
+                                if let Some(bg) = cell.bg {
+                                    window.paint_quad(fill(
+                                        Bounds::new(cell_origin, size(cell_width_px, line_height)),
+                                        bg,
+                                    ));
+                                }
+
+                                if cell.ch != ' ' {
+                                    let run = gpui::TextRun {
+                                        len: cell.ch.len_utf8(),
+                                        color: cell.fg,
+                                        ..run_template.clone()
+                                    };
+                                    let shaped = window.text_system().shape_line(
+                                        cell.ch.to_string().into(),
+                                        font_pixels,
+                                        &[run],
+                                        Some(cell_width_px),
+                                    );
+                                    let _ = shaped.paint(
+                                        cell_origin,
+                                        line_height,
+                                        gpui::TextAlign::Left,
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }
+                        }
+
+                        if focused && snapshot.cursor_visible {
+                            let cursor_origin = point(
+                                origin.x + snapshot.cursor_col as f32 * cell_width,
+                                origin.y + snapshot.cursor_row as f32 * line_height,
+                            );
+                            window.paint_quad(fill(
+                                Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height)),
+                                rgba(0x3b82f659),
+                            ));
+                        }
+                    },
+                )
+                .size_full(),
+            );
+
         let root = div()
             .id("agent-terminal")
             .size_full()
             .bg(rgb(0x0f1115))
             .track_focus(&self.focus_handle)
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_key_down(cx.listener(Self::on_key_down))
             .child(
                 div()
@@ -114,88 +208,36 @@ impl Render for AgentTerminal {
             root
         };
 
-        root.child(
-            canvas(
-                move |_, _, _| {},
-                move |bounds, _, window, cx| {
-                    window.handle_input(
-                        &focus_handle,
-                        AgentTerminalInputHandler::new(bounds, entity.clone()),
-                        cx,
-                    );
-                    window.paint_quad(fill(bounds, black()));
+        root.child(terminal_surface)
+    }
+}
 
-                    let mono = font(font_family.clone());
-                    let run_template = gpui::TextRun {
-                        len: 0,
-                        font: mono.clone(),
-                        color: rgb(0xd7dae0).into(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
+#[cfg(test)]
+mod tests {
+    fn count_occurrences(haystack: &str, needle: &str) -> usize {
+        haystack.match_indices(needle).count()
+    }
 
-                    let font_pixels = font_size;
-                    let font_id = window.text_system().resolve_font(&mono);
-                    let cell_width = window
-                        .text_system()
-                        .advance(font_id, font_pixels, 'M')
-                        .map(|advance| advance.width)
-                        .unwrap_or(px(8.0));
+    #[test]
+    fn render_keeps_keydown_binding_on_root() {
+        let source = include_str!("render.rs");
+        let keydown_binding =
+            [".on_key_down(", "cx.listener(Self::on_key_down)", ")"].concat();
+        assert!(
+            source.contains(&keydown_binding),
+            "render root must bind keydown so Backspace/Ctrl combos reach terminal"
+        );
+    }
 
-                    let origin = bounds.origin + point(TEXT_PADDING_X, TEXT_PADDING_Y);
-                    for (row_index, row) in snapshot.cells.iter().enumerate() {
-                        let y = origin.y + row_index as f32 * line_height;
-
-                        for (col_index, cell) in row.iter().enumerate() {
-                            let x = origin.x + col_index as f32 * cell_width;
-                            let cell_origin = point(x, y);
-                            let cell_width_px = cell_width.max(px(2.0)) * cell.width_cols as f32;
-
-                            if let Some(bg) = cell.bg {
-                                window.paint_quad(fill(
-                                    Bounds::new(cell_origin, size(cell_width_px, line_height)),
-                                    bg,
-                                ));
-                            }
-
-                            if cell.ch != ' ' {
-                                let run = gpui::TextRun {
-                                    len: cell.ch.len_utf8(),
-                                    color: cell.fg,
-                                    ..run_template.clone()
-                                };
-                                let shaped = window.text_system().shape_line(
-                                    cell.ch.to_string().into(),
-                                    font_pixels,
-                                    &[run],
-                                    Some(cell_width_px),
-                                );
-                                let _ = shaped.paint(
-                                    cell_origin,
-                                    line_height,
-                                    gpui::TextAlign::Left,
-                                    None,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        }
-                    }
-
-                    if focused && snapshot.cursor_visible {
-                        let cursor_origin = point(
-                            origin.x + snapshot.cursor_col as f32 * cell_width,
-                            origin.y + snapshot.cursor_row as f32 * line_height,
-                        );
-                        window.paint_quad(fill(
-                            Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height)),
-                            rgba(0x3b82f659),
-                        ));
-                    }
-                },
-            )
-            .size_full(),
-        )
+    #[test]
+    fn render_binds_keydown_exactly_once() {
+        let source = include_str!("render.rs");
+        let keydown_binding =
+            [".on_key_down(", "cx.listener(Self::on_key_down)", ")"].concat();
+        assert_eq!(
+            count_occurrences(source, &keydown_binding),
+            1,
+            "keydown listener should be bound once to avoid duplicate key handling"
+        );
     }
 }

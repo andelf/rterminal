@@ -1,7 +1,9 @@
 use std::ops::Range;
 
+use alacritty_terminal::term::TermMode;
 use gpui::{
-    App, Bounds, Context, EntityInputHandler, InputHandler, KeyDownEvent, MouseDownEvent, Pixels,
+    App, Bounds, Context, EntityInputHandler, InputHandler, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollDelta, ScrollWheelEvent,
     UTF16Selection, Window, point, px, size,
 };
 
@@ -10,7 +12,10 @@ use crate::keyboard::{
     is_zoom_out_shortcut, should_defer_to_text_input,
 };
 use crate::macos_ax::NativeAxInputState;
-use crate::render::{TEXT_PADDING_X, TEXT_PADDING_Y, measure_cell_width};
+use crate::render::{
+    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_ESTIMATED_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
+    measure_cell_width,
+};
 use crate::text_utils::{
     delete_next_word_utf16, delete_previous_word_utf16, delete_to_end_utf16, replace_range_utf16,
     summarize_text_for_trace, utf16_substring, utf16_to_byte_index,
@@ -338,13 +343,247 @@ impl AgentTerminal {
         Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height))
     }
 
-    pub(crate) fn on_mouse_down(
+    pub(crate) fn on_mouse_down_left(
         &mut self,
-        _event: &MouseDownEvent,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_mouse_down(event, window, cx);
+    }
+
+    pub(crate) fn on_mouse_down_middle(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_mouse_down(event, window, cx);
+    }
+
+    pub(crate) fn on_mouse_down_right(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_mouse_down(event, window, cx);
+    }
+
+    pub(crate) fn on_mouse_up_left(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_mouse_up(event, window, cx);
+    }
+
+    pub(crate) fn on_mouse_up_middle(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_mouse_up(event, window, cx);
+    }
+
+    pub(crate) fn on_mouse_up_right(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_mouse_up(event, window, cx);
+    }
+
+    pub(crate) fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mode = *self.term.mode();
+        if !mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) || event.modifiers.shift
+        {
+            return;
+        }
+
+        let Some(button_code) = mouse_move_button_code(event.pressed_button) else {
+            return;
+        };
+
+        if mode.contains(TermMode::MOUSE_DRAG) && button_code == 35 {
+            return;
+        }
+
+        let (row, col) = self.mouse_grid_point(event.position, window);
+        if self.last_mouse_report == Some((row, col, button_code)) {
+            return;
+        }
+
+        if let Some(bytes) =
+            encode_mouse_report(row, col, button_code, true, event.modifiers, mode)
+        {
+            self.write_bytes(&bytes);
+            self.last_mouse_report = Some((row, col, button_code));
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mode = *self.term.mode();
+        let (x_steps, y_steps) = self.scroll_steps(event, window);
+        if x_steps == 0 && y_steps == 0 {
+            return;
+        }
+
+        let mut handled = false;
+        if mode.intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift {
+            let (row, col) = self.mouse_grid_point(event.position, window);
+            handled |= self.repeat_wheel_report(row, col, x_steps, y_steps, event.modifiers, mode);
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+            && !event.modifiers.shift
+        {
+            let bytes = encode_alt_scroll_bytes(x_steps, y_steps);
+            if !bytes.is_empty() {
+                self.write_bytes(&bytes);
+                handled = true;
+            }
+        }
+
+        if handled {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        self.last_mouse_report = None;
+
+        let mode = *self.term.mode();
+        if mode.intersects(TermMode::MOUSE_MODE)
+            && !event.modifiers.shift
+            && let Some(button_code) = mouse_button_code(event.button)
+        {
+            let (row, col) = self.mouse_grid_point(event.position, window);
+            if let Some(bytes) =
+                encode_mouse_report(row, col, button_code, true, event.modifiers, mode)
+            {
+                self.write_bytes(&bytes);
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }
+    }
+
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = *self.term.mode();
+        if mode.intersects(TermMode::MOUSE_MODE)
+            && !event.modifiers.shift
+            && let Some(button_code) = mouse_button_code(event.button)
+        {
+            let (row, col) = self.mouse_grid_point(event.position, window);
+            if let Some(bytes) =
+                encode_mouse_report(row, col, button_code, false, event.modifiers, mode)
+            {
+                self.write_bytes(&bytes);
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }
+
+        self.last_mouse_report = None;
+    }
+
+    fn repeat_wheel_report(
+        &mut self,
+        row: usize,
+        col: usize,
+        x_steps: i32,
+        y_steps: i32,
+        modifiers: gpui::Modifiers,
+        mode: TermMode,
+    ) -> bool {
+        let mut handled = false;
+
+        let y_code = if y_steps > 0 { 64 } else { 65 };
+        for _ in 0..y_steps.unsigned_abs() {
+            if let Some(bytes) = encode_mouse_report(row, col, y_code, true, modifiers, mode) {
+                self.write_bytes(&bytes);
+                handled = true;
+            }
+        }
+
+        let x_code = if x_steps > 0 { 66 } else { 67 };
+        for _ in 0..x_steps.unsigned_abs() {
+            if let Some(bytes) = encode_mouse_report(row, col, x_code, true, modifiers, mode) {
+                self.write_bytes(&bytes);
+                handled = true;
+            }
+        }
+
+        handled
+    }
+
+    fn scroll_steps(&mut self, event: &ScrollWheelEvent, window: &mut Window) -> (i32, i32) {
+        match event.delta {
+            ScrollDelta::Lines(lines) => (lines.x as i32, lines.y as i32),
+            ScrollDelta::Pixels(pixels) => {
+                let cell_width = f32::from(
+                    measure_cell_width(window, &self.font_family, self.font_size).max(px(1.0)),
+                );
+                let line_height = f32::from(self.line_height().max(px(1.0)));
+
+                self.mouse_scroll_accum_x += f32::from(pixels.x);
+                self.mouse_scroll_accum_y += f32::from(pixels.y);
+
+                let x_steps = (self.mouse_scroll_accum_x / cell_width) as i32;
+                let y_steps = (self.mouse_scroll_accum_y / line_height) as i32;
+
+                self.mouse_scroll_accum_x %= cell_width;
+                self.mouse_scroll_accum_y %= line_height;
+
+                (x_steps, y_steps)
+            }
+        }
+    }
+
+    fn mouse_grid_point(&self, position: gpui::Point<Pixels>, window: &mut Window) -> (usize, usize) {
+        let status_height = if self.show_status_bar {
+            STATUS_BAR_ESTIMATED_HEIGHT
+        } else {
+            px(0.0)
+        };
+        let origin = point(
+            TEXT_PADDING_X,
+            CUSTOM_TITLE_BAR_HEIGHT + status_height + TEXT_PADDING_Y,
+        );
+
+        let cell_width = measure_cell_width(window, &self.font_family, self.font_size).max(px(1.0));
+        let line_height = self.line_height().max(px(1.0));
+
+        let raw_col = ((position.x - origin.x) / cell_width).floor() as i32;
+        let raw_row = ((position.y - origin.y) / line_height).floor() as i32;
+
+        let max_col = self.grid_size.cols.saturating_sub(1) as i32;
+        let max_row = self.grid_size.rows.saturating_sub(1) as i32;
+
+        let col = raw_col.clamp(0, max_col) as usize;
+        let row = raw_row.clamp(0, max_row) as usize;
+        (row, col)
     }
 
     pub(crate) fn on_key_down(
@@ -448,6 +687,123 @@ impl AgentTerminal {
         self.rewrite_terminal_input_line();
         true
     }
+}
+
+fn mouse_button_code(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        // Mirror Zed's mapping for consistency with existing behavior.
+        MouseButton::Right => Some(1),
+        MouseButton::Middle => Some(2),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+fn mouse_move_button_code(button: Option<MouseButton>) -> Option<u8> {
+    match button {
+        Some(MouseButton::Left) => Some(32),
+        Some(MouseButton::Middle) => Some(33),
+        Some(MouseButton::Right) => Some(34),
+        Some(MouseButton::Navigate(_)) => None,
+        None => Some(35),
+    }
+}
+
+fn encode_mouse_report(
+    row: usize,
+    col: usize,
+    button: u8,
+    pressed: bool,
+    modifiers: gpui::Modifiers,
+    mode: TermMode,
+) -> Option<Vec<u8>> {
+    let mods = mouse_modifiers(modifiers);
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let effective_button = if pressed {
+            button.saturating_add(mods)
+        } else {
+            3u8.saturating_add(mods)
+        };
+        Some(
+            format!(
+                "\x1b[<{};{};{}{}",
+                effective_button,
+                col + 1,
+                row + 1,
+                if pressed { 'M' } else { 'm' }
+            )
+            .into_bytes(),
+        )
+    } else {
+        let effective_button = if pressed {
+            button.saturating_add(mods)
+        } else {
+            3u8.saturating_add(mods)
+        };
+        encode_normal_mouse_report(row, col, effective_button, mode.contains(TermMode::UTF8_MOUSE))
+    }
+}
+
+fn mouse_modifiers(modifiers: gpui::Modifiers) -> u8 {
+    let mut mods = 0u8;
+    if modifiers.shift {
+        mods = mods.saturating_add(4);
+    }
+    if modifiers.alt {
+        mods = mods.saturating_add(8);
+    }
+    if modifiers.control {
+        mods = mods.saturating_add(16);
+    }
+    mods
+}
+
+fn encode_normal_mouse_report(row: usize, col: usize, button: u8, utf8: bool) -> Option<Vec<u8>> {
+    let max_point = if utf8 { 2015 } else { 223 };
+    if row >= max_point || col >= max_point {
+        return None;
+    }
+
+    let mut msg = vec![b'\x1b', b'[', b'M', 32u8.saturating_add(button)];
+
+    if utf8 && col >= 95 {
+        msg.extend(encode_normal_mouse_pos(col));
+    } else {
+        msg.push(32u8.saturating_add(1u8).saturating_add(col as u8));
+    }
+
+    if utf8 && row >= 95 {
+        msg.extend(encode_normal_mouse_pos(row));
+    } else {
+        msg.push(32u8.saturating_add(1u8).saturating_add(row as u8));
+    }
+
+    Some(msg)
+}
+
+fn encode_normal_mouse_pos(pos: usize) -> [u8; 2] {
+    let value = 32 + 1 + pos;
+    let first = 0xC0 + value / 64;
+    let second = 0x80 + (value & 63);
+    [first as u8, second as u8]
+}
+
+fn encode_alt_scroll_bytes(x_steps: i32, y_steps: i32) -> Vec<u8> {
+    let mut content = Vec::with_capacity(3 * (x_steps.unsigned_abs() + y_steps.unsigned_abs()) as usize);
+
+    for _ in 0..y_steps.unsigned_abs() {
+        content.push(0x1b);
+        content.push(b'O');
+        content.push(if y_steps > 0 { b'A' } else { b'B' });
+    }
+
+    for _ in 0..x_steps.unsigned_abs() {
+        content.push(0x1b);
+        content.push(b'O');
+        content.push(if x_steps > 0 { b'D' } else { b'C' });
+    }
+
+    content
 }
 
 impl EntityInputHandler for AgentTerminal {
