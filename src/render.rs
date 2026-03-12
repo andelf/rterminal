@@ -157,7 +157,7 @@ impl Render for AgentTerminal {
                             );
                             window.paint_quad(fill(
                                 Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height)),
-                                rgba(0x3b82f659),
+                                rgba(0xffea00a6),
                             ));
                         }
                     },
