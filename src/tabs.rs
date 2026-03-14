@@ -7,6 +7,8 @@ use crate::cli::CliOptions;
 use crate::render::CUSTOM_TITLE_BAR_HEIGHT;
 use crate::terminal::{AgentTerminal, TerminalExitedEvent};
 
+const TRAFFIC_LIGHT_LEFT_GUTTER: gpui::Pixels = px(68.0);
+
 struct TerminalTab {
     id: usize,
     terminal: Entity<AgentTerminal>,
@@ -239,7 +241,7 @@ impl Render for TerminalTabs {
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(div().w(px(52.0))),
+                .child(div().w(TRAFFIC_LIGHT_LEFT_GUTTER)),
             |row, (tab_id, title, active)| {
                 let this = this.clone();
                 let bg = if active { rgb(0x252a34) } else { rgb(0x1d222b) };

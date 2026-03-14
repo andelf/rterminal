@@ -13,6 +13,7 @@ use crate::pty::write_to_pty;
 
 const DEBUG_HTTP_DEFAULT_HOST: &str = "127.0.0.1";
 const DEBUG_HTTP_DEFAULT_PORT: u16 = 7878;
+const DEBUG_HTTP_LOG_ENV: &str = "AGENT_TUI_DEBUG_HTTP_LOG";
 static NEXT_DEBUG_HTTP_PORT: AtomicU16 = AtomicU16::new(DEBUG_HTTP_DEFAULT_PORT);
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -216,7 +217,9 @@ pub(crate) fn start_debug_http_server_at_addr(
             };
 
             debug.set_listening_addr(addr.clone());
-            eprintln!("debug http listening on http://{addr}");
+            if should_log_debug_http_start() {
+                eprintln!("debug http listening on http://{addr}");
+            }
 
             for mut request in server.incoming_requests() {
                 debug.record_http_request();
@@ -231,6 +234,16 @@ pub(crate) fn start_debug_http_server_at_addr(
                 }
             }
         });
+}
+
+fn should_log_debug_http_start() -> bool {
+    std::env::var(DEBUG_HTTP_LOG_ENV)
+        .ok()
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn handle_debug_request(

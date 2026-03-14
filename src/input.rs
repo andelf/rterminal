@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use alacritty_terminal::term::TermMode;
 use gpui::{
-    App, Bounds, Context, EntityInputHandler, InputHandler, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, ScrollDelta,
+    App, Bounds, ClipboardItem, Context, EntityInputHandler, InputHandler, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, ScrollDelta,
     ScrollWheelEvent, UTF16Selection, Window, point, px, size,
 };
 
@@ -17,6 +17,7 @@ use crate::render::{
     CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_ESTIMATED_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
     measure_cell_width,
 };
+use crate::terminal::{CellSnapshot, ScreenSnapshot, SelectionPoint};
 use crate::text_utils::{
     delete_next_word_utf16, delete_previous_word_utf16, delete_to_end_utf16, replace_range_utf16,
     summarize_text_for_trace, utf16_substring, utf16_to_byte_index,
@@ -392,6 +393,23 @@ impl AgentTerminal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selection_mode_active {
+            if event.pressed_button != self.selection_button {
+                return;
+            }
+
+            let (row, col) = self.mouse_grid_point(event.position, window);
+            if self.update_selection_focus(row, col) {
+                self.trace_input(format!(
+                    "selection move button={:?} row={} col={}",
+                    event.pressed_button, row, col
+                ));
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
+
         let mode = *self.term.mode();
         if !mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) || event.modifiers.shift
         {
@@ -460,6 +478,28 @@ impl AgentTerminal {
     ) {
         window.focus(&self.focus_handle, cx);
         self.last_mouse_report = None;
+        self.trace_input(format!(
+            "mouse down button={:?} control={} shift={} alt={} platform={}",
+            event.button,
+            event.modifiers.control,
+            event.modifiers.shift,
+            event.modifiers.alt,
+            event.modifiers.platform
+        ));
+
+        if event.button == MouseButton::Left && event.modifiers.shift {
+            let (row, col) = self.mouse_grid_point(event.position, window);
+            self.start_selection(row, col, MouseButton::Left);
+            self.trace_input(format!(
+                "selection start button={:?} row={} col={}",
+                MouseButton::Left,
+                row,
+                col
+            ));
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
 
         let mode = *self.term.mode();
         if mode.intersects(TermMode::MOUSE_MODE)
@@ -478,6 +518,27 @@ impl AgentTerminal {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection_mode_active && self.selection_button == Some(event.button) {
+            let (row, col) = self.mouse_grid_point(event.position, window);
+            self.update_selection_focus(row, col);
+            let copied = self.copy_current_selection_to_clipboard(cx);
+            if copied {
+                self.debug
+                    .set_note(Some("selection copied to clipboard".to_string()));
+            } else {
+                self.debug
+                    .set_note(Some("selection empty, nothing copied".to_string()));
+            }
+            self.trace_input(format!(
+                "selection finish button={:?} row={} col={} copied={}",
+                event.button, row, col, copied
+            ));
+            self.clear_selection();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
         let mode = *self.term.mode();
         if mode.intersects(TermMode::MOUSE_MODE)
             && !event.modifiers.shift
@@ -725,6 +786,67 @@ impl AgentTerminal {
         self.rewrite_terminal_input_line();
         true
     }
+
+    pub(crate) fn selection_bounds(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+        let anchor = self.selection_anchor?;
+        let focus = self.selection_focus?;
+        Some(normalize_selection_bounds(anchor, focus))
+    }
+
+    fn start_selection(&mut self, row: usize, col: usize, button: MouseButton) {
+        let point = self.normalize_selection_point(row, col);
+        self.selection_mode_active = true;
+        self.selection_button = Some(button);
+        self.selection_anchor = Some(point);
+        self.selection_focus = Some(point);
+    }
+
+    fn update_selection_focus(&mut self, row: usize, col: usize) -> bool {
+        let point = self.normalize_selection_point(row, col);
+        if self.selection_focus == Some(point) {
+            return false;
+        }
+        self.selection_focus = Some(point);
+        true
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection_mode_active = false;
+        self.selection_button = None;
+        self.selection_anchor = None;
+        self.selection_focus = None;
+    }
+
+    fn current_selection_text(&self) -> Option<String> {
+        let (start, end) = self.selection_bounds()?;
+        let text = extract_selection_text(&self.snapshot, start, end);
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn copy_current_selection_to_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(text) = self.current_selection_text() else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
+    }
+
+    fn normalize_selection_point(&self, row: usize, col: usize) -> SelectionPoint {
+        let normalized_col = self
+            .snapshot
+            .cells
+            .get(row)
+            .map(|cells| normalize_selection_col(cells, col))
+            .unwrap_or(col);
+        SelectionPoint {
+            row,
+            col: normalized_col,
+        }
+    }
 }
 
 fn mouse_button_code(button: MouseButton) -> Option<u8> {
@@ -885,6 +1007,115 @@ fn evaluate_paste_risk(text: &str) -> Option<PasteRisk> {
     })
 }
 
+fn normalize_selection_bounds(
+    start: SelectionPoint,
+    end: SelectionPoint,
+) -> (SelectionPoint, SelectionPoint) {
+    if (start.row, start.col) <= (end.row, end.col) {
+        (start, end)
+    } else {
+        (end, start)
+    }
+}
+
+pub(crate) fn selection_contains_cell(
+    start: SelectionPoint,
+    end: SelectionPoint,
+    row: usize,
+    col: usize,
+) -> bool {
+    if row < start.row || row > end.row {
+        return false;
+    }
+
+    if start.row == end.row {
+        return row == start.row && col >= start.col && col <= end.col;
+    }
+
+    if row == start.row {
+        return col >= start.col;
+    }
+
+    if row == end.row {
+        return col <= end.col;
+    }
+
+    true
+}
+
+fn extract_selection_text(
+    snapshot: &ScreenSnapshot,
+    start: SelectionPoint,
+    end: SelectionPoint,
+) -> String {
+    let mut lines = Vec::new();
+
+    for row in start.row..=end.row {
+        let Some(cells) = snapshot.cells.get(row) else {
+            break;
+        };
+        if cells.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let line_start = if row == start.row {
+            normalize_selection_col(cells, start.col)
+        } else {
+            0
+        };
+        let line_end = if row == end.row {
+            normalize_selection_col(cells, end.col)
+        } else {
+            cells.len().saturating_sub(1)
+        };
+        if line_start >= cells.len() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let clamped_end = line_end.min(cells.len().saturating_sub(1));
+        if line_start > clamped_end {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut text = String::new();
+        let mut col = line_start;
+        while col <= clamped_end {
+            let cell = &cells[col];
+            text.push(cell.ch);
+            let step = usize::from(cell.width_cols.max(1));
+            col = col.saturating_add(step);
+        }
+        while text.ends_with(' ') {
+            text.pop();
+        }
+        lines.push(text);
+    }
+
+    lines.join("\n")
+}
+
+fn normalize_selection_col(cells: &[CellSnapshot], col: usize) -> usize {
+    if cells.is_empty() {
+        return 0;
+    }
+
+    let mut normalized = col.min(cells.len().saturating_sub(1));
+    while normalized > 0 {
+        let prev = normalized - 1;
+        let prev_span = usize::from(cells[prev].width_cols.max(1));
+        if prev_span > 1 && prev.saturating_add(prev_span) > normalized {
+            normalized = prev;
+            continue;
+        }
+        break;
+    }
+
+    normalized
+}
+
 impl EntityInputHandler for AgentTerminal {
     fn text_for_range(
         &mut self,
@@ -998,7 +1229,13 @@ impl EntityInputHandler for AgentTerminal {
 
 #[cfg(test)]
 mod tests {
-    use super::evaluate_paste_risk;
+    use crate::terminal::CellSnapshot;
+
+    use super::{
+        evaluate_paste_risk, extract_selection_text, normalize_selection_bounds,
+        selection_contains_cell,
+    };
+    use crate::terminal::{ScreenSnapshot, SelectionPoint};
 
     #[test]
     fn paste_risk_requires_multiline_and_non_ascii_heavy_content() {
@@ -1013,5 +1250,90 @@ mod tests {
     fn paste_risk_ignores_short_text_even_if_non_ascii() {
         let short = "你好\n你好\n你好\n你好\n";
         assert!(evaluate_paste_risk(short).is_none());
+    }
+
+    #[test]
+    fn selection_bounds_are_normalized() {
+        let a = SelectionPoint { row: 4, col: 10 };
+        let b = SelectionPoint { row: 1, col: 2 };
+        let (start, end) = normalize_selection_bounds(a, b);
+        assert_eq!(start, b);
+        assert_eq!(end, a);
+    }
+
+    #[test]
+    fn selection_contains_handles_single_and_multi_line_ranges() {
+        let start = SelectionPoint { row: 1, col: 3 };
+        let end = SelectionPoint { row: 3, col: 2 };
+
+        assert!(selection_contains_cell(start, end, 1, 3));
+        assert!(selection_contains_cell(start, end, 2, 50));
+        assert!(selection_contains_cell(start, end, 3, 2));
+        assert!(!selection_contains_cell(start, end, 0, 10));
+        assert!(!selection_contains_cell(start, end, 1, 2));
+        assert!(!selection_contains_cell(start, end, 3, 3));
+    }
+
+    #[test]
+    fn extract_selection_text_returns_expected_multiline_slice() {
+        let snapshot = ScreenSnapshot {
+            cells: vec![
+                "012345".chars().map(cell).collect(),
+                "abcdef".chars().map(cell).collect(),
+                "uvwxyz".chars().map(cell).collect(),
+            ],
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            alt_screen: false,
+        };
+
+        let text = extract_selection_text(
+            &snapshot,
+            SelectionPoint { row: 0, col: 2 },
+            SelectionPoint { row: 2, col: 3 },
+        );
+
+        assert_eq!(text, "2345\nabcdef\nuvwx");
+    }
+
+    #[test]
+    fn extract_selection_text_skips_wide_char_spacers() {
+        let snapshot = ScreenSnapshot {
+            cells: vec![vec![
+                wide_cell('你'),
+                cell(' '),
+                wide_cell('好'),
+                cell(' '),
+                cell('X'),
+            ]],
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            alt_screen: false,
+        };
+
+        let text = extract_selection_text(
+            &snapshot,
+            SelectionPoint { row: 0, col: 0 },
+            SelectionPoint { row: 0, col: 4 },
+        );
+
+        assert_eq!(text, "你好X");
+    }
+
+    fn cell(ch: char) -> CellSnapshot {
+        CellSnapshot {
+            ch,
+            ..CellSnapshot::default()
+        }
+    }
+
+    fn wide_cell(ch: char) -> CellSnapshot {
+        CellSnapshot {
+            ch,
+            width_cols: 2,
+            ..CellSnapshot::default()
+        }
     }
 }

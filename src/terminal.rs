@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
 
-use crate::cli::CliOptions;
+use crate::cli::{AmbiguousWidth, CliOptions, Theme};
 use crate::color::indexed_to_rgb;
 use crate::color::{ansi_bg_to_hsla, ansi_to_hsla};
 use crate::debug_server::{SharedDebugState, start_debug_http_server};
@@ -128,6 +128,12 @@ pub(crate) struct ScreenSnapshot {
     pub(crate) alt_screen: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SelectionPoint {
+    pub(crate) row: usize,
+    pub(crate) col: usize,
+}
+
 pub(crate) struct AgentTerminal {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) term: Term<TitleTrackingListener>,
@@ -138,6 +144,7 @@ pub(crate) struct AgentTerminal {
     pub(crate) terminal_title: Arc<Mutex<Option<String>>>,
     pub(crate) show_title_bar: bool,
     pub(crate) show_status_bar: bool,
+    pub(crate) theme: Theme,
     pub(crate) font_family: String,
     pub(crate) font_size: Pixels,
     pub(crate) master: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
@@ -152,6 +159,10 @@ pub(crate) struct AgentTerminal {
     pub(crate) mouse_scroll_accum_x: f32,
     pub(crate) mouse_scroll_accum_y: f32,
     pub(crate) last_mouse_report: Option<(usize, usize, u8)>,
+    pub(crate) selection_mode_active: bool,
+    pub(crate) selection_button: Option<gpui::MouseButton>,
+    pub(crate) selection_anchor: Option<SelectionPoint>,
+    pub(crate) selection_focus: Option<SelectionPoint>,
     pub(crate) paste_guard_prompt_open: bool,
     pub(crate) shell_exited: bool,
     pub(crate) debug: SharedDebugState,
@@ -198,8 +209,12 @@ impl AgentTerminal {
         );
 
         let terminal_title = Arc::new(Mutex::new(None));
+        let term_config = Config {
+            ambiguous_wide: matches!(cli.ambiguous_width, AmbiguousWidth::Double),
+            ..Config::default()
+        };
         let term = Term::new(
-            Config::default(),
+            term_config,
             &grid_size,
             TitleTrackingListener {
                 title: terminal_title.clone(),
@@ -242,6 +257,7 @@ impl AgentTerminal {
             terminal_title: terminal_title.clone(),
             show_title_bar: options.show_title_bar,
             show_status_bar: cli.show_status_bar,
+            theme: cli.theme,
             font_family: cli.font_family.clone(),
             font_size,
             master,
@@ -256,6 +272,10 @@ impl AgentTerminal {
             mouse_scroll_accum_x: 0.0,
             mouse_scroll_accum_y: 0.0,
             last_mouse_report: None,
+            selection_mode_active: false,
+            selection_button: None,
+            selection_anchor: None,
+            selection_focus: None,
             paste_guard_prompt_open: false,
             shell_exited: false,
             debug,

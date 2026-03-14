@@ -1,8 +1,10 @@
 use gpui::{
-    Bounds, Context, MouseButton, Pixels, Render, Window, WindowControlArea, black, canvas, div,
+    Bounds, Context, Hsla, MouseButton, Pixels, Render, Window, WindowControlArea, canvas, div,
     fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 
+use crate::cli::Theme;
+use crate::input::selection_contains_cell;
 use crate::{AgentTerminal, AgentTerminalInputHandler};
 
 pub(crate) const LINE_HEIGHT_SCALE: f32 = 18.0 / 14.0;
@@ -27,6 +29,37 @@ pub(crate) fn measure_cell_width(
 
 pub(crate) fn line_height_for(font_size: Pixels) -> Pixels {
     (font_size * LINE_HEIGHT_SCALE).max(font_size + px(2.0))
+}
+
+#[derive(Clone, Copy)]
+struct RenderPalette {
+    app_bg: Hsla,
+    terminal_bg: Hsla,
+    title_bg: Hsla,
+    title_fg: Hsla,
+    selection_bg: Hsla,
+    cursor_bg: Hsla,
+}
+
+fn palette_for(theme: Theme) -> RenderPalette {
+    match theme {
+        Theme::Default => RenderPalette {
+            app_bg: rgb(0x0f1115).into(),
+            terminal_bg: rgb(0x000000).into(),
+            title_bg: rgb(0x171a21).into(),
+            title_fg: rgb(0xa9b1c6).into(),
+            selection_bg: rgba(0x4b93ffaa).into(),
+            cursor_bg: rgba(0xffea00a6).into(),
+        },
+        Theme::EyeCare => RenderPalette {
+            app_bg: rgb(0x151b17).into(),
+            terminal_bg: rgb(0x1b241e).into(),
+            title_bg: rgb(0x222d26).into(),
+            title_fg: rgb(0xc0cbbd).into(),
+            selection_bg: rgba(0x7ca67899).into(),
+            cursor_bg: rgba(0xffea00a6).into(),
+        },
+    }
 }
 
 impl Render for AgentTerminal {
@@ -61,6 +94,8 @@ impl Render for AgentTerminal {
         let font_size = self.font_size;
         let line_height = self.line_height();
         let note = self.debug.note();
+        let selection = self.selection_bounds();
+        let palette = palette_for(self.theme);
         let terminal_title = self
             .terminal_title
             .lock()
@@ -94,7 +129,7 @@ impl Render for AgentTerminal {
                             AgentTerminalInputHandler::new(bounds, entity.clone()),
                             cx,
                         );
-                        window.paint_quad(fill(bounds, black()));
+                        window.paint_quad(fill(bounds, palette.terminal_bg));
 
                         let mono = font(canvas_font_family.clone());
                         let run_template = gpui::TextRun {
@@ -117,21 +152,31 @@ impl Render for AgentTerminal {
                         let origin = bounds.origin + point(TEXT_PADDING_X, TEXT_PADDING_Y);
                         for (row_index, row) in snapshot.cells.iter().enumerate() {
                             let y = origin.y + row_index as f32 * line_height;
+                            let mut covered_until_col = 0usize;
 
                             for (col_index, cell) in row.iter().enumerate() {
+                                let is_spacer_col = col_index < covered_until_col;
                                 let x = origin.x + col_index as f32 * cell_width;
                                 let cell_origin = point(x, y);
                                 let cell_width_px =
                                     cell_width.max(px(2.0)) * cell.width_cols as f32;
 
-                                if let Some(bg) = cell.bg {
+                                if !is_spacer_col && let Some(bg) = cell.bg {
                                     window.paint_quad(fill(
                                         Bounds::new(cell_origin, size(cell_width_px, line_height)),
                                         bg,
                                     ));
                                 }
+                                if !is_spacer_col && selection.is_some_and(|(start, end)| {
+                                    selection_contains_cell(start, end, row_index, col_index)
+                                }) {
+                                    window.paint_quad(fill(
+                                        Bounds::new(cell_origin, size(cell_width_px, line_height)),
+                                        palette.selection_bg,
+                                    ));
+                                }
 
-                                if cell.ch != ' ' {
+                                if !is_spacer_col && cell.ch != ' ' {
                                     let run = gpui::TextRun {
                                         len: cell.ch.len_utf8(),
                                         color: cell.fg,
@@ -152,6 +197,12 @@ impl Render for AgentTerminal {
                                         cx,
                                     );
                                 }
+
+                                if !is_spacer_col {
+                                    covered_until_col = col_index.saturating_add(
+                                        usize::from(cell.width_cols.max(1)),
+                                    );
+                                }
                             }
                         }
 
@@ -165,7 +216,7 @@ impl Render for AgentTerminal {
                                     cursor_origin,
                                     size(cell_width.max(px(2.0)), line_height),
                                 ),
-                                rgba(0xffea00a6),
+                                palette.cursor_bg,
                             ));
                         }
                     },
@@ -177,7 +228,7 @@ impl Render for AgentTerminal {
             .w_full()
             .h(CUSTOM_TITLE_BAR_HEIGHT)
             .px_3()
-            .bg(rgb(0x171a21))
+            .bg(palette.title_bg)
             .window_control_area(WindowControlArea::Drag)
             .flex()
             .items_center()
@@ -186,7 +237,7 @@ impl Render for AgentTerminal {
             .child(
                 div()
                     .flex_1()
-                    .text_color(rgb(0xa9b1c6))
+                    .text_color(palette.title_fg)
                     .font_family(font_family.clone())
                     .text_center()
                     .child(terminal_title),
@@ -196,7 +247,7 @@ impl Render for AgentTerminal {
         let root = div()
             .id("agent-terminal")
             .size_full()
-            .bg(rgb(0x0f1115))
+            .bg(palette.app_bg)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down));
 
@@ -212,8 +263,8 @@ impl Render for AgentTerminal {
                     .w_full()
                     .px_3()
                     .py_2()
-                    .bg(rgb(0x171a21))
-                    .text_color(rgb(0xa9b1c6))
+                    .bg(palette.title_bg)
+                    .text_color(palette.title_fg)
                     .font_family(font_family.clone())
                     .child(status_line),
             )
