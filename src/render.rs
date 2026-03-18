@@ -1,6 +1,6 @@
 use gpui::{
-    Bounds, Context, Hsla, MouseButton, Pixels, Render, Window, WindowControlArea, canvas, div,
-    fill, font, point, prelude::*, px, rgb, rgba, size,
+    Bounds, Context, Font, FontFallbacks, Hsla, MouseButton, Pixels, Render, Window,
+    WindowControlArea, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 use alacritty_terminal::vte::ansi::CursorShape;
 
@@ -17,15 +17,48 @@ pub(crate) const STATUS_BAR_ESTIMATED_HEIGHT: Pixels = px(42.0);
 pub(crate) fn measure_cell_width(
     window: &mut Window,
     font_family: &str,
+    font_fallbacks: Option<&FontFallbacks>,
     font_size: Pixels,
 ) -> Pixels {
-    let mono = font(font_family.to_string());
+    let mono = build_terminal_font(font_family, font_fallbacks);
     let font_id = window.text_system().resolve_font(&mono);
     window
         .text_system()
         .advance(font_id, font_size, 'M')
         .map(|advance| advance.width)
         .unwrap_or(px(8.0))
+}
+
+fn build_terminal_font(font_family: &str, font_fallbacks: Option<&FontFallbacks>) -> Font {
+    let mut mono = font(font_family.to_string());
+    mono.fallbacks = font_fallbacks.cloned();
+    mono
+}
+
+fn cell_advance_cols(cell: &crate::terminal::CellSnapshot) -> usize {
+    if cell.spans_next_col {
+        usize::from(cell.width_cols.max(1))
+    } else {
+        1
+    }
+}
+
+fn visual_extra_cols_before(row: &[crate::terminal::CellSnapshot], logical_col: usize) -> f32 {
+    let mut covered_until_col = 0usize;
+    let mut extra_cols = 0f32;
+    for (col_index, cell) in row.iter().enumerate() {
+        if col_index >= logical_col {
+            break;
+        }
+        if col_index < covered_until_col {
+            continue;
+        }
+        if cell.expands_layout && cell.width_cols > 1 {
+            extra_cols += f32::from(cell.width_cols - 1);
+        }
+        covered_until_col = col_index.saturating_add(cell_advance_cols(cell));
+    }
+    extra_cols
 }
 
 pub(crate) fn line_height_for(font_size: Pixels) -> Pixels {
@@ -101,6 +134,7 @@ impl Render for AgentTerminal {
         let status = self.debug.status_summary();
         let shell = self.shell.clone();
         let font_family = self.font_family.clone();
+        let font_fallbacks = self.font_fallbacks.clone();
         let font_size = self.font_size;
         let line_height = self.line_height();
         let note = self.debug.note();
@@ -113,6 +147,7 @@ impl Render for AgentTerminal {
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| shell.clone());
         let canvas_font_family = font_family.clone();
+        let canvas_font_fallbacks = font_fallbacks.clone();
 
         let status_line = if let Some(note) = note {
             format!("agent terminal | {} | {} | note: {}", shell, status, note)
@@ -141,7 +176,8 @@ impl Render for AgentTerminal {
                         );
                         window.paint_quad(fill(bounds, palette.terminal_bg));
 
-                        let mono = font(canvas_font_family.clone());
+                        let mono =
+                            build_terminal_font(&canvas_font_family, canvas_font_fallbacks.as_ref());
                         let run_template = gpui::TextRun {
                             len: 0,
                             font: mono.clone(),
@@ -163,10 +199,11 @@ impl Render for AgentTerminal {
                         for (row_index, row) in snapshot.cells.iter().enumerate() {
                             let y = origin.y + row_index as f32 * line_height;
                             let mut covered_until_col = 0usize;
+                            let mut extra_visual_cols = 0f32;
 
                             for (col_index, cell) in row.iter().enumerate() {
                                 let is_spacer_col = col_index < covered_until_col;
-                                let x = origin.x + col_index as f32 * cell_width;
+                                let x = origin.x + (col_index as f32 + extra_visual_cols) * cell_width;
                                 let cell_origin = point(x, y);
                                 let cell_width_px =
                                     cell_width.max(px(2.0)) * cell.width_cols as f32;
@@ -209,16 +246,24 @@ impl Render for AgentTerminal {
                                 }
 
                                 if !is_spacer_col {
-                                    covered_until_col = col_index.saturating_add(
-                                        usize::from(cell.width_cols.max(1)),
-                                    );
+                                    covered_until_col =
+                                        col_index.saturating_add(cell_advance_cols(cell));
+                                    if cell.expands_layout && cell.width_cols > 1 {
+                                        extra_visual_cols += f32::from(cell.width_cols - 1);
+                                    }
                                 }
                             }
                         }
 
                         if focused && snapshot.cursor_visible {
+                            let cursor_logical_col_floor = cursor_visual_col.max(0.0).floor() as usize;
+                            let cursor_extra_cols = snapshot
+                                .cells
+                                .get(cursor_visual_row)
+                                .map(|row| visual_extra_cols_before(row, cursor_logical_col_floor))
+                                .unwrap_or(0.0);
                             let cursor_origin = point(
-                                origin.x + cursor_visual_col * cell_width,
+                                origin.x + (cursor_visual_col + cursor_extra_cols) * cell_width,
                                 origin.y + cursor_visual_row as f32 * line_height,
                             );
                             let cell_width_px = cell_width.max(px(2.0));

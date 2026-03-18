@@ -380,7 +380,12 @@ impl AgentTerminal {
         element_bounds: Bounds<Pixels>,
         window: &mut Window,
     ) -> Bounds<Pixels> {
-        let cell_width = measure_cell_width(window, &self.font_family, self.font_size);
+        let cell_width = measure_cell_width(
+            window,
+            &self.font_family,
+            self.font_fallbacks.as_ref(),
+            self.font_size,
+        );
         let line_height = self.line_height();
         let cursor_origin = point(
             element_bounds.origin.x + TEXT_PADDING_X + self.snapshot.cursor_col as f32 * cell_width,
@@ -602,7 +607,13 @@ impl AgentTerminal {
             ScrollDelta::Lines(lines) => (lines.x as i32, lines.y as i32),
             ScrollDelta::Pixels(pixels) => {
                 let cell_width = f32::from(
-                    measure_cell_width(window, &self.font_family, self.font_size).max(px(1.0)),
+                    measure_cell_width(
+                        window,
+                        &self.font_family,
+                        self.font_fallbacks.as_ref(),
+                        self.font_size,
+                    )
+                    .max(px(1.0)),
                 );
                 let line_height = f32::from(self.line_height().max(px(1.0)));
 
@@ -635,7 +646,13 @@ impl AgentTerminal {
             CUSTOM_TITLE_BAR_HEIGHT + status_height + TEXT_PADDING_Y,
         );
 
-        let cell_width = measure_cell_width(window, &self.font_family, self.font_size).max(px(1.0));
+        let cell_width = measure_cell_width(
+            window,
+            &self.font_family,
+            self.font_fallbacks.as_ref(),
+            self.font_size,
+        )
+        .max(px(1.0));
         let line_height = self.line_height().max(px(1.0));
 
         let raw_col = ((position.x - origin.x) / cell_width).floor() as i32;
@@ -1002,8 +1019,7 @@ impl AgentTerminal {
                 continue;
             }
             row_before_cursor.push(cell.ch);
-            covered_until_col =
-                col_index.saturating_add(usize::from(cell.width_cols.max(1)));
+            covered_until_col = col_index.saturating_add(cell_advance_cols(cell));
         }
 
         let row_before_cursor = row_before_cursor.trim_end();
@@ -1263,7 +1279,7 @@ fn extract_selection_text(
         while col <= clamped_end {
             let cell = &cells[col];
             text.push(cell.ch);
-            let step = usize::from(cell.width_cols.max(1));
+            let step = cell_advance_cols(cell);
             col = col.saturating_add(step);
         }
         while text.ends_with(' ') {
@@ -1283,7 +1299,7 @@ fn normalize_selection_col(cells: &[CellSnapshot], col: usize) -> usize {
     let mut normalized = col.min(cells.len().saturating_sub(1));
     while normalized > 0 {
         let prev = normalized - 1;
-        let prev_span = usize::from(cells[prev].width_cols.max(1));
+        let prev_span = cell_advance_cols(&cells[prev]);
         if prev_span > 1 && prev.saturating_add(prev_span) > normalized {
             normalized = prev;
             continue;
@@ -1300,9 +1316,17 @@ fn row_text_without_wide_spacers(cells: &[CellSnapshot]) -> String {
     while col < cells.len() {
         let cell = &cells[col];
         text.push(cell.ch);
-        col = col.saturating_add(usize::from(cell.width_cols.max(1)));
+        col = col.saturating_add(cell_advance_cols(cell));
     }
     text
+}
+
+fn cell_advance_cols(cell: &CellSnapshot) -> usize {
+    if cell.spans_next_col {
+        usize::from(cell.width_cols.max(1))
+    } else {
+        1
+    }
 }
 
 fn probable_ascii_prefix_noise(ax_text: &str, model_text: &str) -> bool {
@@ -1568,6 +1592,7 @@ mod tests {
         CellSnapshot {
             ch,
             width_cols: 2,
+            spans_next_col: true,
             ..CellSnapshot::default()
         }
     }

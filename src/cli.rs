@@ -22,6 +22,10 @@ pub(crate) struct CliOptions {
     pub(crate) show_status_bar: bool,
     #[arg(long, default_value = "Menlo")]
     pub(crate) font_family: String,
+    #[arg(long = "font-fallback", value_delimiter = ',')]
+    pub(crate) font_fallbacks: Vec<String>,
+    #[arg(long = "double-width-char", value_delimiter = ',')]
+    pub(crate) double_width_chars: Vec<String>,
     #[arg(long, value_enum, default_value_t = AmbiguousWidth::Single)]
     pub(crate) ambiguous_width: AmbiguousWidth,
     #[arg(long, value_enum, default_value_t = Theme::Default)]
@@ -111,5 +115,37 @@ mod tests {
     fn force_vertical_cursor_flag_parses() {
         let cli = parse_cli_options_from(vec!["--force-vertical-cursor".to_string()]);
         assert!(cli.force_vertical_cursor);
+    }
+
+    #[test]
+    fn font_fallback_accepts_repeated_and_comma_separated_values() {
+        let cli = parse_cli_options_from(vec![
+            "--font-fallback".to_string(),
+            "Symbols Nerd Font Mono,Apple Symbols".to_string(),
+            "--font-fallback".to_string(),
+            "Noto Sans Symbols".to_string(),
+        ]);
+        assert_eq!(
+            cli.font_fallbacks,
+            vec![
+                "Symbols Nerd Font Mono".to_string(),
+                "Apple Symbols".to_string(),
+                "Noto Sans Symbols".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn double_width_char_accepts_repeated_and_comma_separated_values() {
+        let cli = parse_cli_options_from(vec![
+            "--double-width-char".to_string(),
+            "↑,↓".to_string(),
+            "--double-width-char".to_string(),
+            "↕".to_string(),
+        ]);
+        assert_eq!(
+            cli.double_width_chars,
+            vec!["↑".to_string(), "↓".to_string(), "↕".to_string()]
+        );
     }
 }

@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::ops::Range;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, StdSyncHandler,
 };
 use anyhow::{Context as _, Result, ensure};
-use gpui::{Context, EventEmitter, FocusHandle, Pixels, Subscription, Task, Window, px};
+use gpui::{Context, EventEmitter, FocusHandle, FontFallbacks, Pixels, Subscription, Task, Window, px};
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
@@ -114,6 +115,8 @@ pub(crate) struct CellSnapshot {
     pub(crate) fg: gpui::Hsla,
     pub(crate) bg: Option<gpui::Hsla>,
     pub(crate) width_cols: u8,
+    pub(crate) spans_next_col: bool,
+    pub(crate) expands_layout: bool,
 }
 
 impl Default for CellSnapshot {
@@ -123,6 +126,8 @@ impl Default for CellSnapshot {
             fg: gpui::Hsla::default(),
             bg: None,
             width_cols: 1,
+            spans_next_col: false,
+            expands_layout: false,
         }
     }
 }
@@ -170,6 +175,8 @@ pub(crate) struct AgentTerminal {
     pub(crate) show_status_bar: bool,
     pub(crate) theme: Theme,
     pub(crate) font_family: String,
+    pub(crate) font_fallbacks: Option<FontFallbacks>,
+    pub(crate) forced_double_width_chars: HashSet<char>,
     pub(crate) font_size: Pixels,
     pub(crate) master: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
     pub(crate) writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
@@ -231,7 +238,14 @@ impl AgentTerminal {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_size = DEFAULT_FONT_SIZE;
-        let cell_width = measure_cell_width(window, &cli.font_family, font_size);
+        let font_fallbacks = parse_font_fallbacks(&cli.font_fallbacks);
+        let forced_double_width_chars = parse_double_width_chars(&cli.double_width_chars);
+        let cell_width = measure_cell_width(
+            window,
+            &cli.font_family,
+            font_fallbacks.as_ref(),
+            font_size,
+        );
         let viewport = window.viewport_size();
         let grid_size = compute_grid_size(
             viewport,
@@ -322,6 +336,8 @@ impl AgentTerminal {
             show_status_bar: cli.show_status_bar,
             theme: cli.theme,
             font_family: cli.font_family.clone(),
+            font_fallbacks,
+            forced_double_width_chars,
             font_size,
             master,
             writer,
@@ -430,6 +446,8 @@ impl AgentTerminal {
                     ),
                     bg: None,
                     width_cols: 1,
+                    spans_next_col: false,
+                    expands_layout: false,
                 };
                 cols
             ];
@@ -458,15 +476,23 @@ impl AgentTerminal {
                 std::mem::swap(&mut fg, &mut bg);
             }
 
+            let ch = if indexed.cell.flags.contains(Flags::HIDDEN) {
+                ' '
+            } else {
+                indexed.cell.c
+            };
+            let spans_next_col = indexed.cell.flags.contains(Flags::WIDE_CHAR);
+            let expands_layout =
+                !spans_next_col && self.forced_double_width_chars.contains(&ch);
+            let width_cols = if spans_next_col || expands_layout { 2 } else { 1 };
+
             cells[row][col] = CellSnapshot {
-                ch: if indexed.cell.flags.contains(Flags::HIDDEN) {
-                    ' '
-                } else {
-                    indexed.cell.c
-                },
+                ch,
                 fg: ansi_to_hsla(fg, content.colors, indexed.cell.flags, true),
                 bg: ansi_bg_to_hsla(bg, content.colors),
-                width_cols: cell_display_width_cols(indexed.cell.flags),
+                width_cols,
+                spans_next_col,
+                expands_layout,
             };
         }
 
@@ -499,7 +525,12 @@ impl AgentTerminal {
     }
 
     pub(crate) fn sync_grid_to_window(&mut self, window: &mut Window) {
-        let cell_width = measure_cell_width(window, &self.font_family, self.font_size);
+        let cell_width = measure_cell_width(
+            window,
+            &self.font_family,
+            self.font_fallbacks.as_ref(),
+            self.font_size,
+        );
         let viewport = window.viewport_size();
         let new_grid = compute_grid_size(
             viewport,
@@ -883,14 +914,6 @@ pub(crate) fn snapshot_to_lines(snapshot: &ScreenSnapshot) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn cell_display_width_cols(flags: Flags) -> u8 {
-    if flags.contains(Flags::WIDE_CHAR) {
-        2
-    } else {
-        1
-    }
-}
-
 fn is_input_trace_enabled() -> bool {
     std::env::var(INPUT_TRACE_ENV)
         .ok()
@@ -899,6 +922,27 @@ fn is_input_trace_enabled() -> bool {
             value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
         })
         .unwrap_or(false)
+}
+
+fn parse_font_fallbacks(raw: &[String]) -> Option<FontFallbacks> {
+    let fallbacks: Vec<String> = raw
+        .iter()
+        .map(|font| font.trim())
+        .filter(|font| !font.is_empty())
+        .map(|font| font.to_string())
+        .collect();
+    if fallbacks.is_empty() {
+        None
+    } else {
+        Some(FontFallbacks::from_fonts(fallbacks))
+    }
+}
+
+fn parse_double_width_chars(raw: &[String]) -> HashSet<char> {
+    raw.iter()
+        .flat_map(|entry| entry.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
 }
 
 pub(crate) fn run_self_check() -> Result<()> {
