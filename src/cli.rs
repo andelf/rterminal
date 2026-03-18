@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum AmbiguousWidth {
@@ -25,6 +26,10 @@ pub(crate) struct CliOptions {
     pub(crate) ambiguous_width: AmbiguousWidth,
     #[arg(long, value_enum, default_value_t = Theme::Default)]
     pub(crate) theme: Theme,
+    #[arg(long)]
+    pub(crate) input_log_file: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) input_log_raw: bool,
 }
 
 #[cfg(test)]
@@ -66,5 +71,17 @@ mod tests {
     fn theme_accepts_eye_care() {
         let cli = parse_cli_options_from(vec!["--theme".to_string(), "eye-care".to_string()]);
         assert_eq!(cli.theme, Theme::EyeCare);
+    }
+
+    #[test]
+    fn input_log_file_argument_parses() {
+        let cli = parse_cli_options_from(vec![
+            "--input-log-file".to_string(),
+            "/tmp/agent-input.jsonl".to_string(),
+        ]);
+        assert_eq!(
+            cli.input_log_file.as_deref(),
+            Some(std::path::Path::new("/tmp/agent-input.jsonl"))
+        );
     }
 }

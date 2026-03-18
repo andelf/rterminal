@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::term::TermMode;
 use gpui::{
@@ -6,6 +7,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, ScrollDelta,
     ScrollWheelEvent, UTF16Selection, Window, point, px, size,
 };
+use serde_json::json;
 
 use crate::AgentTerminal;
 use crate::keyboard::{
@@ -27,6 +29,7 @@ const FONT_SIZE_STEP: f32 = 1.0;
 const PASTE_GUARD_MIN_LINES: usize = 4;
 const PASTE_GUARD_MIN_CHARS: usize = 120;
 const PASTE_GUARD_NON_ASCII_RATIO: f32 = 0.35;
+const AX_OVERRIDE_GUARD_WINDOW: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug)]
 struct PasteRisk {
@@ -182,6 +185,13 @@ impl AgentTerminal {
             text.len(),
             summarize_text_for_trace(text)
         ));
+        self.log_input_event(
+            "write_text_input",
+            json!({
+                "text": self.input_log_text_value(text),
+                "len": text.len(),
+            }),
+        );
         self.write_bytes(text.as_bytes());
     }
 
@@ -649,6 +659,16 @@ impl AgentTerminal {
             "keydown key={:?} key_char={:?} modifiers={:?}",
             event.keystroke.key, event.keystroke.key_char, event.keystroke.modifiers
         ));
+        self.log_input_event(
+            "keydown",
+            json!({
+                "key": event.keystroke.key.clone(),
+                "key_char": event.keystroke.key_char.clone(),
+                "modifiers": format!("{:?}", event.keystroke.modifiers),
+                "input_line": self.input_log_text_value(&self.input_line),
+                "input_cursor_utf16": self.input_cursor_utf16,
+            }),
+        );
 
         if is_zoom_in_shortcut(&event.keystroke) {
             self.debug.record_key_event();
@@ -667,6 +687,7 @@ impl AgentTerminal {
         }
 
         if is_select_all_shortcut(&event.keystroke) {
+            self.mark_local_key_activity();
             self.debug.record_key_event();
             self.clear_input_line();
             self.write_bytes(&[0x15]); // Ctrl-U clears shell input line.
@@ -677,6 +698,7 @@ impl AgentTerminal {
         }
 
         if is_paste_shortcut(&event.keystroke) {
+            self.mark_local_key_activity();
             self.debug.record_key_event();
             if let Some(item) = cx.read_from_clipboard()
                 && let Some(text) = item.text()
@@ -742,13 +764,53 @@ impl AgentTerminal {
 
         if should_defer_to_text_input(&event.keystroke) {
             self.trace_input("keydown deferred to text input handler");
+            self.log_input_event(
+                "keydown_deferred_to_text_input",
+                json!({
+                    "key": event.keystroke.key.clone(),
+                    "key_char": event.keystroke.key_char.clone(),
+                }),
+            );
             return;
         }
 
         if let Some(bytes) = encode_keystroke(&event.keystroke) {
+            self.mark_local_key_activity();
             self.debug.record_key_event();
+            let before_line = self.input_line.clone();
+            let before_cursor = self.input_cursor_utf16;
+            let enter_probe_id = if event.keystroke.key.eq_ignore_ascii_case("enter") {
+                Some(self.start_enter_latency_probe(&before_line))
+            } else {
+                None
+            };
+            let high_priority_control = is_high_priority_control_bytes(&bytes);
+
+            if high_priority_control {
+                self.write_bytes(&bytes);
+                if let Some(probe_id) = enter_probe_id {
+                    self.mark_enter_latency_write_done(probe_id, bytes.len());
+                }
+            }
             self.apply_terminal_bytes_to_input_line(&bytes);
-            self.write_bytes(&bytes);
+            self.log_input_event(
+                "keydown_encoded",
+                json!({
+                    "key": event.keystroke.key.clone(),
+                    "bytes_hex": bytes_to_hex(&bytes),
+                    "high_priority_control": high_priority_control,
+                    "before_line": self.input_log_text_value(&before_line),
+                    "before_cursor_utf16": before_cursor,
+                    "after_line": self.input_log_text_value(&self.input_line),
+                    "after_cursor_utf16": self.input_cursor_utf16,
+                }),
+            );
+            if !high_priority_control {
+                self.write_bytes(&bytes);
+                if let Some(probe_id) = enter_probe_id {
+                    self.mark_enter_latency_write_done(probe_id, bytes.len());
+                }
+            }
             cx.stop_propagation();
             cx.notify();
         }
@@ -757,6 +819,20 @@ impl AgentTerminal {
     pub(crate) fn trace_input(&self, message: impl AsRef<str>) {
         if self.input_trace {
             eprintln!("[input-trace] {}", message.as_ref());
+        }
+    }
+
+    pub(crate) fn log_input_event(&self, event: &str, fields: serde_json::Value) {
+        if let Some(logger) = &self.input_logger {
+            logger.log_event(event, fields);
+        }
+    }
+
+    pub(crate) fn input_log_text_value(&self, text: &str) -> serde_json::Value {
+        if let Some(logger) = &self.input_logger {
+            logger.text_value(text)
+        } else {
+            json!(summarize_text_for_trace(text))
         }
     }
 
@@ -773,6 +849,39 @@ impl AgentTerminal {
         if self.input_line == state.text && self.input_cursor_utf16 == cursor_utf16 {
             return false;
         }
+        let screen_match = self.ax_text_matches_screen_context(&state.text);
+        if !screen_match && self.ax_text_has_probable_prefix_noise(&state.text) {
+            self.trace_input(format!(
+                "ax override rejected (probable prefix noise) model={} ax={}",
+                summarize_text_for_trace(&self.input_line),
+                summarize_text_for_trace(&state.text)
+            ));
+            self.log_input_event(
+                "ax_override_rejected",
+                json!({
+                    "reason": "probable_prefix_noise",
+                    "model_line": self.input_log_text_value(&self.input_line),
+                    "ax_line": self.input_log_text_value(&state.text),
+                    "ax_cursor_utf16": cursor_utf16,
+                }),
+            );
+            return false;
+        }
+        if !screen_match {
+            self.trace_input(format!(
+                "ax override accepted despite screen mismatch model={} ax={}",
+                summarize_text_for_trace(&self.input_line),
+                summarize_text_for_trace(&state.text)
+            ));
+            self.log_input_event(
+                "ax_override_mismatch_accepted",
+                json!({
+                    "model_line": self.input_log_text_value(&self.input_line),
+                    "ax_line": self.input_log_text_value(&state.text),
+                    "ax_cursor_utf16": cursor_utf16,
+                }),
+            );
+        }
 
         self.trace_input(format!(
             "ax override text={} cursor_utf16={}",
@@ -784,6 +893,13 @@ impl AgentTerminal {
         self.input_cursor_utf16 = cursor_utf16;
         self.marked_text_range = None;
         self.rewrite_terminal_input_line();
+        self.log_input_event(
+            "ax_override_applied",
+            json!({
+                "input_line": self.input_log_text_value(&self.input_line),
+                "input_cursor_utf16": self.input_cursor_utf16,
+            }),
+        );
         true
     }
 
@@ -846,6 +962,59 @@ impl AgentTerminal {
             row,
             col: normalized_col,
         }
+    }
+
+    pub(crate) fn allow_ax_override(&self) -> bool {
+        match self.last_local_key_event_at {
+            Some(last_event) => last_event.elapsed() >= AX_OVERRIDE_GUARD_WINDOW,
+            None => true,
+        }
+    }
+
+    fn mark_local_key_activity(&mut self) {
+        self.last_local_key_event_at = Some(Instant::now());
+    }
+
+    fn ax_text_matches_screen_context(&self, ax_text: &str) -> bool {
+        if ax_text.is_empty() {
+            return true;
+        }
+
+        let Some(row) = self.snapshot.cells.get(self.snapshot.cursor_row) else {
+            return true;
+        };
+        if row.is_empty() {
+            return true;
+        }
+
+        let visible_row = row_text_without_wide_spacers(row);
+        if visible_row.is_empty() {
+            return true;
+        }
+
+        let mut row_before_cursor = String::new();
+        let mut covered_until_col = 0usize;
+        for (col_index, cell) in row.iter().enumerate() {
+            if col_index > self.snapshot.cursor_col {
+                break;
+            }
+            if col_index < covered_until_col {
+                continue;
+            }
+            row_before_cursor.push(cell.ch);
+            covered_until_col =
+                col_index.saturating_add(usize::from(cell.width_cols.max(1)));
+        }
+
+        let row_before_cursor = row_before_cursor.trim_end();
+        let visible_row = visible_row.trim_end();
+        visible_row.contains(ax_text)
+            || row_before_cursor.contains(ax_text)
+            || ax_text.starts_with(&self.input_line)
+    }
+
+    fn ax_text_has_probable_prefix_noise(&self, ax_text: &str) -> bool {
+        probable_ascii_prefix_noise(ax_text, &self.input_line)
     }
 }
 
@@ -970,6 +1139,15 @@ fn encode_alt_scroll_bytes(x_steps: i32, y_steps: i32) -> Vec<u8> {
     }
 
     content
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 fn evaluate_paste_risk(text: &str) -> Option<PasteRisk> {
@@ -1116,6 +1294,38 @@ fn normalize_selection_col(cells: &[CellSnapshot], col: usize) -> usize {
     normalized
 }
 
+fn row_text_without_wide_spacers(cells: &[CellSnapshot]) -> String {
+    let mut text = String::new();
+    let mut col = 0usize;
+    while col < cells.len() {
+        let cell = &cells[col];
+        text.push(cell.ch);
+        col = col.saturating_add(usize::from(cell.width_cols.max(1)));
+    }
+    text
+}
+
+fn probable_ascii_prefix_noise(ax_text: &str, model_text: &str) -> bool {
+    if model_text.is_empty() {
+        return false;
+    }
+    let Some(prefix) = ax_text.strip_suffix(model_text) else {
+        return false;
+    };
+    let prefix_len = prefix.chars().count();
+    (1..=4).contains(&prefix_len) && prefix.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn is_high_priority_control_bytes(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+
+    // Prioritize PTY dispatch for control bytes and escape sequences
+    // (Enter, Backspace, Ctrl chords, arrows, function keys, etc).
+    bytes[0] == 0x1b || bytes.iter().any(|byte| *byte < 0x20 || *byte == 0x7f)
+}
+
 impl EntityInputHandler for AgentTerminal {
     fn text_for_range(
         &mut self,
@@ -1171,6 +1381,15 @@ impl EntityInputHandler for AgentTerminal {
             text.len(),
             summarize_text_for_trace(text)
         ));
+        self.log_input_event(
+            "ime_replace_text_in_range",
+            json!({
+                "replacement_range": format!("{:?}", range),
+                "text": self.input_log_text_value(text),
+                "before_line": self.input_log_text_value(&self.input_line),
+                "before_cursor_utf16": self.input_cursor_utf16,
+            }),
+        );
 
         if let Some(range) = range {
             self.replace_input_range_utf16(range, text);
@@ -1179,6 +1398,13 @@ impl EntityInputHandler for AgentTerminal {
             self.insert_input_text_at_cursor(text);
             self.write_text_input(text);
         }
+        self.log_input_event(
+            "ime_replace_text_in_range_applied",
+            json!({
+                "after_line": self.input_log_text_value(&self.input_line),
+                "after_cursor_utf16": self.input_cursor_utf16,
+            }),
+        );
         cx.notify();
     }
 
@@ -1233,7 +1459,7 @@ mod tests {
 
     use super::{
         evaluate_paste_risk, extract_selection_text, normalize_selection_bounds,
-        selection_contains_cell,
+        probable_ascii_prefix_noise, selection_contains_cell,
     };
     use crate::terminal::{ScreenSnapshot, SelectionPoint};
 
@@ -1320,6 +1546,15 @@ mod tests {
         );
 
         assert_eq!(text, "你好X");
+    }
+
+    #[test]
+    fn probable_prefix_noise_detects_short_ascii_prefix() {
+        assert!(probable_ascii_prefix_noise("3n你好世界", "你好世界"));
+        assert!(probable_ascii_prefix_noise("nnn你好世界", "你好世界"));
+        assert!(!probable_ascii_prefix_noise("前缀你好世界", "你好世界"));
+        assert!(!probable_ascii_prefix_noise("12345你好世界", "你好世界"));
+        assert!(!probable_ascii_prefix_noise("你好世界abc", "你好世界"));
     }
 
     fn cell(ch: char) -> CellSnapshot {

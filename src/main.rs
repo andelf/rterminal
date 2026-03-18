@@ -4,6 +4,7 @@ mod cli;
 mod color;
 mod debug_server;
 mod input;
+mod input_log;
 mod keyboard;
 mod macos_ax;
 mod pty;

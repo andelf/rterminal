@@ -2,6 +2,7 @@ use gpui::{
     Bounds, Context, Hsla, MouseButton, Pixels, Render, Window, WindowControlArea, canvas, div,
     fill, font, point, prelude::*, px, rgb, rgba, size,
 };
+use alacritty_terminal::vte::ansi::CursorShape;
 
 use crate::cli::Theme;
 use crate::input::selection_contains_cell;
@@ -67,12 +68,14 @@ impl Render for AgentTerminal {
         window.set_window_title(&self.window_title());
         let model_line = self.input_line.clone();
         let model_cursor_utf16 = self.input_cursor_utf16;
+        let allow_ax_override = self.allow_ax_override();
         let sync_result = crate::macos_ax::sync_native_ax_input_view(
             window,
             &model_line,
             model_cursor_utf16,
             &self.last_ax_published_line,
             self.last_ax_published_cursor_utf16,
+            allow_ax_override,
         );
         if let Some(state) = sync_result.override_from_ax
             && self.apply_external_ax_input_state(state)
@@ -85,6 +88,7 @@ impl Render for AgentTerminal {
         }
 
         let snapshot = self.snapshot.clone();
+        let cursor_shape = self.cursor_shape;
         let focused = self.focus_handle.is_focused(window);
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
@@ -211,13 +215,64 @@ impl Render for AgentTerminal {
                                 origin.x + snapshot.cursor_col as f32 * cell_width,
                                 origin.y + snapshot.cursor_row as f32 * line_height,
                             );
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    cursor_origin,
-                                    size(cell_width.max(px(2.0)), line_height),
-                                ),
-                                palette.cursor_bg,
-                            ));
+                            let cell_width_px = cell_width.max(px(2.0));
+                            match cursor_shape {
+                                CursorShape::Beam => {
+                                    let beam_width = (cell_width_px * 0.14).max(px(2.0));
+                                    window.paint_quad(fill(
+                                        Bounds::new(cursor_origin, size(beam_width, line_height)),
+                                        palette.cursor_bg,
+                                    ));
+                                }
+                                CursorShape::Underline => {
+                                    let underline_height = (line_height * 0.12).max(px(2.0));
+                                    let underline_origin = point(
+                                        cursor_origin.x,
+                                        cursor_origin.y + line_height - underline_height,
+                                    );
+                                    window.paint_quad(fill(
+                                        Bounds::new(
+                                            underline_origin,
+                                            size(cell_width_px, underline_height),
+                                        ),
+                                        palette.cursor_bg,
+                                    ));
+                                }
+                                CursorShape::HollowBlock => {
+                                    let border_x = (cell_width_px * 0.08).max(px(1.0));
+                                    let border_y = (line_height * 0.08).max(px(1.0));
+
+                                    window.paint_quad(fill(
+                                        Bounds::new(cursor_origin, size(cell_width_px, border_y)),
+                                        palette.cursor_bg,
+                                    ));
+                                    window.paint_quad(fill(
+                                        Bounds::new(
+                                            point(cursor_origin.x, cursor_origin.y + line_height - border_y),
+                                            size(cell_width_px, border_y),
+                                        ),
+                                        palette.cursor_bg,
+                                    ));
+                                    window.paint_quad(fill(
+                                        Bounds::new(cursor_origin, size(border_x, line_height)),
+                                        palette.cursor_bg,
+                                    ));
+                                    window.paint_quad(fill(
+                                        Bounds::new(
+                                            point(cursor_origin.x + cell_width_px - border_x, cursor_origin.y),
+                                            size(border_x, line_height),
+                                        ),
+                                        palette.cursor_bg,
+                                    ));
+                                }
+                                CursorShape::Hidden => {}
+                                CursorShape::Block => {
+                                    window.paint_quad(fill(
+                                        Bounds::new(cursor_origin, size(cell_width_px, line_height)),
+                                        palette.cursor_bg,
+                                    ));
+                                }
+                            }
                         }
                     },
                 )

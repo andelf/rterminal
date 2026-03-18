@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
@@ -15,17 +16,20 @@ use gpui::{Context, EventEmitter, FocusHandle, Pixels, Subscription, Task, Windo
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
+use serde_json::json;
 
 use crate::cli::{AmbiguousWidth, CliOptions, Theme};
 use crate::color::indexed_to_rgb;
 use crate::color::{ansi_bg_to_hsla, ansi_to_hsla};
 use crate::debug_server::{SharedDebugState, start_debug_http_server};
+use crate::input_log::InputLogger;
 use crate::keyboard::encode_keystroke;
 use crate::pty::{PtySession, write_to_pty};
 use crate::render::{
     CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_ESTIMATED_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
     line_height_for, measure_cell_width,
 };
+use crate::text_utils::summarize_text_for_trace;
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -35,6 +39,8 @@ pub(crate) const DEFAULT_FONT_SIZE: Pixels = px(14.0);
 pub(crate) const MIN_FONT_SIZE: Pixels = px(8.0);
 pub(crate) const MAX_FONT_SIZE: Pixels = px(48.0);
 const INPUT_TRACE_ENV: &str = "AGENT_TUI_INPUT_TRACE";
+const MAX_PTY_BATCH_CHUNKS: usize = 256;
+const MAX_PTY_BATCH_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AgentTerminalOptions {
@@ -134,12 +140,21 @@ pub(crate) struct SelectionPoint {
     pub(crate) col: usize,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct EnterLatencyProbe {
+    pub(crate) id: u64,
+    pub(crate) keydown_at: Instant,
+    pub(crate) write_done_at: Option<Instant>,
+    pub(crate) first_pty_at: Option<Instant>,
+}
+
 pub(crate) struct AgentTerminal {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) term: Term<TitleTrackingListener>,
     pub(crate) processor: Processor<StdSyncHandler>,
     pub(crate) grid_size: GridSize,
     pub(crate) snapshot: ScreenSnapshot,
+    pub(crate) cursor_shape: CursorShape,
     pub(crate) shell: String,
     pub(crate) terminal_title: Arc<Mutex<Option<String>>>,
     pub(crate) show_title_bar: bool,
@@ -156,6 +171,14 @@ pub(crate) struct AgentTerminal {
     pub(crate) last_ax_published_line: String,
     pub(crate) last_ax_published_cursor_utf16: usize,
     pub(crate) input_trace: bool,
+    pub(crate) input_logger: Option<InputLogger>,
+    pub(crate) last_local_key_event_at: Option<Instant>,
+    pub(crate) pty_sample_started_at: Instant,
+    pub(crate) pty_sample_bytes: usize,
+    pub(crate) pty_sample_chunks: usize,
+    pub(crate) last_pty_chunk_at: Option<Instant>,
+    pub(crate) enter_latency_seq: u64,
+    pub(crate) enter_latency_probe: Option<EnterLatencyProbe>,
     pub(crate) mouse_scroll_accum_x: f32,
     pub(crate) mouse_scroll_accum_y: f32,
     pub(crate) last_mouse_report: Option<(usize, usize, u8)>,
@@ -246,6 +269,29 @@ impl AgentTerminal {
             };
 
         start_debug_http_server(debug.clone(), writer.clone());
+        let input_logger = match cli.input_log_file.as_ref() {
+            Some(path) => match InputLogger::new(path, cli.input_log_raw) {
+                Ok(logger) => {
+                    logger.log_event(
+                        "logger_started",
+                        json!({
+                            "path": path.to_string_lossy().to_string(),
+                            "raw": cli.input_log_raw,
+                            "shell": shell.clone(),
+                        }),
+                    );
+                    Some(logger)
+                }
+                Err(err) => {
+                    debug.set_error(format!(
+                        "failed to open input log file {}: {err}",
+                        path.to_string_lossy()
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
 
         let mut this = Self {
             focus_handle,
@@ -253,6 +299,7 @@ impl AgentTerminal {
             processor,
             grid_size,
             snapshot: ScreenSnapshot::default(),
+            cursor_shape: CursorShape::Block,
             shell,
             terminal_title: terminal_title.clone(),
             show_title_bar: options.show_title_bar,
@@ -269,6 +316,14 @@ impl AgentTerminal {
             last_ax_published_line: String::new(),
             last_ax_published_cursor_utf16: 0,
             input_trace: is_input_trace_enabled(),
+            input_logger,
+            last_local_key_event_at: None,
+            pty_sample_started_at: Instant::now(),
+            pty_sample_bytes: 0,
+            pty_sample_chunks: 0,
+            last_pty_chunk_at: None,
+            enter_latency_seq: 0,
+            enter_latency_probe: None,
             mouse_scroll_accum_x: 0.0,
             mouse_scroll_accum_y: 0.0,
             last_mouse_report: None,
@@ -293,8 +348,25 @@ impl AgentTerminal {
         if let Some(rx) = output_rx {
             this._pump_task = cx.spawn(async move |this, cx| {
                 while let Ok(bytes) = rx.recv().await {
+                    let mut batch = vec![bytes];
+                    let mut batch_bytes = batch[0].len();
+
+                    // Low-latency batching: process first PTY chunk immediately,
+                    // then drain currently queued chunks in one UI update.
+                    while batch.len() < MAX_PTY_BATCH_CHUNKS && batch_bytes < MAX_PTY_BATCH_BYTES {
+                        match rx.try_recv() {
+                            Ok(next) => {
+                                batch_bytes = batch_bytes.saturating_add(next.len());
+                                batch.push(next);
+                            }
+                            Err(async_channel::TryRecvError::Empty) => break,
+                            Err(async_channel::TryRecvError::Closed) => break,
+                        }
+                    }
+
                     this.update(cx, |this, cx| {
-                        this.ingest(&bytes);
+                        this.ingest_batch(&batch);
+                        this.mark_enter_latency_first_paint();
                         cx.notify();
                     })?;
                 }
@@ -311,9 +383,17 @@ impl AgentTerminal {
         this
     }
 
-    pub(crate) fn ingest(&mut self, bytes: &[u8]) {
-        self.processor.advance(&mut self.term, bytes);
-        self.debug.record_bytes_from_pty(bytes.len());
+    pub(crate) fn ingest_batch(&mut self, chunks: &[Vec<u8>]) {
+        if chunks.is_empty() {
+            return;
+        }
+
+        self.mark_enter_latency_first_pty();
+        for chunk in chunks {
+            self.processor.advance(&mut self.term, chunk);
+            self.debug.record_bytes_from_pty(chunk.len());
+            self.record_pty_ingest_diagnostics(chunk.len());
+        }
         self.refresh_snapshot();
     }
 
@@ -377,6 +457,7 @@ impl AgentTerminal {
         let cursor = content.cursor;
         let cursor_row = (cursor.point.line.0 + content.display_offset as i32).max(0) as usize;
         let cursor_col = cursor.point.column.0.min(cols.saturating_sub(1));
+        self.cursor_shape = cursor.shape;
 
         self.snapshot = ScreenSnapshot {
             cells,
@@ -469,6 +550,175 @@ impl AgentTerminal {
             .clone()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| self.shell.clone())
+    }
+
+    pub(crate) fn start_enter_latency_probe(&mut self, input_line: &str) -> u64 {
+        if let Some(previous) = self.enter_latency_probe.take() {
+            self.log_enter_latency_event(
+                "enter_latency_abandoned",
+                previous.id,
+                &previous,
+                Instant::now(),
+                json!({ "reason": "superseded_by_new_enter" }),
+            );
+        }
+
+        self.enter_latency_seq = self.enter_latency_seq.saturating_add(1);
+        let probe = EnterLatencyProbe {
+            id: self.enter_latency_seq,
+            keydown_at: Instant::now(),
+            write_done_at: None,
+            first_pty_at: None,
+        };
+
+        self.log_enter_latency_event(
+            "enter_latency_start",
+            probe.id,
+            &probe,
+            probe.keydown_at,
+            json!({
+                "input_line": summarize_text_for_trace(input_line),
+            }),
+        );
+        self.enter_latency_probe = Some(probe);
+        self.enter_latency_seq
+    }
+
+    pub(crate) fn mark_enter_latency_write_done(&mut self, probe_id: u64, bytes_len: usize) {
+        let now = Instant::now();
+        let Some(probe) = self.enter_latency_probe.as_mut() else {
+            return;
+        };
+        if probe.id != probe_id || probe.write_done_at.is_some() {
+            return;
+        }
+
+        probe.write_done_at = Some(now);
+        let snapshot = probe.clone();
+        self.log_enter_latency_event(
+            "enter_latency_write_done",
+            probe_id,
+            &snapshot,
+            now,
+            json!({
+                "bytes_len": bytes_len,
+            }),
+        );
+    }
+
+    pub(crate) fn mark_enter_latency_first_pty(&mut self) {
+        let now = Instant::now();
+        let Some(probe) = self.enter_latency_probe.as_mut() else {
+            return;
+        };
+        if probe.write_done_at.is_none() || probe.first_pty_at.is_some() {
+            return;
+        }
+
+        probe.first_pty_at = Some(now);
+        let snapshot = probe.clone();
+        self.log_enter_latency_event("enter_latency_first_pty", snapshot.id, &snapshot, now, json!({}));
+    }
+
+    pub(crate) fn mark_enter_latency_first_paint(&mut self) {
+        let now = Instant::now();
+        let Some(probe) = self.enter_latency_probe.take() else {
+            return;
+        };
+        if probe.first_pty_at.is_none() {
+            self.enter_latency_probe = Some(probe);
+            return;
+        }
+
+        self.log_enter_latency_event("enter_latency_first_paint", probe.id, &probe, now, json!({}));
+    }
+
+    fn log_enter_latency_event(
+        &self,
+        event: &str,
+        probe_id: u64,
+        probe: &EnterLatencyProbe,
+        at: Instant,
+        extra: serde_json::Value,
+    ) {
+        let Some(logger) = &self.input_logger else {
+            return;
+        };
+
+        let keydown_to_now_ms = at.saturating_duration_since(probe.keydown_at).as_millis();
+        let keydown_to_write_ms = probe
+            .write_done_at
+            .map(|t| t.saturating_duration_since(probe.keydown_at).as_millis());
+        let write_to_now_ms = probe
+            .write_done_at
+            .map(|t| at.saturating_duration_since(t).as_millis());
+        let keydown_to_first_pty_ms = probe
+            .first_pty_at
+            .map(|t| t.saturating_duration_since(probe.keydown_at).as_millis());
+        let first_pty_to_now_ms = probe
+            .first_pty_at
+            .map(|t| at.saturating_duration_since(t).as_millis());
+
+        logger.log_event(
+            event,
+            json!({
+                "probe_id": probe_id,
+                "keydown_to_now_ms": keydown_to_now_ms,
+                "keydown_to_write_ms": keydown_to_write_ms,
+                "write_to_now_ms": write_to_now_ms,
+                "keydown_to_first_pty_ms": keydown_to_first_pty_ms,
+                "first_pty_to_now_ms": first_pty_to_now_ms,
+                "extra": extra,
+            }),
+        );
+    }
+
+    fn record_pty_ingest_diagnostics(&mut self, chunk_len: usize) {
+        let Some(logger) = &self.input_logger else {
+            return;
+        };
+
+        let now = Instant::now();
+        if let Some(last_chunk_at) = self.last_pty_chunk_at {
+            let gap = now.saturating_duration_since(last_chunk_at);
+            if gap >= Duration::from_millis(800) {
+                logger.log_event(
+                    "pty_ingest_gap",
+                    json!({
+                        "gap_ms": gap.as_millis(),
+                        "chunk_len": chunk_len,
+                    }),
+                );
+            }
+        }
+        self.last_pty_chunk_at = Some(now);
+
+        self.pty_sample_bytes += chunk_len;
+        self.pty_sample_chunks += 1;
+
+        let window = now.saturating_duration_since(self.pty_sample_started_at);
+        if window < Duration::from_millis(500) {
+            return;
+        }
+
+        let window_ms = window.as_millis().max(1);
+        let bytes = self.pty_sample_bytes as u128;
+        let chunks = self.pty_sample_chunks as u128;
+
+        logger.log_event(
+            "pty_ingest_sample",
+            json!({
+                "window_ms": window_ms,
+                "bytes": bytes,
+                "chunks": chunks,
+                "bytes_per_sec": bytes.saturating_mul(1000) / window_ms,
+                "chunks_per_sec": chunks.saturating_mul(1000) / window_ms,
+            }),
+        );
+
+        self.pty_sample_started_at = now;
+        self.pty_sample_bytes = 0;
+        self.pty_sample_chunks = 0;
     }
 }
 

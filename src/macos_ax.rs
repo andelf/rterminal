@@ -58,6 +58,7 @@ pub(crate) fn sync_native_ax_input_view(
     cursor_utf16: usize,
     last_published_line: &str,
     last_published_cursor_utf16: usize,
+    allow_ax_override: bool,
 ) -> NativeAxSyncResult {
     let window_handle = match raw_window_handle::HasWindowHandle::window_handle(window) {
         Ok(handle) => handle,
@@ -83,14 +84,15 @@ pub(crate) fn sync_native_ax_input_view(
             (current_range.location as usize).saturating_add(current_range.length as usize);
         let current_cursor_utf16 = current_cursor_utf16.min(current_text.encode_utf16().count());
 
-        let accepting_ax_override = should_accept_ax_override(
-            &current_text,
-            current_cursor_utf16,
-            input_line,
-            cursor_utf16,
-            last_published_line,
-            last_published_cursor_utf16,
-        );
+        let accepting_ax_override = allow_ax_override
+            && should_accept_ax_override(
+                &current_text,
+                current_cursor_utf16,
+                input_line,
+                cursor_utf16,
+                last_published_line,
+                last_published_cursor_utf16,
+            );
         let publishing_model = should_publish_model_to_ax(
             &current_text,
             current_cursor_utf16,
@@ -132,6 +134,7 @@ pub(crate) fn sync_native_ax_input_view(
     _cursor_utf16: usize,
     _last_published_line: &str,
     _last_published_cursor_utf16: usize,
+    _allow_ax_override: bool,
 ) -> NativeAxSyncResult {
     NativeAxSyncResult::default()
 }
