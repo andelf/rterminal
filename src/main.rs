@@ -9,6 +9,7 @@ mod keyboard;
 mod macos_ax;
 mod pty;
 mod render;
+mod snapshot_tab;
 mod tabs;
 mod terminal;
 mod text_utils;
@@ -33,6 +34,7 @@ actions!(
     [
         QuitApp,
         NewTab,
+        CaptureSnapshotTab,
         CloseTab,
         NextTab,
         PrevTab,
@@ -64,6 +66,7 @@ fn main() {
         cx.on_action(|_: &QuitApp, cx: &mut App| cx.quit());
         cx.bind_keys([
             KeyBinding::new("cmd-t", NewTab, None),
+            KeyBinding::new("cmd-shift-s", CaptureSnapshotTab, None),
             KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("ctrl-tab", NextTab, None),
             KeyBinding::new("ctrl-shift-tab", PrevTab, None),
@@ -84,6 +87,7 @@ fn main() {
             name: "Agent Terminal".into(),
             items: vec![
                 MenuItem::action("New Tab", NewTab),
+                MenuItem::action("Capture Snapshot Tab", CaptureSnapshotTab),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::separator(),
                 MenuItem::action("Next Tab", NextTab),

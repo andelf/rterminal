@@ -5,14 +5,55 @@ use gpui::{
 
 use crate::cli::CliOptions;
 use crate::render::CUSTOM_TITLE_BAR_HEIGHT;
+use crate::snapshot_tab::SnapshotTab;
 use crate::terminal::{AgentTerminal, TerminalExitedEvent};
 
 const TRAFFIC_LIGHT_LEFT_GUTTER: gpui::Pixels = px(68.0);
 
+enum TerminalTabKind {
+    Terminal {
+        terminal: Entity<AgentTerminal>,
+        _exit_subscription: Subscription,
+    },
+    Snapshot {
+        snapshot: Entity<SnapshotTab>,
+    },
+}
+
 struct TerminalTab {
     id: usize,
-    terminal: Entity<AgentTerminal>,
-    _exit_subscription: Subscription,
+    kind: TerminalTabKind,
+}
+
+impl TerminalTab {
+    fn title(&self, cx: &mut Context<TerminalTabs>) -> String {
+        match &self.kind {
+            TerminalTabKind::Terminal { terminal, .. } => terminal.read(cx).tab_title(),
+            TerminalTabKind::Snapshot { snapshot } => snapshot.read(cx).title(),
+        }
+    }
+
+    fn focus(&self, window: &mut Window, cx: &mut Context<TerminalTabs>) {
+        match &self.kind {
+            TerminalTabKind::Terminal { terminal, .. } => {
+                terminal.update(cx, |terminal, cx| {
+                    window.focus(&terminal.focus_handle, cx);
+                });
+            }
+            TerminalTabKind::Snapshot { snapshot } => {
+                snapshot.update(cx, |snapshot, cx| {
+                    window.focus(&snapshot.focus_handle, cx);
+                });
+            }
+        }
+    }
+
+    fn terminal(&self) -> Option<Entity<AgentTerminal>> {
+        match &self.kind {
+            TerminalTabKind::Terminal { terminal, .. } => Some(terminal.clone()),
+            TerminalTabKind::Snapshot { .. } => None,
+        }
+    }
 }
 
 macro_rules! define_tab_switch_handlers {
@@ -35,6 +76,7 @@ pub(crate) struct TerminalTabs {
     tabs: Vec<TerminalTab>,
     active_tab: usize,
     next_tab_id: usize,
+    next_snapshot_id: usize,
     pending_focus_sync: bool,
 }
 
@@ -45,6 +87,7 @@ impl TerminalTabs {
             tabs: Vec::new(),
             active_tab: 0,
             next_tab_id: 1,
+            next_snapshot_id: 1,
             pending_focus_sync: false,
         };
 
@@ -66,8 +109,35 @@ impl TerminalTabs {
 
         self.tabs.push(TerminalTab {
             id: tab_id,
-            terminal,
-            _exit_subscription: exit_subscription,
+            kind: TerminalTabKind::Terminal {
+                terminal,
+                _exit_subscription: exit_subscription,
+            },
+        });
+        self.active_tab = self.tabs.len().saturating_sub(1);
+        self.request_focus_active_tab(window, cx);
+        cx.notify();
+    }
+
+    fn open_snapshot_tab_from_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source_terminal) = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(TerminalTab::terminal)
+        else {
+            return;
+        };
+
+        let title = format!("snap {}", self.next_snapshot_id);
+        self.next_snapshot_id += 1;
+        let snapshot_data = source_terminal.read(cx).capture_snapshot_data(title);
+        let snapshot = cx.new(|cx| SnapshotTab::new(window, cx, snapshot_data));
+
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tabs.push(TerminalTab {
+            id: tab_id,
+            kind: TerminalTabKind::Snapshot { snapshot },
         });
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.request_focus_active_tab(window, cx);
@@ -167,9 +237,7 @@ impl TerminalTabs {
 
     fn focus_active_tab_now(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            tab.terminal.update(cx, |terminal, cx| {
-                window.focus(&terminal.focus_handle, cx);
-            });
+            tab.focus(window, cx);
         }
     }
 
@@ -194,6 +262,15 @@ impl TerminalTabs {
 
     fn on_prev_tab(&mut self, _: &crate::PrevTab, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_relative_tab(-1, window, cx);
+    }
+
+    fn on_capture_snapshot_tab(
+        &mut self,
+        _: &crate::CaptureSnapshotTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_snapshot_tab_from_active(window, cx);
     }
 
     define_tab_switch_handlers!(
@@ -223,14 +300,14 @@ impl Render for TerminalTabs {
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                let title = tab.terminal.read(cx).tab_title();
+                let title = tab.title(cx);
                 (tab.id, title, index == self.active_tab)
             })
             .collect();
-        let active_terminal = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| tab.terminal.clone());
+        let active_content = self.tabs.get(self.active_tab).map(|tab| match &tab.kind {
+            TerminalTabKind::Terminal { terminal, .. } => ActiveTabContent::Terminal(terminal.clone()),
+            TerminalTabKind::Snapshot { snapshot } => ActiveTabContent::Snapshot(snapshot.clone()),
+        });
 
         let tabs_row = tabs_data.into_iter().fold(
             div()
@@ -278,15 +355,17 @@ impl Render for TerminalTabs {
             )
             .child(div().w(px(8.0)));
 
-        let content = if let Some(active_terminal) = active_terminal {
-            div().flex_1().min_h_0().child(active_terminal)
-        } else {
-            div()
+        let content = match active_content {
+            Some(ActiveTabContent::Terminal(active_terminal)) => {
+                div().flex_1().min_h_0().child(active_terminal)
+            }
+            Some(ActiveTabContent::Snapshot(snapshot)) => div().flex_1().min_h_0().child(snapshot),
+            None => div()
                 .flex_1()
                 .items_center()
                 .justify_center()
                 .text_color(rgb(0xa9b1c6))
-                .child("No terminal tabs")
+                .child("No terminal tabs"),
         };
 
         div()
@@ -295,6 +374,7 @@ impl Render for TerminalTabs {
             .bg(rgb(0x0f1115))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_capture_snapshot_tab))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_prev_tab))
             .on_action(cx.listener(Self::on_switch_to_tab1))
@@ -312,6 +392,11 @@ impl Render for TerminalTabs {
             .child(tabs_row)
             .child(content)
     }
+}
+
+enum ActiveTabContent {
+    Terminal(Entity<AgentTerminal>),
+    Snapshot(Entity<SnapshotTab>),
 }
 
 fn next_active_tab_index(active: usize, removed: usize, remaining_len: usize) -> usize {

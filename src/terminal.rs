@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{
@@ -30,6 +31,7 @@ use crate::render::{
     CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_ESTIMATED_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
     line_height_for, measure_cell_width,
 };
+use crate::snapshot_tab::SnapshotTabData;
 use crate::text_utils::summarize_text_for_trace;
 
 const DEFAULT_COLS: u16 = 80;
@@ -604,6 +606,79 @@ impl AgentTerminal {
             .clone()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| self.shell.clone())
+    }
+
+    pub(crate) fn capture_snapshot_data(&self, title: String) -> SnapshotTabData {
+        let grid = self.term.grid();
+        let colors = self.term.colors();
+        let cols = grid.columns();
+        let top = grid.topmost_line().0;
+        let bottom = grid.bottommost_line().0;
+        let default_fg = ansi_to_hsla(
+            AnsiColor::Named(NamedColor::Foreground),
+            colors,
+            Flags::empty(),
+            true,
+        );
+
+        let mut lines = Vec::with_capacity((bottom - top + 1).max(0) as usize);
+        for line_index in top..=bottom {
+            let mut row = vec![
+                CellSnapshot {
+                    ch: ' ',
+                    fg: default_fg,
+                    bg: None,
+                    width_cols: 1,
+                    spans_next_col: false,
+                    expands_layout: false,
+                };
+                cols
+            ];
+
+            for col in 0..cols {
+                let cell = &grid[Line(line_index)][Column(col)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+
+                let mut fg = cell.fg;
+                let mut bg = cell.bg;
+                if cell.flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+
+                let ch = if cell.flags.contains(Flags::HIDDEN) {
+                    ' '
+                } else {
+                    cell.c
+                };
+                let spans_next_col = cell.flags.contains(Flags::WIDE_CHAR);
+                let expands_layout =
+                    !spans_next_col && self.forced_double_width_chars.contains(&ch);
+                let width_cols = if spans_next_col || expands_layout { 2 } else { 1 };
+
+                row[col] = CellSnapshot {
+                    ch,
+                    fg: ansi_to_hsla(fg, colors, cell.flags, true),
+                    bg: ansi_bg_to_hsla(bg, colors),
+                    width_cols,
+                    spans_next_col,
+                    expands_layout,
+                };
+            }
+
+            lines.push(row);
+        }
+
+        SnapshotTabData {
+            title,
+            lines,
+            cols,
+            font_family: self.font_family.clone(),
+            font_fallbacks: self.font_fallbacks.clone(),
+            font_size: self.font_size,
+            theme: self.theme,
+        }
     }
 
     pub(crate) fn cursor_visual_state(&self) -> (usize, f32, bool) {
