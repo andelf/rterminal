@@ -89,6 +89,12 @@ impl Render for AgentTerminal {
 
         let snapshot = self.snapshot.clone();
         let cursor_shape = self.cursor_shape;
+        let (cursor_visual_row, cursor_visual_col, cursor_sliding) = self.cursor_visual_state();
+        if cursor_sliding {
+            cx.on_next_frame(window, |_, _, cx| {
+                cx.notify();
+            });
+        }
         let focused = self.focus_handle.is_focused(window);
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
@@ -212,8 +218,8 @@ impl Render for AgentTerminal {
 
                         if focused && snapshot.cursor_visible {
                             let cursor_origin = point(
-                                origin.x + snapshot.cursor_col as f32 * cell_width,
-                                origin.y + snapshot.cursor_row as f32 * line_height,
+                                origin.x + cursor_visual_col * cell_width,
+                                origin.y + cursor_visual_row as f32 * line_height,
                             );
                             let cell_width_px = cell_width.max(px(2.0));
                             match cursor_shape {

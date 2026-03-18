@@ -30,6 +30,10 @@ pub(crate) struct CliOptions {
     pub(crate) input_log_file: Option<PathBuf>,
     #[arg(long)]
     pub(crate) input_log_raw: bool,
+    #[arg(long, help = "Disable smooth cursor slide animation")]
+    pub(crate) no_cursor_slide: bool,
+    #[arg(long, help = "Force a vertical beam cursor regardless of app cursor mode")]
+    pub(crate) force_vertical_cursor: bool,
 }
 
 #[cfg(test)]
@@ -83,5 +87,29 @@ mod tests {
             cli.input_log_file.as_deref(),
             Some(std::path::Path::new("/tmp/agent-input.jsonl"))
         );
+    }
+
+    #[test]
+    fn cursor_slide_enabled_by_default() {
+        let cli = parse_cli_options_from(Vec::<String>::new());
+        assert!(!cli.no_cursor_slide);
+    }
+
+    #[test]
+    fn cursor_slide_can_be_disabled() {
+        let cli = parse_cli_options_from(vec!["--no-cursor-slide".to_string()]);
+        assert!(cli.no_cursor_slide);
+    }
+
+    #[test]
+    fn force_vertical_cursor_defaults_to_disabled() {
+        let cli = parse_cli_options_from(Vec::<String>::new());
+        assert!(!cli.force_vertical_cursor);
+    }
+
+    #[test]
+    fn force_vertical_cursor_flag_parses() {
+        let cli = parse_cli_options_from(vec!["--force-vertical-cursor".to_string()]);
+        assert!(cli.force_vertical_cursor);
     }
 }

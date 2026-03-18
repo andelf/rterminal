@@ -41,6 +41,8 @@ pub(crate) const MAX_FONT_SIZE: Pixels = px(48.0);
 const INPUT_TRACE_ENV: &str = "AGENT_TUI_INPUT_TRACE";
 const MAX_PTY_BATCH_CHUNKS: usize = 256;
 const MAX_PTY_BATCH_BYTES: usize = 256 * 1024;
+const CURSOR_SLIDE_DURATION: Duration = Duration::from_millis(80);
+const CURSOR_SLIDE_MAX_COL_DELTA: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AgentTerminalOptions {
@@ -155,6 +157,13 @@ pub(crate) struct AgentTerminal {
     pub(crate) grid_size: GridSize,
     pub(crate) snapshot: ScreenSnapshot,
     pub(crate) cursor_shape: CursorShape,
+    pub(crate) force_vertical_cursor: bool,
+    pub(crate) cursor_slide_enabled: bool,
+    pub(crate) cursor_visual_initialized: bool,
+    pub(crate) cursor_visual_row: usize,
+    pub(crate) cursor_anim_from_col: f32,
+    pub(crate) cursor_anim_to_col: f32,
+    pub(crate) cursor_anim_started_at: Option<Instant>,
     pub(crate) shell: String,
     pub(crate) terminal_title: Arc<Mutex<Option<String>>>,
     pub(crate) show_title_bar: bool,
@@ -300,6 +309,13 @@ impl AgentTerminal {
             grid_size,
             snapshot: ScreenSnapshot::default(),
             cursor_shape: CursorShape::Block,
+            force_vertical_cursor: cli.force_vertical_cursor,
+            cursor_slide_enabled: !cli.no_cursor_slide,
+            cursor_visual_initialized: false,
+            cursor_visual_row: 0,
+            cursor_anim_from_col: 0.0,
+            cursor_anim_to_col: 0.0,
+            cursor_anim_started_at: None,
             shell,
             terminal_title: terminal_title.clone(),
             show_title_bar: options.show_title_bar,
@@ -457,7 +473,14 @@ impl AgentTerminal {
         let cursor = content.cursor;
         let cursor_row = (cursor.point.line.0 + content.display_offset as i32).max(0) as usize;
         let cursor_col = cursor.point.column.0.min(cols.saturating_sub(1));
-        self.cursor_shape = cursor.shape;
+        let effective_cursor_shape = if self.force_vertical_cursor && cursor.shape != CursorShape::Hidden
+        {
+            CursorShape::Beam
+        } else {
+            cursor.shape
+        };
+        self.cursor_shape = effective_cursor_shape;
+        self.update_cursor_visual_target(cursor_row.min(rows.saturating_sub(1)), cursor_col);
 
         self.snapshot = ScreenSnapshot {
             cells,
@@ -550,6 +573,92 @@ impl AgentTerminal {
             .clone()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| self.shell.clone())
+    }
+
+    pub(crate) fn cursor_visual_state(&self) -> (usize, f32, bool) {
+        if !self.cursor_slide_enabled {
+            return (self.snapshot.cursor_row, self.snapshot.cursor_col as f32, false);
+        }
+
+        if !self.cursor_visual_initialized {
+            return (self.snapshot.cursor_row, self.snapshot.cursor_col as f32, false);
+        }
+
+        let now = Instant::now();
+        (
+            self.cursor_visual_row,
+            self.cursor_visual_col_at(now),
+            self.cursor_animation_active_at(now),
+        )
+    }
+
+    fn update_cursor_visual_target(&mut self, row: usize, col: usize) {
+        let target_col = col as f32;
+        let now = Instant::now();
+
+        if !self.cursor_slide_enabled {
+            self.cursor_visual_initialized = true;
+            self.cursor_visual_row = row;
+            self.cursor_anim_from_col = target_col;
+            self.cursor_anim_to_col = target_col;
+            self.cursor_anim_started_at = None;
+            return;
+        }
+
+        if !self.cursor_visual_initialized {
+            self.cursor_visual_initialized = true;
+            self.cursor_visual_row = row;
+            self.cursor_anim_from_col = target_col;
+            self.cursor_anim_to_col = target_col;
+            self.cursor_anim_started_at = None;
+            return;
+        }
+
+        let current_col = self.cursor_visual_col_at(now);
+        let row_changed = self.cursor_visual_row != row;
+        let large_delta = (target_col - current_col).abs() > CURSOR_SLIDE_MAX_COL_DELTA;
+        if row_changed || large_delta {
+            self.cursor_visual_row = row;
+            self.cursor_anim_from_col = target_col;
+            self.cursor_anim_to_col = target_col;
+            self.cursor_anim_started_at = None;
+            return;
+        }
+
+        if (target_col - self.cursor_anim_to_col).abs() < f32::EPSILON {
+            if !self.cursor_animation_active_at(now) {
+                self.cursor_anim_from_col = target_col;
+                self.cursor_anim_to_col = target_col;
+                self.cursor_anim_started_at = None;
+            }
+            self.cursor_visual_row = row;
+            return;
+        }
+
+        self.cursor_visual_row = row;
+        self.cursor_anim_from_col = current_col;
+        self.cursor_anim_to_col = target_col;
+        self.cursor_anim_started_at = Some(now);
+    }
+
+    fn cursor_visual_col_at(&self, now: Instant) -> f32 {
+        let Some(started_at) = self.cursor_anim_started_at else {
+            return self.cursor_anim_to_col;
+        };
+
+        let elapsed = now.saturating_duration_since(started_at);
+        let duration_ms = CURSOR_SLIDE_DURATION.as_millis().max(1) as f32;
+        let progress = (elapsed.as_millis() as f32 / duration_ms).clamp(0.0, 1.0);
+        let eased = progress * (2.0 - progress); // ease-out quad
+        self.cursor_anim_from_col + (self.cursor_anim_to_col - self.cursor_anim_from_col) * eased
+    }
+
+    fn cursor_animation_active_at(&self, now: Instant) -> bool {
+        let Some(started_at) = self.cursor_anim_started_at else {
+            return false;
+        };
+        now.saturating_duration_since(started_at) < CURSOR_SLIDE_DURATION
+            && (self.cursor_anim_to_col - self.cursor_anim_from_col).abs() >= f32::EPSILON
     }
 
     pub(crate) fn start_enter_latency_probe(&mut self, input_line: &str) -> u64 {
