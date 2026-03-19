@@ -13,6 +13,11 @@ pub(crate) const TEXT_PADDING_X: Pixels = px(12.0);
 pub(crate) const TEXT_PADDING_Y: Pixels = px(12.0);
 pub(crate) const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
 pub(crate) const STATUS_BAR_ESTIMATED_HEIGHT: Pixels = px(42.0);
+const CURSOR_TRAIL_MIN_LEN_CELLS: f32 = 0.34;
+const CURSOR_TRAIL_MAX_LEN_CELLS: f32 = 1.35;
+const CURSOR_TRAIL_PRIMARY_ALPHA_SCALE: f32 = 0.62;
+const CURSOR_TRAIL_SECONDARY_ALPHA_SCALE: f32 = 0.28;
+const CURSOR_TRAIL_SECONDARY_LEN_SCALE: f32 = 1.6;
 
 pub(crate) fn measure_cell_width(
     window: &mut Window,
@@ -123,6 +128,8 @@ impl Render for AgentTerminal {
         let snapshot = self.snapshot.clone();
         let cursor_shape = self.cursor_shape;
         let (cursor_visual_row, cursor_visual_col, cursor_sliding) = self.cursor_visual_state();
+        let cursor_trail_enabled = self.cursor_trail_enabled;
+        let cursor_anim_from_col = self.cursor_anim_from_col;
         if cursor_sliding {
             cx.on_next_frame(window, |_, _, cx| {
                 cx.notify();
@@ -270,6 +277,52 @@ impl Render for AgentTerminal {
                             match cursor_shape {
                                 CursorShape::Beam => {
                                     let beam_width = (cell_width_px * 0.14).max(px(2.0));
+                                    if cursor_trail_enabled && cursor_sliding {
+                                        let delta_cols = cursor_visual_col - cursor_anim_from_col;
+                                        if delta_cols.abs() > f32::EPSILON {
+                                            let trail_cells = (delta_cols.abs() * 0.7).clamp(
+                                                CURSOR_TRAIL_MIN_LEN_CELLS,
+                                                CURSOR_TRAIL_MAX_LEN_CELLS,
+                                            );
+                                            let primary_trail_width = cell_width_px * trail_cells;
+                                            let primary_trail_origin_x = if delta_cols.is_sign_positive() {
+                                                cursor_origin.x - primary_trail_width
+                                            } else {
+                                                cursor_origin.x + beam_width
+                                            };
+                                            let mut primary_trail_color = palette.cursor_bg;
+                                            primary_trail_color.a = (primary_trail_color.a
+                                                * CURSOR_TRAIL_PRIMARY_ALPHA_SCALE)
+                                                .clamp(0.0, 1.0);
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(primary_trail_origin_x, cursor_origin.y),
+                                                    size(primary_trail_width, line_height),
+                                                ),
+                                                primary_trail_color,
+                                            ));
+
+                                            let secondary_trail_width =
+                                                (primary_trail_width * CURSOR_TRAIL_SECONDARY_LEN_SCALE)
+                                                    .min(cell_width_px * (CURSOR_TRAIL_MAX_LEN_CELLS * 1.8));
+                                            let secondary_trail_origin_x = if delta_cols.is_sign_positive() {
+                                                cursor_origin.x - secondary_trail_width
+                                            } else {
+                                                cursor_origin.x + beam_width
+                                            };
+                                            let mut secondary_trail_color = palette.cursor_bg;
+                                            secondary_trail_color.a = (secondary_trail_color.a
+                                                * CURSOR_TRAIL_SECONDARY_ALPHA_SCALE)
+                                                .clamp(0.0, 1.0);
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    point(secondary_trail_origin_x, cursor_origin.y),
+                                                    size(secondary_trail_width, line_height),
+                                                ),
+                                                secondary_trail_color,
+                                            ));
+                                        }
+                                    }
                                     window.paint_quad(fill(
                                         Bounds::new(cursor_origin, size(beam_width, line_height)),
                                         palette.cursor_bg,

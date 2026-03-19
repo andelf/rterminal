@@ -38,6 +38,8 @@ pub(crate) struct CliOptions {
     pub(crate) no_cursor_slide: bool,
     #[arg(long, help = "Force a vertical beam cursor regardless of app cursor mode")]
     pub(crate) force_vertical_cursor: bool,
+    #[arg(long, help = "Enable subtle trailing effect for vertical beam cursor")]
+    pub(crate) cursor_trail: bool,
 }
 
 #[cfg(test)]
@@ -115,6 +117,18 @@ mod tests {
     fn force_vertical_cursor_flag_parses() {
         let cli = parse_cli_options_from(vec!["--force-vertical-cursor".to_string()]);
         assert!(cli.force_vertical_cursor);
+    }
+
+    #[test]
+    fn cursor_trail_defaults_to_disabled() {
+        let cli = parse_cli_options_from(Vec::<String>::new());
+        assert!(!cli.cursor_trail);
+    }
+
+    #[test]
+    fn cursor_trail_flag_parses() {
+        let cli = parse_cli_options_from(vec!["--cursor-trail".to_string()]);
+        assert!(cli.cursor_trail);
     }
 
     #[test]
