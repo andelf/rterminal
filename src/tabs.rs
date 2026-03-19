@@ -9,6 +9,7 @@ use crate::snapshot_tab::SnapshotTab;
 use crate::terminal::{AgentTerminal, TerminalExitedEvent};
 
 const TRAFFIC_LIGHT_LEFT_GUTTER: gpui::Pixels = px(68.0);
+const MAX_TAB_TITLE_CHARS: usize = 28;
 
 enum TerminalTabKind {
     Terminal {
@@ -27,10 +28,11 @@ struct TerminalTab {
 
 impl TerminalTab {
     fn title(&self, cx: &mut Context<TerminalTabs>) -> String {
-        match &self.kind {
+        let raw_title = match &self.kind {
             TerminalTabKind::Terminal { terminal, .. } => terminal.read(cx).tab_title(),
             TerminalTabKind::Snapshot { snapshot } => snapshot.read(cx).title(),
-        }
+        };
+        truncate_tab_title(&raw_title, MAX_TAB_TITLE_CHARS)
     }
 
     fn focus(&self, window: &mut Window, cx: &mut Context<TerminalTabs>) {
@@ -411,9 +413,28 @@ fn next_active_tab_index(active: usize, removed: usize, remaining_len: usize) ->
     }
 }
 
+fn truncate_tab_title(title: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let char_count = title.chars().count();
+    if char_count <= max_chars {
+        return title.to_string();
+    }
+
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let keep_chars = max_chars - 3;
+    let truncated: String = title.chars().take(keep_chars).collect();
+    format!("{truncated}...")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::next_active_tab_index;
+    use super::{next_active_tab_index, truncate_tab_title};
 
     #[test]
     fn closing_tab_before_active_shifts_active_left() {
@@ -428,5 +449,22 @@ mod tests {
     #[test]
     fn closing_tab_after_active_keeps_active() {
         assert_eq!(next_active_tab_index(1, 3, 4), 1);
+    }
+
+    #[test]
+    fn truncate_tab_title_keeps_short_title() {
+        assert_eq!(truncate_tab_title("short", 10), "short");
+    }
+
+    #[test]
+    fn truncate_tab_title_adds_ellipsis_for_long_title() {
+        assert_eq!(truncate_tab_title("abcdefghijklmnopqrstuvwxyz", 10), "abcdefg...");
+    }
+
+    #[test]
+    fn truncate_tab_title_handles_small_limits() {
+        assert_eq!(truncate_tab_title("abcdef", 3), "...");
+        assert_eq!(truncate_tab_title("abcdef", 2), "..");
+        assert_eq!(truncate_tab_title("abcdef", 1), ".");
     }
 }
