@@ -21,7 +21,7 @@ use crate::render::{
 };
 use crate::terminal::{CellSnapshot, ScreenSnapshot, SelectionPoint};
 use crate::text_utils::{
-    delete_next_word_utf16, delete_previous_word_utf16, delete_to_end_utf16, replace_range_utf16,
+    delete_next_word_utf16, delete_previous_word_utf16, delete_to_end_utf16,
     summarize_text_for_trace, utf16_substring, utf16_to_byte_index,
 };
 
@@ -195,6 +195,20 @@ impl AgentTerminal {
         self.write_bytes(text.as_bytes());
     }
 
+    pub(crate) fn write_paste_input(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
+        if bracketed {
+            self.write_bytes(b"\x1b[200~");
+        }
+        self.write_text_input(text);
+        if bracketed {
+            self.write_bytes(b"\x1b[201~");
+        }
+    }
+
     pub(crate) fn input_line_len_utf16(&self) -> usize {
         self.input_line.encode_utf16().count()
     }
@@ -323,21 +337,6 @@ impl AgentTerminal {
         }
     }
 
-    pub(crate) fn replace_input_range_utf16(&mut self, range: Range<usize>, text: &str) {
-        let len = self.input_line_len_utf16();
-        let start = range.start.min(len);
-        let end = range.end.min(len);
-        let (start, end) = if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        };
-
-        replace_range_utf16(&mut self.input_line, start..end, text);
-        self.input_cursor_utf16 = start + text.encode_utf16().count();
-        self.clamp_input_cursor();
-    }
-
     pub(crate) fn rewrite_terminal_input_line(&mut self) {
         self.write_bytes(&[0x15]); // Ctrl-U clears shell input line.
         if !self.input_line.is_empty() {
@@ -351,28 +350,6 @@ impl AgentTerminal {
         for _ in 0..tail {
             self.write_bytes(b"\x1b[D");
         }
-    }
-
-    pub(crate) fn current_input_line_text_for_range(
-        &self,
-        range: Range<usize>,
-        adjusted_range: &mut Option<Range<usize>>,
-    ) -> String {
-        let len = self.input_line_len_utf16();
-        if len == 0 {
-            *adjusted_range = Some(0..0);
-            return String::new();
-        }
-
-        if range.start >= range.end || range.start >= len {
-            *adjusted_range = Some(0..len);
-            return self.input_line.clone();
-        }
-
-        let start = range.start.min(len);
-        let end = range.end.min(len);
-        *adjusted_range = Some(start..end);
-        utf16_substring(&self.input_line, start..end).unwrap_or_default()
     }
 
     pub(crate) fn ime_cursor_bounds(
@@ -753,7 +730,7 @@ impl AgentTerminal {
                                 this.paste_guard_prompt_open = false;
                                 if paste_allowed {
                                     this.insert_input_text_at_cursor(&text_to_paste);
-                                    this.write_text_input(&text_to_paste);
+                                    this.write_paste_input(&text_to_paste);
                                     this.debug
                                         .set_note(Some("large paste confirmed".to_string()));
                                 } else {
@@ -772,7 +749,7 @@ impl AgentTerminal {
                 }
 
                 self.insert_input_text_at_cursor(&text);
-                self.write_text_input(&text);
+                self.write_paste_input(&text);
             }
             cx.stop_propagation();
             cx.notify();
@@ -780,6 +757,7 @@ impl AgentTerminal {
         }
 
         if should_defer_to_text_input(&event.keystroke) {
+            self.mark_local_key_activity();
             self.trace_input("keydown deferred to text input handler");
             self.log_input_event(
                 "keydown_deferred_to_text_input",
@@ -861,6 +839,18 @@ impl AgentTerminal {
         if self.snapshot.alt_screen {
             return false;
         }
+        if self.ime_marked_text.is_some() {
+            self.trace_input("ax override skipped during ime composition");
+            self.log_input_event(
+                "ax_override_skipped",
+                json!({
+                    "reason": "ime_composing",
+                    "ax_line": self.input_log_text_value(&state.text),
+                    "ax_cursor_utf16": state.cursor_utf16,
+                }),
+            );
+            return false;
+        }
 
         let cursor_utf16 = state.cursor_utf16.min(state.text.encode_utf16().count());
         if self.input_line == state.text && self.input_cursor_utf16 == cursor_utf16 {
@@ -908,7 +898,7 @@ impl AgentTerminal {
 
         self.input_line = state.text;
         self.input_cursor_utf16 = cursor_utf16;
-        self.marked_text_range = None;
+        self.ime_marked_text = None;
         self.rewrite_terminal_input_line();
         self.log_input_event(
             "ax_override_applied",
@@ -982,6 +972,9 @@ impl AgentTerminal {
     }
 
     pub(crate) fn allow_ax_override(&self) -> bool {
+        if self.ime_marked_text.is_some() {
+            return false;
+        }
         match self.last_local_key_event_at {
             Some(last_event) => last_event.elapsed() >= AX_OVERRIDE_GUARD_WINDOW,
             None => true,
@@ -1358,7 +1351,26 @@ impl EntityInputHandler for AgentTerminal {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        Some(self.current_input_line_text_for_range(range, adjusted_range))
+        if let Some(marked_text) = self.ime_marked_text.as_ref() {
+            let len = marked_text.encode_utf16().count();
+            if len == 0 {
+                *adjusted_range = Some(0..0);
+                return Some(String::new());
+            }
+
+            let start = range.start.min(len);
+            let end = range.end.min(len);
+            if start >= end {
+                *adjusted_range = Some(0..len);
+                return Some(marked_text.clone());
+            }
+
+            *adjusted_range = Some(start..end);
+            return Some(utf16_substring(marked_text, start..end).unwrap_or_default());
+        }
+
+        *adjusted_range = None;
+        None
     }
 
     fn selected_text_range(
@@ -1370,9 +1382,8 @@ impl EntityInputHandler for AgentTerminal {
         if self.snapshot.alt_screen {
             None
         } else {
-            self.clamp_input_cursor();
             Some(UTF16Selection {
-                range: self.input_cursor_utf16..self.input_cursor_utf16,
+                range: 0..0,
                 reversed: false,
             })
         }
@@ -1383,11 +1394,13 @@ impl EntityInputHandler for AgentTerminal {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        self.marked_text_range.clone()
+        self.ime_marked_text
+            .as_ref()
+            .map(|text| 0..text.encode_utf16().count())
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.marked_text_range = None;
+        self.ime_marked_text = None;
         self.trace_input("ime unmark_text");
         cx.notify();
     }
@@ -1399,7 +1412,7 @@ impl EntityInputHandler for AgentTerminal {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.marked_text_range = None;
+        self.ime_marked_text = None;
         self.trace_input(format!(
             "ime replace_text_in_range len={} text={}",
             text.len(),
@@ -1415,13 +1428,11 @@ impl EntityInputHandler for AgentTerminal {
             }),
         );
 
-        if let Some(range) = range {
-            self.replace_input_range_utf16(range, text);
-            self.rewrite_terminal_input_line();
-        } else {
-            self.insert_input_text_at_cursor(text);
-            self.write_text_input(text);
-        }
+        // IME composition always commits at cursor; range-based replacement is not
+        // supported because our input model writes directly to the PTY shell.
+        let _ = range;
+        self.insert_input_text_at_cursor(text);
+        self.write_text_input(text);
         self.log_input_event(
             "ime_replace_text_in_range_applied",
             json!({
@@ -1436,31 +1447,36 @@ impl EntityInputHandler for AgentTerminal {
         &mut self,
         _range: Option<Range<usize>>,
         new_text: &str,
-        new_selected_range: Option<Range<usize>>,
+        _new_selected_range: Option<Range<usize>>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.trace_input(format!(
-            "ime replace_and_mark_text len={} marked={:?}",
-            new_text.len(),
-            new_selected_range
+            "ime replace_and_mark_text len={}",
+            new_text.len()
         ));
-        self.marked_text_range = if new_text.is_empty() {
+        self.ime_marked_text = if new_text.is_empty() {
             None
         } else {
-            Some(new_selected_range.unwrap_or(0..new_text.encode_utf16().count()))
+            Some(new_text.to_string())
         };
         cx.notify();
     }
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
+        range_utf16: Range<usize>,
         element_bounds: Bounds<Pixels>,
         window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        Some(self.ime_cursor_bounds(element_bounds, window))
+        let mut bounds = self.ime_cursor_bounds(element_bounds, window);
+        if self.ime_marked_text.is_some() {
+            // bounds.size.width is cell_width (from ime_cursor_bounds), reuse it.
+            let cell_width = bounds.size.width.max(px(1.0));
+            bounds.origin.x += cell_width * range_utf16.start as f32;
+        }
+        Some(bounds)
     }
 
     fn character_index_for_point(

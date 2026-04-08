@@ -25,12 +25,6 @@ pub(crate) fn utf16_substring(text: &str, range: Range<usize>) -> Option<String>
     text.get(start..end).map(ToString::to_string)
 }
 
-pub(crate) fn replace_range_utf16(text: &mut String, range: Range<usize>, replacement: &str) {
-    let start = utf16_to_byte_index(text, range.start);
-    let end = utf16_to_byte_index(text, range.end);
-    text.replace_range(start..end, replacement);
-}
-
 pub(crate) fn should_accept_ax_override(
     ax_text: &str,
     ax_cursor_utf16: usize,

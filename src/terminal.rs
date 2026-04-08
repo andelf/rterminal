@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::ops::Range;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -186,7 +185,7 @@ pub(crate) struct AgentTerminal {
     pub(crate) child: Option<Arc<Mutex<Box<dyn Child + Send>>>>,
     pub(crate) input_line: String,
     pub(crate) input_cursor_utf16: usize,
-    pub(crate) marked_text_range: Option<Range<usize>>,
+    pub(crate) ime_marked_text: Option<String>,
     pub(crate) last_ax_published_line: String,
     pub(crate) last_ax_published_cursor_utf16: usize,
     pub(crate) input_trace: bool,
@@ -348,7 +347,7 @@ impl AgentTerminal {
             child,
             input_line: String::new(),
             input_cursor_utf16: 0,
-            marked_text_range: None,
+            ime_marked_text: None,
             last_ax_published_line: String::new(),
             last_ax_published_cursor_utf16: 0,
             input_trace: is_input_trace_enabled(),

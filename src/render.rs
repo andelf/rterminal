@@ -126,6 +126,7 @@ impl Render for AgentTerminal {
         }
 
         let snapshot = self.snapshot.clone();
+        let ime_marked_text = self.ime_marked_text.clone();
         let cursor_shape = self.cursor_shape;
         let (cursor_visual_row, cursor_visual_col, cursor_sliding) = self.cursor_visual_state();
         let cursor_trail_enabled = self.cursor_trail_enabled;
@@ -262,7 +263,51 @@ impl Render for AgentTerminal {
                             }
                         }
 
-                        if focused && snapshot.cursor_visible {
+                        if focused
+                            && let Some(text_to_mark) = ime_marked_text.as_ref()
+                            && !text_to_mark.is_empty()
+                        {
+                            let marked_row = snapshot.cursor_row;
+                            let marked_col = snapshot.cursor_col;
+                            let marked_extra_cols = snapshot
+                                .cells
+                                .get(marked_row)
+                                .map(|row| visual_extra_cols_before(row, marked_col))
+                                .unwrap_or(0.0);
+                            let marked_origin = point(
+                                origin.x + (marked_col as f32 + marked_extra_cols) * cell_width,
+                                origin.y + marked_row as f32 * line_height,
+                            );
+                            let ime_run = gpui::TextRun {
+                                len: text_to_mark.len(),
+                                underline: Some(gpui::UnderlineStyle {
+                                    color: Some(run_template.color),
+                                    thickness: px(1.0),
+                                    wavy: false,
+                                }),
+                                ..run_template.clone()
+                            };
+                            let shaped = window.text_system().shape_line(
+                                text_to_mark.clone().into(),
+                                font_pixels,
+                                &[ime_run],
+                                None,
+                            );
+                            window.paint_quad(fill(
+                                Bounds::new(marked_origin, size(shaped.width, line_height)),
+                                palette.terminal_bg,
+                            ));
+                            let _ = shaped.paint(
+                                marked_origin,
+                                line_height,
+                                gpui::TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        }
+
+                        if focused && snapshot.cursor_visible && ime_marked_text.is_none() {
                             let cursor_logical_col_floor = cursor_visual_col.max(0.0).floor() as usize;
                             let cursor_extra_cols = snapshot
                                 .cells
