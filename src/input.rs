@@ -199,13 +199,20 @@ impl AgentTerminal {
         if text.is_empty() {
             return;
         }
+        // Convert line endings to \r before writing to PTY. Terminal input uses
+        // \r for Enter; without this, \n bytes pass through raw-mode PTYs
+        // unchanged, breaking multi-line paste in programs like tmux and vi.
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
         if bracketed {
+            // Strip ESC bytes so pasted content cannot inject escape sequences
+            // that would break out of the bracketed paste or confuse the shell.
+            let sanitized = text.replace('\x1b', "");
             self.write_bytes(b"\x1b[200~");
-        }
-        self.write_text_input(text);
-        if bracketed {
+            self.write_text_input(&sanitized);
             self.write_bytes(b"\x1b[201~");
+        } else {
+            self.write_text_input(&text);
         }
     }
 
