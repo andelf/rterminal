@@ -65,6 +65,7 @@ fn main() {
     application().run(move |cx: &mut App| {
         cx.on_action(|_: &QuitApp, cx: &mut App| cx.quit());
         cx.bind_keys([
+            KeyBinding::new("cmd-q", QuitApp, None),
             KeyBinding::new("cmd-t", NewTab, None),
             KeyBinding::new("cmd-shift-s", CaptureSnapshotTab, None),
             KeyBinding::new("cmd-w", CloseTab, None),
