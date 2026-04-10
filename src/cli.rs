@@ -40,6 +40,11 @@ pub(crate) struct CliOptions {
     pub(crate) force_vertical_cursor: bool,
     #[arg(long, help = "Enable subtle trailing effect for vertical beam cursor")]
     pub(crate) cursor_trail: bool,
+    #[arg(
+        long,
+        help = "Treat macOS Option key as plain text input instead of Meta/Alt"
+    )]
+    pub(crate) no_option_as_meta: bool,
 }
 
 #[cfg(test)]

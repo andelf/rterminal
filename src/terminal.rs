@@ -166,6 +166,7 @@ pub(crate) struct AgentTerminal {
     pub(crate) force_vertical_cursor: bool,
     pub(crate) cursor_slide_enabled: bool,
     pub(crate) cursor_trail_enabled: bool,
+    pub(crate) option_as_meta: bool,
     pub(crate) cursor_visual_initialized: bool,
     pub(crate) cursor_visual_row: usize,
     pub(crate) cursor_anim_from_col: f32,
@@ -208,6 +209,8 @@ pub(crate) struct AgentTerminal {
     pub(crate) shell_exited: bool,
     pub(crate) debug: SharedDebugState,
     pub(crate) _window_bounds_sub: Option<Subscription>,
+    pub(crate) _focus_in_sub: Option<Subscription>,
+    pub(crate) _focus_out_sub: Option<Subscription>,
     pub(crate) _pump_task: Task<Result<()>>,
 }
 
@@ -328,6 +331,7 @@ impl AgentTerminal {
             force_vertical_cursor: cli.force_vertical_cursor,
             cursor_slide_enabled: !cli.no_cursor_slide,
             cursor_trail_enabled: cli.cursor_trail,
+            option_as_meta: !cli.no_option_as_meta,
             cursor_visual_initialized: false,
             cursor_visual_row: 0,
             cursor_anim_from_col: 0.0,
@@ -370,6 +374,8 @@ impl AgentTerminal {
             shell_exited: false,
             debug,
             _window_bounds_sub: None,
+            _focus_in_sub: None,
+            _focus_out_sub: None,
             _pump_task: Task::ready(Ok(())),
         };
 
@@ -377,6 +383,16 @@ impl AgentTerminal {
         this._window_bounds_sub = Some(cx.observe_window_bounds(window, |this, window, cx| {
             this.sync_grid_to_window(window);
             cx.notify();
+        }));
+        this._focus_in_sub = Some(cx.on_focus(&this.focus_handle, window, |this, _window, _cx| {
+            if this.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                this.write_bytes(b"\x1b[I");
+            }
+        }));
+        this._focus_out_sub = Some(cx.on_focus_out(&this.focus_handle, window, |this, _event, _window, _cx| {
+            if this.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                this.write_bytes(b"\x1b[O");
+            }
         }));
         this.sync_grid_to_window(window);
 

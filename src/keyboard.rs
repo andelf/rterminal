@@ -163,7 +163,10 @@ fn encode_printable_keystroke(keystroke: &gpui::Keystroke) -> Option<Vec<u8>> {
     None
 }
 
-pub(crate) fn should_defer_to_text_input(keystroke: &gpui::Keystroke) -> bool {
+pub(crate) fn should_defer_to_text_input(
+    keystroke: &gpui::Keystroke,
+    option_as_meta: bool,
+) -> bool {
     // On macOS, route printable text keys through NSTextInputClient callbacks
     // (insertText / setMarkedText) to preserve IME and accessibility behavior.
     if !cfg!(target_os = "macos") {
@@ -171,7 +174,13 @@ pub(crate) fn should_defer_to_text_input(keystroke: &gpui::Keystroke) -> bool {
     }
 
     let modifiers = keystroke.modifiers;
-    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+    if modifiers.control || modifiers.platform || modifiers.function {
+        return false;
+    }
+    // When option_as_meta is true, Alt+key is handled by encode_keystroke as
+    // ESC+key.  When false, let macOS text input produce native characters
+    // (e.g. Option+D → ∂).
+    if modifiers.alt && option_as_meta {
         return false;
     }
 

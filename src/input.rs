@@ -763,7 +763,7 @@ impl AgentTerminal {
             return;
         }
 
-        if should_defer_to_text_input(&event.keystroke) {
+        if should_defer_to_text_input(&event.keystroke, self.option_as_meta) {
             self.mark_local_key_activity();
             self.trace_input("keydown deferred to text input handler");
             self.log_input_event(
