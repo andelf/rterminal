@@ -10,7 +10,8 @@ use crate::{AgentTerminal, AgentTerminalInputHandler};
 
 pub(crate) const LINE_HEIGHT_SCALE: f32 = 18.0 / 14.0;
 pub(crate) const TEXT_PADDING_X: Pixels = px(12.0);
-pub(crate) const TEXT_PADDING_Y: Pixels = px(12.0);
+pub(crate) const TEXT_PADDING_Y: Pixels = px(0.0);
+const MIN_TEXT_PADDING_Y: Pixels = px(0.0);
 pub(crate) const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
 pub(crate) const STATUS_BAR_ESTIMATED_HEIGHT: Pixels = px(42.0);
 const CURSOR_TRAIL_MIN_LEN_CELLS: f32 = 0.34;
@@ -203,7 +204,13 @@ impl Render for AgentTerminal {
                             .map(|advance| advance.width)
                             .unwrap_or(px(8.0));
 
-                        let origin = bounds.origin + point(TEXT_PADDING_X, TEXT_PADDING_Y);
+                        // Dynamically center terminal content vertically:
+                        // distribute the fractional row remainder evenly to top and bottom.
+                        let grid_painted_height = line_height * snapshot.cells.len() as f32;
+                        let vertical_slack = (bounds.size.height - grid_painted_height)
+                            .max(MIN_TEXT_PADDING_Y * 2.0);
+                        let dynamic_padding_y = (vertical_slack / 2.0).max(MIN_TEXT_PADDING_Y);
+                        let origin = bounds.origin + point(TEXT_PADDING_X, dynamic_padding_y);
                         for (row_index, row) in snapshot.cells.iter().enumerate() {
                             let y = origin.y + row_index as f32 * line_height;
                             let mut covered_until_col = 0usize;
