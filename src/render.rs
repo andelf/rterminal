@@ -10,8 +10,8 @@ use crate::{AgentTerminal, AgentTerminalInputHandler};
 
 pub(crate) const LINE_HEIGHT_SCALE: f32 = 18.0 / 14.0;
 pub(crate) const TEXT_PADDING_X: Pixels = px(12.0);
-pub(crate) const TEXT_PADDING_Y: Pixels = px(0.0);
-const MIN_TEXT_PADDING_Y: Pixels = px(0.0);
+pub(crate) const TEXT_PADDING_Y: Pixels = px(1.0);
+const MIN_TEXT_PADDING_Y: Pixels = px(1.0);
 pub(crate) const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
 pub(crate) const STATUS_BAR_ESTIMATED_HEIGHT: Pixels = px(42.0);
 const CURSOR_TRAIL_MIN_LEN_CELLS: f32 = 0.34;
