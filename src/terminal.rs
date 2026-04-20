@@ -257,7 +257,6 @@ impl AgentTerminal {
             viewport,
             cell_width,
             line_height_for(font_size),
-            options.show_title_bar,
             cli.show_status_bar,
         );
 
@@ -558,7 +557,6 @@ impl AgentTerminal {
             viewport,
             cell_width,
             self.line_height(),
-            self.show_title_bar,
             self.show_status_bar,
         );
         self.apply_grid_size(new_grid);
@@ -972,22 +970,16 @@ pub(crate) fn compute_grid_size(
     viewport: gpui::Size<Pixels>,
     cell_width: Pixels,
     line_height: Pixels,
-    show_title_bar: bool,
     show_status_bar: bool,
 ) -> GridSize {
     let mut usable_width = viewport.width - (TEXT_PADDING_X * 2.0);
-    let title_height = if show_title_bar {
-        CUSTOM_TITLE_BAR_HEIGHT
-    } else {
-        px(0.0)
-    };
     let status_height = if show_status_bar {
         STATUS_BAR_HEIGHT
     } else {
         px(0.0)
     };
     let mut usable_height =
-        viewport.height - title_height - status_height - (TEXT_PADDING_Y * 2.0);
+        viewport.height - CUSTOM_TITLE_BAR_HEIGHT - status_height - (TEXT_PADDING_Y * 2.0);
 
     if usable_width < cell_width {
         usable_width = cell_width;
@@ -1113,7 +1105,6 @@ pub(crate) fn run_self_check() -> Result<()> {
         gpui::size(gpui::px(1000.0), gpui::px(520.0)),
         gpui::px(8.0),
         line_height_for(DEFAULT_FONT_SIZE),
-        true,
         false,
     );
     ensure!(
