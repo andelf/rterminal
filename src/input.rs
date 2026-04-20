@@ -17,7 +17,7 @@ use crate::keyboard::{
 use crate::macos_ax::NativeAxInputState;
 use crate::render::{
     CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_ESTIMATED_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
-    measure_cell_width,
+    measure_cell_width, terminal_content_padding_y,
 };
 use crate::terminal::{CellSnapshot, ScreenSnapshot, SelectionPoint};
 use crate::text_utils::{
@@ -620,14 +620,28 @@ impl AgentTerminal {
         position: gpui::Point<Pixels>,
         window: &mut Window,
     ) -> (usize, usize) {
+        let title_bar_height = if self.show_title_bar {
+            CUSTOM_TITLE_BAR_HEIGHT
+        } else {
+            px(0.0)
+        };
         let status_height = if self.show_status_bar {
             STATUS_BAR_ESTIMATED_HEIGHT
         } else {
             px(0.0)
         };
+        let surface_height = (window.viewport_size().height - title_bar_height - status_height)
+            .max(self.line_height().max(px(1.0)));
+        let line_height = self.line_height().max(px(1.0));
         let origin = point(
             TEXT_PADDING_X,
-            CUSTOM_TITLE_BAR_HEIGHT + status_height + TEXT_PADDING_Y,
+            title_bar_height
+                + status_height
+                + terminal_content_padding_y(
+                    surface_height,
+                    line_height,
+                    self.grid_size.rows as usize,
+                ),
         );
 
         let cell_width = measure_cell_width(
@@ -637,7 +651,6 @@ impl AgentTerminal {
             self.font_size,
         )
         .max(px(1.0));
-        let line_height = self.line_height().max(px(1.0));
 
         let raw_col = ((position.x - origin.x) / cell_width).floor() as i32;
         let raw_row = ((position.y - origin.y) / line_height).floor() as i32;
@@ -1502,6 +1515,9 @@ impl EntityInputHandler for AgentTerminal {
 
 #[cfg(test)]
 mod tests {
+    use gpui::px;
+
+    use crate::render::terminal_content_padding_y;
     use crate::terminal::CellSnapshot;
 
     use super::{
@@ -1593,6 +1609,12 @@ mod tests {
         );
 
         assert_eq!(text, "你好X");
+    }
+
+    #[test]
+    fn terminal_padding_matches_single_row_floor() {
+        let padding = terminal_content_padding_y(px(100.0), px(18.0), 1);
+        assert_eq!(padding, px(41.0));
     }
 
     #[test]

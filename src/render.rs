@@ -71,6 +71,16 @@ pub(crate) fn line_height_for(font_size: Pixels) -> Pixels {
     (font_size * LINE_HEIGHT_SCALE).max(font_size + px(2.0))
 }
 
+pub(crate) fn terminal_content_padding_y(
+    surface_height: Pixels,
+    line_height: Pixels,
+    rows: usize,
+) -> Pixels {
+    let grid_painted_height = line_height * rows as f32;
+    let vertical_slack = (surface_height - grid_painted_height).max(MIN_TEXT_PADDING_Y * 2.0);
+    (vertical_slack / 2.0).max(MIN_TEXT_PADDING_Y)
+}
+
 #[derive(Clone, Copy)]
 struct RenderPalette {
     app_bg: Hsla,
@@ -206,10 +216,11 @@ impl Render for AgentTerminal {
 
                         // Dynamically center terminal content vertically:
                         // distribute the fractional row remainder evenly to top and bottom.
-                        let grid_painted_height = line_height * snapshot.cells.len() as f32;
-                        let vertical_slack = (bounds.size.height - grid_painted_height)
-                            .max(MIN_TEXT_PADDING_Y * 2.0);
-                        let dynamic_padding_y = (vertical_slack / 2.0).max(MIN_TEXT_PADDING_Y);
+                        let dynamic_padding_y = terminal_content_padding_y(
+                            bounds.size.height,
+                            line_height,
+                            snapshot.cells.len(),
+                        );
                         let origin = bounds.origin + point(TEXT_PADDING_X, dynamic_padding_y);
                         for (row_index, row) in snapshot.cells.iter().enumerate() {
                             let y = origin.y + row_index as f32 * line_height;
