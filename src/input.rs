@@ -16,7 +16,7 @@ use crate::keyboard::{
 };
 use crate::macos_ax::NativeAxInputState;
 use crate::render::{
-    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_ESTIMATED_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
+    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X,
     measure_cell_width, terminal_content_padding_y,
 };
 use crate::terminal::{CellSnapshot, ScreenSnapshot, SelectionPoint};
@@ -371,10 +371,15 @@ impl AgentTerminal {
             self.font_size,
         );
         let line_height = self.line_height();
+        let dynamic_padding_y = terminal_content_padding_y(
+            element_bounds.size.height,
+            line_height,
+            self.grid_size.rows as usize,
+        );
         let cursor_origin = point(
             element_bounds.origin.x + TEXT_PADDING_X + self.snapshot.cursor_col as f32 * cell_width,
             element_bounds.origin.y
-                + TEXT_PADDING_Y
+                + dynamic_padding_y
                 + self.snapshot.cursor_row as f32 * line_height,
         );
         Bounds::new(cursor_origin, size(cell_width.max(px(2.0)), line_height))
@@ -620,30 +625,7 @@ impl AgentTerminal {
         position: gpui::Point<Pixels>,
         window: &mut Window,
     ) -> (usize, usize) {
-        let title_bar_height = if self.show_title_bar {
-            CUSTOM_TITLE_BAR_HEIGHT
-        } else {
-            px(0.0)
-        };
-        let status_height = if self.show_status_bar {
-            STATUS_BAR_ESTIMATED_HEIGHT
-        } else {
-            px(0.0)
-        };
-        let surface_height = (window.viewport_size().height - title_bar_height - status_height)
-            .max(self.line_height().max(px(1.0)));
         let line_height = self.line_height().max(px(1.0));
-        let origin = point(
-            TEXT_PADDING_X,
-            title_bar_height
-                + status_height
-                + terminal_content_padding_y(
-                    surface_height,
-                    line_height,
-                    self.grid_size.rows as usize,
-                ),
-        );
-
         let cell_width = measure_cell_width(
             window,
             &self.font_family,
@@ -651,6 +633,43 @@ impl AgentTerminal {
             self.font_size,
         )
         .max(px(1.0));
+
+        let origin = if let Some(bounds) = *self.canvas_bounds.lock() {
+            let dynamic_padding_y = terminal_content_padding_y(
+                bounds.size.height,
+                line_height,
+                self.grid_size.rows as usize,
+            );
+            point(
+                bounds.origin.x + TEXT_PADDING_X,
+                bounds.origin.y + dynamic_padding_y,
+            )
+        } else {
+            let title_bar_height = if self.show_title_bar {
+                CUSTOM_TITLE_BAR_HEIGHT
+            } else {
+                px(0.0)
+            };
+            let status_height = if self.show_status_bar {
+                STATUS_BAR_HEIGHT
+            } else {
+                px(0.0)
+            };
+            let surface_height = (window.viewport_size().height
+                - title_bar_height
+                - status_height)
+                .max(line_height);
+            point(
+                TEXT_PADDING_X,
+                title_bar_height
+                    + status_height
+                    + terminal_content_padding_y(
+                        surface_height,
+                        line_height,
+                        self.grid_size.rows as usize,
+                    ),
+            )
+        };
 
         let raw_col = ((position.x - origin.x) / cell_width).floor() as i32;
         let raw_row = ((position.y - origin.y) / line_height).floor() as i32;

@@ -13,7 +13,7 @@ pub(crate) const TEXT_PADDING_X: Pixels = px(12.0);
 pub(crate) const TEXT_PADDING_Y: Pixels = px(1.0);
 const MIN_TEXT_PADDING_Y: Pixels = px(1.0);
 pub(crate) const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
-pub(crate) const STATUS_BAR_ESTIMATED_HEIGHT: Pixels = px(42.0);
+pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(42.0);
 const CURSOR_TRAIL_MIN_LEN_CELLS: f32 = 0.34;
 const CURSOR_TRAIL_MAX_LEN_CELLS: f32 = 1.35;
 const CURSOR_TRAIL_PRIMARY_ALPHA_SCALE: f32 = 0.62;
@@ -167,6 +167,7 @@ impl Render for AgentTerminal {
             .unwrap_or_else(|| shell.clone());
         let canvas_font_family = font_family.clone();
         let canvas_font_fallbacks = font_fallbacks.clone();
+        let canvas_bounds_shared = self.canvas_bounds.clone();
 
         let status_line = if let Some(note) = note {
             format!("agent terminal | {} | {} | note: {}", shell, status, note)
@@ -188,6 +189,7 @@ impl Render for AgentTerminal {
                 canvas(
                     move |_, _, _| {},
                     move |bounds, _, window, cx| {
+                        *canvas_bounds_shared.lock() = Some(bounds);
                         window.handle_input(
                             &focus_handle,
                             AgentTerminalInputHandler::new(bounds, entity.clone()),
@@ -483,8 +485,10 @@ impl Render for AgentTerminal {
             root.child(
                 div()
                     .w_full()
+                    .h(STATUS_BAR_HEIGHT)
                     .px_3()
-                    .py_2()
+                    .flex()
+                    .items_center()
                     .bg(palette.title_bg)
                     .text_color(palette.title_fg)
                     .font_family(font_family.clone())

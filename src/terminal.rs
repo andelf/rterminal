@@ -13,7 +13,7 @@ use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, StdSyncHandler,
 };
 use anyhow::{Context as _, Result, ensure};
-use gpui::{Context, EventEmitter, FocusHandle, FontFallbacks, Pixels, Subscription, Task, Window, px};
+use gpui::{Bounds, Context, EventEmitter, FocusHandle, FontFallbacks, Pixels, Subscription, Task, Window, px};
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
@@ -27,7 +27,7 @@ use crate::input_log::InputLogger;
 use crate::keyboard::encode_keystroke;
 use crate::pty::{PtySession, write_to_pty};
 use crate::render::{
-    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_ESTIMATED_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
+    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
     line_height_for, measure_cell_width,
 };
 use crate::snapshot_tab::SnapshotTabData;
@@ -205,6 +205,7 @@ pub(crate) struct AgentTerminal {
     pub(crate) selection_button: Option<gpui::MouseButton>,
     pub(crate) selection_anchor: Option<SelectionPoint>,
     pub(crate) selection_focus: Option<SelectionPoint>,
+    pub(crate) canvas_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     pub(crate) paste_guard_prompt_open: bool,
     pub(crate) shell_exited: bool,
     pub(crate) debug: SharedDebugState,
@@ -256,6 +257,7 @@ impl AgentTerminal {
             viewport,
             cell_width,
             line_height_for(font_size),
+            options.show_title_bar,
             cli.show_status_bar,
         );
 
@@ -370,6 +372,7 @@ impl AgentTerminal {
             selection_button: None,
             selection_anchor: None,
             selection_focus: None,
+            canvas_bounds: Arc::new(Mutex::new(None)),
             paste_guard_prompt_open: false,
             shell_exited: false,
             debug,
@@ -555,6 +558,7 @@ impl AgentTerminal {
             viewport,
             cell_width,
             self.line_height(),
+            self.show_title_bar,
             self.show_status_bar,
         );
         self.apply_grid_size(new_grid);
@@ -968,16 +972,22 @@ pub(crate) fn compute_grid_size(
     viewport: gpui::Size<Pixels>,
     cell_width: Pixels,
     line_height: Pixels,
+    show_title_bar: bool,
     show_status_bar: bool,
 ) -> GridSize {
     let mut usable_width = viewport.width - (TEXT_PADDING_X * 2.0);
+    let title_height = if show_title_bar {
+        CUSTOM_TITLE_BAR_HEIGHT
+    } else {
+        px(0.0)
+    };
     let status_height = if show_status_bar {
-        STATUS_BAR_ESTIMATED_HEIGHT
+        STATUS_BAR_HEIGHT
     } else {
         px(0.0)
     };
     let mut usable_height =
-        viewport.height - CUSTOM_TITLE_BAR_HEIGHT - status_height - (TEXT_PADDING_Y * 2.0);
+        viewport.height - title_height - status_height - (TEXT_PADDING_Y * 2.0);
 
     if usable_width < cell_width {
         usable_width = cell_width;
@@ -1103,6 +1113,7 @@ pub(crate) fn run_self_check() -> Result<()> {
         gpui::size(gpui::px(1000.0), gpui::px(520.0)),
         gpui::px(8.0),
         line_height_for(DEFAULT_FONT_SIZE),
+        true,
         false,
     );
     ensure!(
