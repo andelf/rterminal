@@ -645,6 +645,7 @@ impl AgentTerminal {
                 bounds.origin.y + dynamic_padding_y,
             )
         } else {
+            // Pre-first-paint safety net: estimate origin from constants.
             let title_bar_height = if self.show_title_bar {
                 CUSTOM_TITLE_BAR_HEIGHT
             } else {
