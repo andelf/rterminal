@@ -169,9 +169,8 @@ impl SnapshotTab {
             .iter()
             .map(|row| {
                 let mut line = row_text_without_wide_spacers(row);
-                while line.ends_with(' ') {
-                    line.pop();
-                }
+                let trimmed_len = line.trim_end().len();
+                line.truncate(trimmed_len);
                 line
             })
             .collect::<Vec<_>>()
@@ -517,9 +516,8 @@ fn extract_selection_text(
             text.push(cell.ch);
             col = col.saturating_add(cell_advance_cols(cell));
         }
-        while text.ends_with(' ') {
-            text.pop();
-        }
+        let trimmed_len = text.trim_end().len();
+        text.truncate(trimmed_len);
         out.push(text);
     }
     out.join("\n")

@@ -1315,9 +1315,8 @@ fn extract_selection_text(
             let step = cell_advance_cols(cell);
             col = col.saturating_add(step);
         }
-        while text.ends_with(' ') {
-            text.pop();
-        }
+        let trimmed_len = text.trim_end().len();
+        text.truncate(trimmed_len);
         lines.push(text);
     }
 
