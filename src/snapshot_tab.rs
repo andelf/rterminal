@@ -13,6 +13,7 @@ use crate::terminal::{CellSnapshot, SelectionPoint};
 pub(crate) struct SnapshotTabData {
     pub(crate) title: String,
     pub(crate) lines: Vec<Vec<CellSnapshot>>,
+    pub(crate) soft_wrapped_rows: Vec<bool>,
     pub(crate) cols: usize,
     pub(crate) font_family: String,
     pub(crate) font_fallbacks: Option<FontFallbacks>,
@@ -46,6 +47,7 @@ pub(crate) struct SnapshotTab {
     pub(crate) focus_handle: FocusHandle,
     title: String,
     lines: Vec<Vec<CellSnapshot>>,
+    soft_wrapped_rows: Vec<bool>,
     cols: usize,
     top_line: usize,
     font_family: String,
@@ -65,6 +67,7 @@ impl SnapshotTab {
             focus_handle,
             title: data.title,
             lines: data.lines,
+            soft_wrapped_rows: data.soft_wrapped_rows,
             cols: data.cols.max(1),
             top_line: max_top,
             font_family: data.font_family,
@@ -114,7 +117,11 @@ impl SnapshotTab {
         }
     }
 
-    fn mouse_grid_point(&self, position: gpui::Point<Pixels>, window: &mut Window) -> SelectionPoint {
+    fn mouse_grid_point(
+        &self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+    ) -> SelectionPoint {
         let cell_width = measure_cell_width(
             window,
             &self.font_family,
@@ -124,11 +131,10 @@ impl SnapshotTab {
         .max(px(1.0));
         let line_height = self.line_height().max(px(1.0));
         let origin = point(TEXT_PADDING_X, TEXT_PADDING_Y);
-        let raw_col =
-            (f32::from(position.x - origin.x) / f32::from(cell_width)).floor() as i32;
-        let raw_row =
-            (f32::from(position.y - origin.y) / f32::from(line_height)).floor() as i32;
-        let max_row = (self.visible_rows_for_height(window.viewport_size().height) as i32).max(1) - 1;
+        let raw_col = (f32::from(position.x - origin.x) / f32::from(cell_width)).floor() as i32;
+        let raw_row = (f32::from(position.y - origin.y) / f32::from(line_height)).floor() as i32;
+        let max_row =
+            (self.visible_rows_for_height(window.viewport_size().height) as i32).max(1) - 1;
         let visible_row = raw_row.clamp(0, max_row) as usize;
         let max_col = (self.cols as i32).max(1) - 1;
         let col = raw_col.clamp(0, max_col) as usize;
@@ -147,12 +153,8 @@ impl SnapshotTab {
 
     fn selection_text(&self) -> Option<String> {
         let (start, end) = self.selection_bounds()?;
-        let text = extract_selection_text(&self.lines, start, end);
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        let text = extract_selection_text(&self.lines, &self.soft_wrapped_rows, start, end);
+        if text.is_empty() { None } else { Some(text) }
     }
 
     fn copy_selection_to_clipboard(&self, cx: &mut Context<Self>) -> bool {
@@ -167,14 +169,15 @@ impl SnapshotTab {
         let text = self
             .lines
             .iter()
+            .enumerate()
             .map(|row| {
-                let mut line = row_text_without_wide_spacers(row);
+                let mut line = row_text_without_wide_spacers(row.1);
                 let trimmed_len = line.trim_end().len();
                 line.truncate(trimmed_len);
-                line
+                (row.0, line)
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
+        let text = join_selected_lines(text, &self.soft_wrapped_rows);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
@@ -351,7 +354,8 @@ impl Render for SnapshotTab {
 
                         let origin = bounds.origin + point(TEXT_PADDING_X, TEXT_PADDING_Y);
                         let visible_rows = {
-                            let usable = (bounds.size.height - (TEXT_PADDING_Y * 2.0)).max(line_height);
+                            let usable =
+                                (bounds.size.height - (TEXT_PADDING_Y * 2.0)).max(line_height);
                             ((usable / line_height).floor() as usize).max(1)
                         };
                         let max_top = snapshot_lines.len().saturating_sub(visible_rows);
@@ -370,13 +374,17 @@ impl Render for SnapshotTab {
                                     .cloned()
                                     .unwrap_or_default();
                                 let is_spacer_col = col_index < covered_until_col;
-                                let x = origin.x + (col_index as f32 + extra_visual_cols) * cell_width;
+                                let x =
+                                    origin.x + (col_index as f32 + extra_visual_cols) * cell_width;
                                 let cell_origin = point(x, y);
                                 let cell_width_px = cell_width * cell.width_cols as f32;
 
                                 if !is_spacer_col && let Some(bg) = cell.bg {
                                     window.paint_quad(fill(
-                                        gpui::Bounds::new(cell_origin, size(cell_width_px, line_height)),
+                                        gpui::Bounds::new(
+                                            cell_origin,
+                                            size(cell_width_px, line_height),
+                                        ),
                                         bg,
                                     ));
                                 }
@@ -386,7 +394,10 @@ impl Render for SnapshotTab {
                                     })
                                 {
                                     window.paint_quad(fill(
-                                        gpui::Bounds::new(cell_origin, size(cell_width_px, line_height)),
+                                        gpui::Bounds::new(
+                                            cell_origin,
+                                            size(cell_width_px, line_height),
+                                        ),
                                         palette.selection_bg,
                                     ));
                                 }
@@ -414,7 +425,8 @@ impl Render for SnapshotTab {
                                 }
 
                                 if !is_spacer_col {
-                                    covered_until_col = col_index.saturating_add(cell_advance_cols(&cell));
+                                    covered_until_col =
+                                        col_index.saturating_add(cell_advance_cols(&cell));
                                     if cell.expands_layout && cell.width_cols > 1 {
                                         extra_visual_cols += f32::from(cell.width_cols - 1);
                                     }
@@ -478,6 +490,7 @@ fn normalize_selection_col(cells: &[CellSnapshot], col: usize) -> usize {
 
 fn extract_selection_text(
     lines: &[Vec<CellSnapshot>],
+    soft_wrapped_rows: &[bool],
     start: SelectionPoint,
     end: SelectionPoint,
 ) -> String {
@@ -487,7 +500,7 @@ fn extract_selection_text(
             break;
         };
         if cells.is_empty() {
-            out.push(String::new());
+            out.push((row, String::new()));
             continue;
         }
         let line_start = if row == start.row {
@@ -501,12 +514,12 @@ fn extract_selection_text(
             cells.len().saturating_sub(1)
         };
         if line_start >= cells.len() {
-            out.push(String::new());
+            out.push((row, String::new()));
             continue;
         }
         let clamped_end = line_end.min(cells.len().saturating_sub(1));
         if line_start > clamped_end {
-            out.push(String::new());
+            out.push((row, String::new()));
             continue;
         }
         let mut text = String::new();
@@ -518,9 +531,20 @@ fn extract_selection_text(
         }
         let trimmed_len = text.trim_end().len();
         text.truncate(trimmed_len);
-        out.push(text);
+        out.push((row, text));
     }
-    out.join("\n")
+    join_selected_lines(out, soft_wrapped_rows)
+}
+
+fn join_selected_lines(lines: Vec<(usize, String)>, soft_wrapped_rows: &[bool]) -> String {
+    let mut text = String::new();
+    for (index, (row, line)) in lines.iter().enumerate() {
+        text.push_str(line);
+        if index + 1 < lines.len() && !soft_wrapped_rows.get(*row).copied().unwrap_or(false) {
+            text.push('\n');
+        }
+    }
+    text
 }
 
 fn row_text_without_wide_spacers(cells: &[CellSnapshot]) -> String {

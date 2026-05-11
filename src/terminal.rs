@@ -1,5 +1,5 @@
-use std::io::Write;
 use std::collections::HashSet;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,10 @@ use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, StdSyncHandler,
 };
 use anyhow::{Context as _, Result, ensure};
-use gpui::{Bounds, Context, EventEmitter, FocusHandle, FontFallbacks, Pixels, Subscription, Task, Window, px};
+use gpui::{
+    Bounds, Context, EventEmitter, FocusHandle, FontFallbacks, Pixels, Subscription, Task, Window,
+    px,
+};
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
@@ -23,12 +26,13 @@ use crate::cli::{AmbiguousWidth, CliOptions, Theme};
 use crate::color::indexed_to_rgb;
 use crate::color::{ansi_bg_to_hsla, ansi_to_hsla};
 use crate::debug_server::{SharedDebugState, start_debug_http_server};
+use crate::history_log::HistoryLogger;
 use crate::input_log::InputLogger;
 use crate::keyboard::encode_keystroke;
 use crate::pty::{PtySession, write_to_pty};
 use crate::render::{
-    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
-    line_height_for, measure_cell_width,
+    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y, line_height_for,
+    measure_cell_width,
 };
 use crate::snapshot_tab::SnapshotTabData;
 use crate::text_utils::summarize_text_for_trace;
@@ -136,6 +140,7 @@ impl Default for CellSnapshot {
 #[derive(Clone, Default)]
 pub(crate) struct ScreenSnapshot {
     pub(crate) cells: Vec<Vec<CellSnapshot>>,
+    pub(crate) soft_wrapped_rows: Vec<bool>,
     pub(crate) cursor_row: usize,
     pub(crate) cursor_col: usize,
     pub(crate) cursor_visible: bool,
@@ -191,6 +196,7 @@ pub(crate) struct AgentTerminal {
     pub(crate) last_ax_published_cursor_utf16: usize,
     pub(crate) input_trace: bool,
     pub(crate) input_logger: Option<InputLogger>,
+    pub(crate) history_logger: Option<HistoryLogger>,
     pub(crate) last_local_key_event_at: Option<Instant>,
     pub(crate) pty_sample_started_at: Instant,
     pub(crate) pty_sample_bytes: usize,
@@ -246,12 +252,8 @@ impl AgentTerminal {
         let font_size = DEFAULT_FONT_SIZE;
         let font_fallbacks = parse_font_fallbacks(&cli.font_fallbacks);
         let forced_double_width_chars = parse_double_width_chars(&cli.double_width_chars);
-        let cell_width = measure_cell_width(
-            window,
-            &cli.font_family,
-            font_fallbacks.as_ref(),
-            font_size,
-        );
+        let cell_width =
+            measure_cell_width(window, &cli.font_family, font_fallbacks.as_ref(), font_size);
         let viewport = window.viewport_size();
         let grid_size = compute_grid_size(
             viewport,
@@ -321,6 +323,22 @@ impl AgentTerminal {
             },
             None => None,
         };
+        let history_logger = match HistoryLogger::new(&cli.history_log_dir, &shell) {
+            Ok(logger) => {
+                debug.set_note(Some(format!(
+                    "history transcript: {}",
+                    logger.path().to_string_lossy()
+                )));
+                Some(logger)
+            }
+            Err(err) => {
+                debug.set_error(format!(
+                    "failed to open history log dir {}: {err}",
+                    cli.history_log_dir.to_string_lossy()
+                ));
+                None
+            }
+        };
 
         let mut this = Self {
             focus_handle,
@@ -357,6 +375,7 @@ impl AgentTerminal {
             last_ax_published_cursor_utf16: 0,
             input_trace: is_input_trace_enabled(),
             input_logger,
+            history_logger,
             last_local_key_event_at: None,
             pty_sample_started_at: Instant::now(),
             pty_sample_bytes: 0,
@@ -386,16 +405,21 @@ impl AgentTerminal {
             this.sync_grid_to_window(window);
             cx.notify();
         }));
-        this._focus_in_sub = Some(cx.on_focus(&this.focus_handle, window, |this, _window, _cx| {
-            if this.term.mode().contains(TermMode::FOCUS_IN_OUT) {
-                this.write_bytes(b"\x1b[I");
-            }
-        }));
-        this._focus_out_sub = Some(cx.on_focus_out(&this.focus_handle, window, |this, _event, _window, _cx| {
-            if this.term.mode().contains(TermMode::FOCUS_IN_OUT) {
-                this.write_bytes(b"\x1b[O");
-            }
-        }));
+        this._focus_in_sub = Some(
+            cx.on_focus(&this.focus_handle, window, |this, _window, _cx| {
+                if this.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                    this.write_bytes(b"\x1b[I");
+                }
+            }),
+        );
+        this._focus_out_sub =
+            Some(
+                cx.on_focus_out(&this.focus_handle, window, |this, _event, _window, _cx| {
+                    if this.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                        this.write_bytes(b"\x1b[O");
+                    }
+                }),
+            );
         this.sync_grid_to_window(window);
 
         if let Some(rx) = output_rx {
@@ -443,6 +467,9 @@ impl AgentTerminal {
 
         self.mark_enter_latency_first_pty();
         for chunk in chunks {
+            if let Some(logger) = &self.history_logger {
+                logger.record_pty_output(chunk);
+            }
             self.processor.advance(&mut self.term, chunk);
             self.debug.record_bytes_from_pty(chunk.len());
             self.record_pty_ingest_diagnostics(chunk.len());
@@ -474,6 +501,7 @@ impl AgentTerminal {
             ];
             rows
         ];
+        let mut soft_wrapped_rows = vec![false; rows];
 
         for indexed in content.display_iter {
             let row = indexed.point.line.0;
@@ -485,6 +513,10 @@ impl AgentTerminal {
             let row = row as usize;
             if row >= rows {
                 continue;
+            }
+
+            if indexed.cell.flags.contains(Flags::WRAPLINE) {
+                soft_wrapped_rows[row] = true;
             }
 
             if indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -503,9 +535,12 @@ impl AgentTerminal {
                 indexed.cell.c
             };
             let spans_next_col = indexed.cell.flags.contains(Flags::WIDE_CHAR);
-            let expands_layout =
-                !spans_next_col && self.forced_double_width_chars.contains(&ch);
-            let width_cols = if spans_next_col || expands_layout { 2 } else { 1 };
+            let expands_layout = !spans_next_col && self.forced_double_width_chars.contains(&ch);
+            let width_cols = if spans_next_col || expands_layout {
+                2
+            } else {
+                1
+            };
 
             cells[row][col] = CellSnapshot {
                 ch,
@@ -520,17 +555,18 @@ impl AgentTerminal {
         let cursor = content.cursor;
         let cursor_row = (cursor.point.line.0 + content.display_offset as i32).max(0) as usize;
         let cursor_col = cursor.point.column.0.min(cols.saturating_sub(1));
-        let effective_cursor_shape = if self.force_vertical_cursor && cursor.shape != CursorShape::Hidden
-        {
-            CursorShape::Beam
-        } else {
-            cursor.shape
-        };
+        let effective_cursor_shape =
+            if self.force_vertical_cursor && cursor.shape != CursorShape::Hidden {
+                CursorShape::Beam
+            } else {
+                cursor.shape
+            };
         self.cursor_shape = effective_cursor_shape;
         self.update_cursor_visual_target(cursor_row.min(rows.saturating_sub(1)), cursor_col);
 
         self.snapshot = ScreenSnapshot {
             cells,
+            soft_wrapped_rows,
             cursor_row: cursor_row.min(rows.saturating_sub(1)),
             cursor_col,
             cursor_visible: cursor.shape != CursorShape::Hidden,
@@ -641,6 +677,7 @@ impl AgentTerminal {
         );
 
         let mut lines = Vec::with_capacity((bottom - top + 1).max(0) as usize);
+        let mut soft_wrapped_rows = Vec::with_capacity((bottom - top + 1).max(0) as usize);
         for line_index in top..=bottom {
             let mut row = vec![
                 CellSnapshot {
@@ -653,9 +690,13 @@ impl AgentTerminal {
                 };
                 cols
             ];
+            let mut soft_wrapped = false;
 
             for col in 0..cols {
                 let cell = &grid[Line(line_index)][Column(col)];
+                if cell.flags.contains(Flags::WRAPLINE) {
+                    soft_wrapped = true;
+                }
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
@@ -674,7 +715,11 @@ impl AgentTerminal {
                 let spans_next_col = cell.flags.contains(Flags::WIDE_CHAR);
                 let expands_layout =
                     !spans_next_col && self.forced_double_width_chars.contains(&ch);
-                let width_cols = if spans_next_col || expands_layout { 2 } else { 1 };
+                let width_cols = if spans_next_col || expands_layout {
+                    2
+                } else {
+                    1
+                };
 
                 row[col] = CellSnapshot {
                     ch,
@@ -687,11 +732,13 @@ impl AgentTerminal {
             }
 
             lines.push(row);
+            soft_wrapped_rows.push(soft_wrapped);
         }
 
         SnapshotTabData {
             title,
             lines,
+            soft_wrapped_rows,
             cols,
             font_family: self.font_family.clone(),
             font_fallbacks: self.font_fallbacks.clone(),
@@ -702,11 +749,19 @@ impl AgentTerminal {
 
     pub(crate) fn cursor_visual_state(&self) -> (usize, f32, bool) {
         if !self.cursor_slide_enabled {
-            return (self.snapshot.cursor_row, self.snapshot.cursor_col as f32, false);
+            return (
+                self.snapshot.cursor_row,
+                self.snapshot.cursor_col as f32,
+                false,
+            );
         }
 
         if !self.cursor_visual_initialized {
-            return (self.snapshot.cursor_row, self.snapshot.cursor_col as f32, false);
+            return (
+                self.snapshot.cursor_row,
+                self.snapshot.cursor_col as f32,
+                false,
+            );
         }
 
         let now = Instant::now();
@@ -851,7 +906,13 @@ impl AgentTerminal {
 
         probe.first_pty_at = Some(now);
         let snapshot = probe.clone();
-        self.log_enter_latency_event("enter_latency_first_pty", snapshot.id, &snapshot, now, json!({}));
+        self.log_enter_latency_event(
+            "enter_latency_first_pty",
+            snapshot.id,
+            &snapshot,
+            now,
+            json!({}),
+        );
     }
 
     pub(crate) fn mark_enter_latency_first_paint(&mut self) {
@@ -864,7 +925,13 @@ impl AgentTerminal {
             return;
         }
 
-        self.log_enter_latency_event("enter_latency_first_paint", probe.id, &probe, now, json!({}));
+        self.log_enter_latency_event(
+            "enter_latency_first_paint",
+            probe.id,
+            &probe,
+            now,
+            json!({}),
+        );
     }
 
     fn log_enter_latency_event(

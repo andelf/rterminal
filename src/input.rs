@@ -1,6 +1,7 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::term::TermMode;
 use gpui::{
     App, Bounds, ClipboardItem, Context, EntityInputHandler, InputHandler, KeyDownEvent,
@@ -16,8 +17,8 @@ use crate::keyboard::{
 };
 use crate::macos_ax::NativeAxInputState;
 use crate::render::{
-    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X,
-    measure_cell_width, terminal_content_padding_y,
+    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, measure_cell_width,
+    terminal_content_padding_y,
 };
 use crate::terminal::{CellSnapshot, ScreenSnapshot, SelectionPoint};
 use crate::text_utils::{
@@ -466,6 +467,10 @@ impl AgentTerminal {
                 self.write_bytes(&bytes);
                 handled = true;
             }
+        } else if y_steps != 0 {
+            self.term.scroll_display(Scroll::Delta(y_steps));
+            self.refresh_snapshot();
+            handled = true;
         }
 
         if handled {
@@ -656,10 +661,8 @@ impl AgentTerminal {
             } else {
                 px(0.0)
             };
-            let surface_height = (window.viewport_size().height
-                - title_bar_height
-                - status_height)
-                .max(line_height);
+            let surface_height =
+                (window.viewport_size().height - title_bar_height - status_height).max(line_height);
             point(
                 TEXT_PADDING_X,
                 title_bar_height
@@ -983,11 +986,7 @@ impl AgentTerminal {
     fn current_selection_text(&self) -> Option<String> {
         let (start, end) = self.selection_bounds()?;
         let text = extract_selection_text(&self.snapshot, start, end);
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        if text.is_empty() { None } else { Some(text) }
     }
 
     fn copy_current_selection_to_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1282,7 +1281,7 @@ fn extract_selection_text(
             break;
         };
         if cells.is_empty() {
-            lines.push(String::new());
+            lines.push((row, String::new()));
             continue;
         }
 
@@ -1297,13 +1296,13 @@ fn extract_selection_text(
             cells.len().saturating_sub(1)
         };
         if line_start >= cells.len() {
-            lines.push(String::new());
+            lines.push((row, String::new()));
             continue;
         }
 
         let clamped_end = line_end.min(cells.len().saturating_sub(1));
         if line_start > clamped_end {
-            lines.push(String::new());
+            lines.push((row, String::new()));
             continue;
         }
 
@@ -1317,10 +1316,21 @@ fn extract_selection_text(
         }
         let trimmed_len = text.trim_end().len();
         text.truncate(trimmed_len);
-        lines.push(text);
+        lines.push((row, text));
     }
 
-    lines.join("\n")
+    join_selected_lines(lines, &snapshot.soft_wrapped_rows)
+}
+
+fn join_selected_lines(lines: Vec<(usize, String)>, soft_wrapped_rows: &[bool]) -> String {
+    let mut text = String::new();
+    for (index, (row, line)) in lines.iter().enumerate() {
+        text.push_str(line);
+        if index + 1 < lines.len() && !soft_wrapped_rows.get(*row).copied().unwrap_or(false) {
+            text.push('\n');
+        }
+    }
+    text
 }
 
 fn normalize_selection_col(cells: &[CellSnapshot], col: usize) -> usize {
@@ -1490,10 +1500,7 @@ impl EntityInputHandler for AgentTerminal {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.trace_input(format!(
-            "ime replace_and_mark_text len={}",
-            new_text.len()
-        ));
+        self.trace_input(format!("ime replace_and_mark_text len={}", new_text.len()));
         self.ime_marked_text = if new_text.is_empty() {
             None
         } else {
@@ -1590,6 +1597,7 @@ mod tests {
                 "abcdef".chars().map(cell).collect(),
                 "uvwxyz".chars().map(cell).collect(),
             ],
+            soft_wrapped_rows: vec![false, false, false],
             cursor_row: 0,
             cursor_col: 0,
             cursor_visible: true,
@@ -1606,6 +1614,30 @@ mod tests {
     }
 
     #[test]
+    fn extract_selection_text_joins_soft_wrapped_rows() {
+        let snapshot = ScreenSnapshot {
+            cells: vec![
+                "hello".chars().map(cell).collect(),
+                "world".chars().map(cell).collect(),
+                "next".chars().map(cell).collect(),
+            ],
+            soft_wrapped_rows: vec![true, false, false],
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            alt_screen: false,
+        };
+
+        let text = extract_selection_text(
+            &snapshot,
+            SelectionPoint { row: 0, col: 0 },
+            SelectionPoint { row: 2, col: 3 },
+        );
+
+        assert_eq!(text, "helloworld\nnext");
+    }
+
+    #[test]
     fn extract_selection_text_skips_wide_char_spacers() {
         let snapshot = ScreenSnapshot {
             cells: vec![vec![
@@ -1615,6 +1647,7 @@ mod tests {
                 cell(' '),
                 cell('X'),
             ]],
+            soft_wrapped_rows: vec![false],
             cursor_row: 0,
             cursor_col: 0,
             cursor_visible: true,

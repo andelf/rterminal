@@ -34,9 +34,19 @@ pub(crate) struct CliOptions {
     pub(crate) input_log_file: Option<PathBuf>,
     #[arg(long)]
     pub(crate) input_log_raw: bool,
+    #[arg(
+        long,
+        value_parser = parse_history_log_dir,
+        default_value = "~/.rterminal/history",
+        help = "Directory for per-tab raw PTY transcript files (.ansi)"
+    )]
+    pub(crate) history_log_dir: PathBuf,
     #[arg(long, help = "Disable smooth cursor slide animation")]
     pub(crate) no_cursor_slide: bool,
-    #[arg(long, help = "Force a vertical beam cursor regardless of app cursor mode")]
+    #[arg(
+        long,
+        help = "Force a vertical beam cursor regardless of app cursor mode"
+    )]
     pub(crate) force_vertical_cursor: bool,
     #[arg(long, help = "Enable subtle trailing effect for vertical beam cursor")]
     pub(crate) cursor_trail: bool,
@@ -57,6 +67,21 @@ where
 
 pub(crate) fn parse_cli_options() -> CliOptions {
     CliOptions::parse()
+}
+
+fn parse_history_log_dir(value: &str) -> Result<PathBuf, String> {
+    if let Some(rest) = value.strip_prefix("~/") {
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            "cannot expand '~' in --history-log-dir because HOME is unset".to_string()
+        })?;
+        Ok(PathBuf::from(home).join(rest))
+    } else if value == "~" {
+        std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            "cannot expand '~' in --history-log-dir because HOME is unset".to_string()
+        })
+    } else {
+        Ok(PathBuf::from(value))
+    }
 }
 
 #[cfg(test)]
@@ -97,6 +122,28 @@ mod tests {
         assert_eq!(
             cli.input_log_file.as_deref(),
             Some(std::path::Path::new("/tmp/agent-input.jsonl"))
+        );
+    }
+
+    #[test]
+    fn history_log_dir_defaults_to_rterminal_history() {
+        let cli = parse_cli_options_from(Vec::<String>::new());
+        assert_eq!(
+            cli.history_log_dir,
+            std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME set"))
+                .join(".rterminal/history")
+        );
+    }
+
+    #[test]
+    fn history_log_dir_argument_parses() {
+        let cli = parse_cli_options_from(vec![
+            "--history-log-dir".to_string(),
+            "/tmp/agent-history".to_string(),
+        ]);
+        assert_eq!(
+            cli.history_log_dir,
+            std::path::PathBuf::from("/tmp/agent-history")
         );
     }
 

@@ -3,6 +3,7 @@
 mod cli;
 mod color;
 mod debug_server;
+mod history_log;
 mod input;
 mod input_log;
 mod keyboard;
@@ -25,8 +26,8 @@ pub(crate) use crate::input::AgentTerminalInputHandler;
 use crate::tabs::TerminalTabs;
 #[allow(unused_imports)]
 pub(crate) use crate::terminal::{
-    AgentTerminal, CellSnapshot, DEFAULT_FONT_SIZE, GridSize, ScreenSnapshot,
-    compute_grid_size, run_self_check, snapshot_to_lines,
+    AgentTerminal, CellSnapshot, DEFAULT_FONT_SIZE, GridSize, ScreenSnapshot, compute_grid_size,
+    run_self_check, snapshot_to_lines,
 };
 
 actions!(

@@ -83,6 +83,7 @@ This is **not** intended to be a general-purpose terminal replacement. It is an 
 - Cursor shapes: block, beam, underline, hidden (respects application cursor mode)
 - Smooth cursor slide animation with optional trailing effect
 - Alt screen buffer support (vim, less, htop, etc.)
+- Scrollback history is available in normal terminal mode through mouse wheel scrolling
 - Mouse reporting (click, motion, drag, scroll wheel) for terminal applications
 - Bracketed paste mode
 - Focus in/out events (`CSI I` / `CSI O`)
@@ -120,6 +121,7 @@ This is **not** intended to be a general-purpose terminal replacement. It is an 
 - `POST /debug/replace-line` — replace current shell input line
 - Input event tracing: `AGENT_TUI_INPUT_TRACE=1`
 - Structured JSONL input logging: `--input-log-file <path>` (with optional `--input-log-raw`)
+- Per-tab persistent PTY transcripts: raw `.ansi` output plus `.meta.json` under `~/.rterminal/history`
 
 ## Usage
 
@@ -142,6 +144,9 @@ cargo run -- --self-check
 
 # With input debugging
 AGENT_TUI_INPUT_TRACE=1 cargo run -- --input-log-file /tmp/input.jsonl --input-log-raw
+
+# Save per-tab raw PTY output transcripts to a custom directory
+cargo run -- --history-log-dir /tmp/agent-terminal-history
 ```
 
 ### CLI Options
@@ -160,6 +165,7 @@ AGENT_TUI_INPUT_TRACE=1 cargo run -- --input-log-file /tmp/input.jsonl --input-l
 | `--show-status-bar` | off | Show debug status bar at bottom |
 | `--input-log-file <path>` | — | Write structured input events to JSONL file |
 | `--input-log-raw` | off | Include full text values in input log (not truncated) |
+| `--history-log-dir <dir>` | `~/.rterminal/history` | Write per-tab raw PTY output transcripts (`.ansi`) and metadata sidecars |
 | `--self-check` | — | Run startup self-check and exit |
 
 ## Tech Stack
@@ -186,7 +192,6 @@ cargo run -- --self-check
 - **macOS only** — GPUI's platform layer currently targets macOS; Linux/Windows support depends on upstream
 - **Per-cell text shaping** — rendering shapes each character individually rather than batching runs per line; functional but not optimal for performance
 - **Input-line model drift** — the shadow `input_line` can desynchronize from the actual shell state in complex scenarios (tmux prefix sequences, shell history navigation, tab completion)
-- **No scrollback UI** — terminal scrollback buffer exists in `alacritty_terminal` but is not yet exposed through scroll interaction
 - **No search** — no find-in-terminal functionality
 - **No hyperlink interaction** — OSC 8 hyperlinks are not yet clickable
 - **No bold/italic font variants** — text style flags are parsed but not rendered with distinct font faces
