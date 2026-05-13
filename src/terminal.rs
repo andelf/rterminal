@@ -25,7 +25,7 @@ use crate::color::{ansi_bg_to_hsla, ansi_to_hsla};
 use crate::debug_server::{SharedDebugState, start_debug_http_server};
 use crate::input_log::InputLogger;
 use crate::keyboard::encode_keystroke;
-use crate::pty::{PtySession, write_to_pty};
+use crate::pty::{PtySession, SharedPtyWriter, write_to_pty};
 use crate::render::{
     CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
     line_height_for, measure_cell_width,
@@ -94,6 +94,7 @@ impl Dimensions for GridSize {
 #[derive(Clone)]
 pub(crate) struct TitleTrackingListener {
     pub(crate) title: Arc<Mutex<Option<String>>>,
+    pub(crate) writer: Option<SharedPtyWriter>,
 }
 
 impl EventListener for TitleTrackingListener {
@@ -104,6 +105,11 @@ impl EventListener for TitleTrackingListener {
             }
             AlacTermEvent::ResetTitle => {
                 *self.title.lock() = None;
+            }
+            AlacTermEvent::PtyWrite(text) => {
+                if let Some(writer) = &self.writer {
+                    let _ = write_to_pty(writer, text.as_bytes());
+                }
             }
             _ => {}
         }
@@ -261,18 +267,6 @@ impl AgentTerminal {
         );
 
         let terminal_title = Arc::new(Mutex::new(None));
-        let term_config = Config {
-            ambiguous_wide: matches!(cli.ambiguous_width, AmbiguousWidth::Double),
-            ..Config::default()
-        };
-        let term = Term::new(
-            term_config,
-            &grid_size,
-            TitleTrackingListener {
-                title: terminal_title.clone(),
-            },
-        );
-        let processor = Processor::<StdSyncHandler>::new();
         let (shell, master, writer, child, output_rx, debug) =
             match PtySession::spawn(grid_size.rows, grid_size.cols) {
                 Ok(session) => {
@@ -296,6 +290,19 @@ impl AgentTerminal {
                     (String::from("<none>"), None, None, None, None, debug)
                 }
             };
+        let term_config = Config {
+            ambiguous_wide: matches!(cli.ambiguous_width, AmbiguousWidth::Double),
+            ..Config::default()
+        };
+        let term = Term::new(
+            term_config,
+            &grid_size,
+            TitleTrackingListener {
+                title: terminal_title.clone(),
+                writer: writer.clone(),
+            },
+        );
+        let processor = Processor::<StdSyncHandler>::new();
 
         start_debug_http_server(debug.clone(), writer.clone());
         let input_logger = match cli.input_log_file.as_ref() {
@@ -1037,6 +1044,55 @@ fn parse_double_width_chars(raw: &[String]) -> HashSet<char> {
         .flat_map(|entry| entry.chars())
         .filter(|ch| !ch.is_whitespace())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Result as IoResult, Write};
+
+    struct RecordingWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+            self.bytes.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    fn recording_writer() -> (SharedPtyWriter, Arc<Mutex<Vec<u8>>>) {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer: SharedPtyWriter = Arc::new(Mutex::new(Box::new(RecordingWriter {
+            bytes: bytes.clone(),
+        })));
+        (writer, bytes)
+    }
+
+    #[test]
+    fn device_status_report_writes_cursor_position_to_pty() {
+        let (writer, bytes) = recording_writer();
+        let title = Arc::new(Mutex::new(None));
+        let mut term = Term::new(
+            Config::default(),
+            &GridSize { cols: 80, rows: 24 },
+            TitleTrackingListener {
+                title,
+                writer: Some(writer),
+            },
+        );
+        let mut processor = Processor::<StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"abc");
+        processor.advance(&mut term, b"\x1b[6n");
+
+        assert_eq!(&*bytes.lock(), b"\x1b[1;4R");
+    }
 }
 
 pub(crate) fn run_self_check() -> Result<()> {
