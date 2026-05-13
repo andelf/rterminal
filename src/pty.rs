@@ -7,9 +7,11 @@ use async_channel::Receiver;
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+pub(crate) type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
 pub(crate) struct PtySession {
     pub(crate) master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    pub(crate) writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pub(crate) writer: SharedPtyWriter,
     pub(crate) child: Arc<Mutex<Box<dyn Child + Send>>>,
     pub(crate) output_rx: Receiver<Vec<u8>>,
     pub(crate) shell: String,
@@ -75,7 +77,7 @@ impl PtySession {
     }
 }
 
-pub(crate) fn write_to_pty(writer: &Arc<Mutex<Box<dyn Write + Send>>>, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_to_pty(writer: &SharedPtyWriter, bytes: &[u8]) -> Result<()> {
     let mut writer = writer.lock();
     writer
         .write_all(bytes)
