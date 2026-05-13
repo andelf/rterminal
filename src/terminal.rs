@@ -8,12 +8,15 @@ use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, TermMode};
+use alacritty_terminal::term::{ClipboardType, Config, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, StdSyncHandler,
 };
 use anyhow::{Context as _, Result, ensure};
-use gpui::{Bounds, Context, EventEmitter, FocusHandle, FontFallbacks, Pixels, Subscription, Task, Window, px};
+use gpui::{
+    Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, FontFallbacks, Pixels,
+    Subscription, Task, Window, px,
+};
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
 use serde::Serialize;
@@ -92,8 +95,15 @@ impl Dimensions for GridSize {
 }
 
 #[derive(Clone)]
+enum PendingTerminalEvent {
+    ClipboardStore(ClipboardType, String),
+    ClipboardLoad(ClipboardType, Arc<dyn Fn(&str) -> String + Sync + Send + 'static>),
+}
+
+#[derive(Clone)]
 pub(crate) struct TitleTrackingListener {
     pub(crate) title: Arc<Mutex<Option<String>>>,
+    pending_events: Arc<Mutex<Vec<PendingTerminalEvent>>>,
 }
 
 impl EventListener for TitleTrackingListener {
@@ -104,6 +114,16 @@ impl EventListener for TitleTrackingListener {
             }
             AlacTermEvent::ResetTitle => {
                 *self.title.lock() = None;
+            }
+            AlacTermEvent::ClipboardStore(clipboard, text) => {
+                self.pending_events
+                    .lock()
+                    .push(PendingTerminalEvent::ClipboardStore(clipboard, text));
+            }
+            AlacTermEvent::ClipboardLoad(clipboard, format) => {
+                self.pending_events
+                    .lock()
+                    .push(PendingTerminalEvent::ClipboardLoad(clipboard, format));
             }
             _ => {}
         }
@@ -209,6 +229,7 @@ pub(crate) struct AgentTerminal {
     pub(crate) paste_guard_prompt_open: bool,
     pub(crate) shell_exited: bool,
     pub(crate) debug: SharedDebugState,
+    pending_term_events: Arc<Mutex<Vec<PendingTerminalEvent>>>,
     pub(crate) _window_bounds_sub: Option<Subscription>,
     pub(crate) _focus_in_sub: Option<Subscription>,
     pub(crate) _focus_out_sub: Option<Subscription>,
@@ -261,6 +282,7 @@ impl AgentTerminal {
         );
 
         let terminal_title = Arc::new(Mutex::new(None));
+        let pending_term_events = Arc::new(Mutex::new(Vec::new()));
         let term_config = Config {
             ambiguous_wide: matches!(cli.ambiguous_width, AmbiguousWidth::Double),
             ..Config::default()
@@ -270,6 +292,7 @@ impl AgentTerminal {
             &grid_size,
             TitleTrackingListener {
                 title: terminal_title.clone(),
+                pending_events: pending_term_events.clone(),
             },
         );
         let processor = Processor::<StdSyncHandler>::new();
@@ -375,6 +398,7 @@ impl AgentTerminal {
             paste_guard_prompt_open: false,
             shell_exited: false,
             debug,
+            pending_term_events,
             _window_bounds_sub: None,
             _focus_in_sub: None,
             _focus_out_sub: None,
@@ -418,7 +442,7 @@ impl AgentTerminal {
                     }
 
                     this.update(cx, |this, cx| {
-                        this.ingest_batch(&batch);
+                        this.ingest_batch(cx, &batch);
                         this.mark_enter_latency_first_paint();
                         cx.notify();
                     })?;
@@ -436,7 +460,7 @@ impl AgentTerminal {
         this
     }
 
-    pub(crate) fn ingest_batch(&mut self, chunks: &[Vec<u8>]) {
+    pub(crate) fn ingest_batch(&mut self, cx: &mut Context<Self>, chunks: &[Vec<u8>]) {
         if chunks.is_empty() {
             return;
         }
@@ -447,7 +471,62 @@ impl AgentTerminal {
             self.debug.record_bytes_from_pty(chunk.len());
             self.record_pty_ingest_diagnostics(chunk.len());
         }
+        self.process_pending_terminal_events(cx);
         self.refresh_snapshot();
+    }
+
+    fn process_pending_terminal_events(&mut self, cx: &mut Context<Self>) {
+        let pending_events = {
+            let mut pending = self.pending_term_events.lock();
+            std::mem::take(&mut *pending)
+        };
+
+        for event in pending_events {
+            match event {
+                PendingTerminalEvent::ClipboardStore(clipboard, text) => {
+                    self.store_osc52_clipboard(cx, clipboard, text);
+                }
+                PendingTerminalEvent::ClipboardLoad(clipboard, format) => {
+                    let text = self.load_osc52_clipboard(cx, clipboard);
+                    self.write_bytes(format(&text).as_bytes());
+                }
+            }
+        }
+    }
+
+    fn store_osc52_clipboard(
+        &mut self,
+        cx: &mut Context<Self>,
+        clipboard: ClipboardType,
+        text: String,
+    ) {
+        match clipboard {
+            ClipboardType::Clipboard => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            ClipboardType::Selection => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+        }
+        self.debug
+            .set_note(Some(format!("osc52 copied to {clipboard:?}")));
+    }
+
+    fn load_osc52_clipboard(
+        &mut self,
+        cx: &mut Context<Self>,
+        clipboard: ClipboardType,
+    ) -> String {
+        let text = match clipboard {
+            ClipboardType::Clipboard => cx.read_from_clipboard().and_then(|item| item.text()),
+            ClipboardType::Selection => cx.read_from_clipboard().and_then(|item| item.text()),
+        }
+        .unwrap_or_default();
+
+        self.debug
+            .set_note(Some(format!("osc52 loaded from {clipboard:?}")));
+
+        text
     }
 
     pub(crate) fn refresh_snapshot(&mut self) {
@@ -1039,6 +1118,65 @@ fn parse_double_width_chars(raw: &[String]) -> HashSet<char> {
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::term::Osc52;
+
+    #[test]
+    fn osc52_copy_sequence_is_queued_for_clipboard_store() {
+        let title = Arc::new(Mutex::new(None));
+        let pending_events = Arc::new(Mutex::new(Vec::new()));
+        let mut term = Term::new(
+            Config::default(),
+            &GridSize { cols: 80, rows: 24 },
+            TitleTrackingListener {
+                title,
+                pending_events: pending_events.clone(),
+            },
+        );
+        let mut processor = Processor::<StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b]52;c;SGVsbG8=\x07");
+
+        let events = pending_events.lock().clone();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            PendingTerminalEvent::ClipboardStore(ClipboardType::Clipboard, text) => {
+                assert_eq!(text, "Hello");
+            }
+            _ => panic!("expected clipboard store event"),
+        }
+    }
+
+    #[test]
+    fn osc52_paste_query_is_queued_for_clipboard_load() {
+        let title = Arc::new(Mutex::new(None));
+        let pending_events = Arc::new(Mutex::new(Vec::new()));
+        let config = Config {
+            osc52: Osc52::CopyPaste,
+            ..Config::default()
+        };
+        let mut term = Term::new(
+            config,
+            &GridSize { cols: 80, rows: 24 },
+            TitleTrackingListener {
+                title,
+                pending_events: pending_events.clone(),
+            },
+        );
+        let mut processor = Processor::<StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b]52;c;?\x07");
+
+        let events = pending_events.lock().clone();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            PendingTerminalEvent::ClipboardLoad(ClipboardType::Clipboard, _) => {}
+            _ => panic!("expected clipboard load event"),
+        }
+    }
+}
 pub(crate) fn run_self_check() -> Result<()> {
     let enter = gpui::Keystroke::parse("enter").context("parse enter")?;
     ensure!(
