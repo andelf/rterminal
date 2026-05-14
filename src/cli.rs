@@ -14,25 +14,25 @@ pub(crate) enum Theme {
 }
 
 #[derive(Clone, Parser)]
-#[command(name = "agent_terminal")]
+#[command(name = "agent_terminal", about = "A GPU-accelerated terminal emulator for AI agents")]
 pub(crate) struct CliOptions {
-    #[arg(long)]
+    #[arg(long, help = "Run a self-diagnostic check and exit")]
     pub(crate) self_check: bool,
-    #[arg(long)]
+    #[arg(long, help = "Show the status bar at the bottom of the window")]
     pub(crate) show_status_bar: bool,
-    #[arg(long, default_value = "Menlo")]
+    #[arg(long, default_value = "Menlo", help = "Primary font family for terminal text")]
     pub(crate) font_family: String,
-    #[arg(long = "font-fallback", value_delimiter = ',')]
+    #[arg(long = "font-fallback", value_delimiter = ',', help = "Fallback font families, comma-separated or repeated")]
     pub(crate) font_fallbacks: Vec<String>,
-    #[arg(long = "double-width-char", value_delimiter = ',')]
+    #[arg(long = "double-width-char", value_delimiter = ',', help = "Characters to render at double cell width, comma-separated or repeated")]
     pub(crate) double_width_chars: Vec<String>,
-    #[arg(long, value_enum, default_value_t = AmbiguousWidth::Single)]
+    #[arg(long, value_enum, default_value_t = AmbiguousWidth::Single, help = "Treat ambiguous-width Unicode characters as single or double width")]
     pub(crate) ambiguous_width: AmbiguousWidth,
-    #[arg(long, value_enum, default_value_t = Theme::Default)]
+    #[arg(long, value_enum, default_value_t = Theme::Default, help = "Color theme")]
     pub(crate) theme: Theme,
-    #[arg(long)]
+    #[arg(long, help = "Write structured input/output log events to this JSONL file")]
     pub(crate) input_log_file: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, help = "Include raw PTY bytes in input log events (base64-encoded)")]
     pub(crate) input_log_raw: bool,
     #[arg(
         long,
