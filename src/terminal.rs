@@ -137,7 +137,7 @@ impl EventListener for TitleTrackingListener {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct CellSnapshot {
     pub(crate) ch: char,
     pub(crate) fg: gpui::Hsla,
@@ -1242,61 +1242,25 @@ pub(crate) fn snapshot_transition_shape(
 }
 
 fn count_matching_rows(old_rows: &[Vec<CellSnapshot>], new_rows: &[Vec<CellSnapshot>]) -> usize {
-    old_rows
-        .iter()
-        .zip(new_rows.iter())
-        .filter(|(old, new)| snapshot_rows_equal(old, new))
-        .count()
+    old_rows.iter().zip(new_rows).filter(|(a, b)| a == b).count()
 }
 
 fn count_changed_rows(old: &ScreenSnapshot, new: &ScreenSnapshot) -> usize {
-    old.cells
-        .iter()
-        .zip(new.cells.iter())
-        .filter(|(old, new)| !snapshot_rows_equal(old, new))
-        .count()
+    old.cells.iter().zip(&new.cells).filter(|(a, b)| a != b).count()
         + old.cells.len().abs_diff(new.cells.len())
 }
 
-fn snapshot_rows_equal(old: &[CellSnapshot], new: &[CellSnapshot]) -> bool {
-    old.len() == new.len()
-        && old
-            .iter()
-            .zip(new.iter())
-            .all(|(old, new)| snapshot_cells_equal(old, new))
-}
-
-fn snapshot_cells_equal(old: &CellSnapshot, new: &CellSnapshot) -> bool {
-    old.ch == new.ch
-        && old.fg == new.fg
-        && old.bg == new.bg
-        && old.width_cols == new.width_cols
-        && old.spans_next_col == new.spans_next_col
-        && old.expands_layout == new.expands_layout
-}
-
 fn snapshot_row_summary(snapshot: &ScreenSnapshot, row: usize) -> String {
-    snapshot
-        .cells
-        .get(row)
-        .map(|r| row_summary(r))
-        .unwrap_or_default()
+    snapshot.cells.get(row).map(|r| row_summary(r)).unwrap_or_default()
 }
 
 fn snapshot_last_row_summary(snapshot: &ScreenSnapshot) -> String {
-    snapshot
-        .cells
-        .last()
-        .map(|r| row_summary(r))
-        .unwrap_or_default()
+    snapshot.cells.last().map(|r| row_summary(r)).unwrap_or_default()
 }
 
 fn row_summary(row: &[CellSnapshot]) -> String {
-    let mut line: String = row.iter().map(|cell| cell.ch).collect();
-    while line.ends_with(' ') {
-        line.pop();
-    }
-    summarize_text_for_trace(&line)
+    let line: String = row.iter().map(|c| c.ch).collect();
+    summarize_text_for_trace(line.trim_end())
 }
 
 fn is_input_trace_enabled() -> bool {
