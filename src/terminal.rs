@@ -493,6 +493,8 @@ impl AgentTerminal {
             return;
         }
 
+        let old_snapshot = self.snapshot.clone();
+        let old_grid = self.grid_size;
         self.mark_enter_latency_first_pty();
         for chunk in chunks {
             if let Some(logger) = &self.history_logger {
@@ -504,6 +506,7 @@ impl AgentTerminal {
         }
         self.process_pending_terminal_events(cx);
         self.refresh_snapshot();
+        self.log_snapshot_transition("pty", &old_snapshot, old_grid, chunks.len());
     }
 
     fn process_pending_terminal_events(&mut self, cx: &mut Context<Self>) {
@@ -1104,6 +1107,41 @@ impl AgentTerminal {
         self.pty_sample_bytes = 0;
         self.pty_sample_chunks = 0;
     }
+
+    pub(crate) fn log_snapshot_transition(
+        &self,
+        source: &str,
+        old_snapshot: &ScreenSnapshot,
+        old_grid: GridSize,
+        batch_chunks: usize,
+    ) {
+        let Some(logger) = &self.input_logger else {
+            return;
+        };
+
+        let shape = snapshot_transition_shape(old_snapshot, &self.snapshot, 6);
+        logger.log_event(
+            "snapshot_transition",
+            json!({
+                "source": source,
+                "batch_chunks": batch_chunks,
+                "old_grid": old_grid,
+                "new_grid": self.grid_size,
+                "alt_screen_changed": old_snapshot.alt_screen != self.snapshot.alt_screen,
+                "cursor_row_delta": self.snapshot.cursor_row as i64 - old_snapshot.cursor_row as i64,
+                "cursor_col_delta": self.snapshot.cursor_col as i64 - old_snapshot.cursor_col as i64,
+                "old_cursor": { "row": old_snapshot.cursor_row, "col": old_snapshot.cursor_col },
+                "new_cursor": { "row": self.snapshot.cursor_row, "col": self.snapshot.cursor_col },
+                "old_top": snapshot_row_summary(old_snapshot, 0),
+                "new_top": snapshot_row_summary(&self.snapshot, 0),
+                "old_bottom": snapshot_last_row_summary(old_snapshot),
+                "new_bottom": snapshot_last_row_summary(&self.snapshot),
+                "best_shift_rows": shape.best_shift_rows,
+                "best_shift_matched_rows": shape.best_shift_matched_rows,
+                "changed_rows": count_changed_rows(old_snapshot, &self.snapshot),
+            }),
+        );
+    }
 }
 
 impl EventEmitter<TerminalExitedEvent> for AgentTerminal {}
@@ -1156,6 +1194,112 @@ pub(crate) fn snapshot_to_lines(snapshot: &ScreenSnapshot) -> Vec<String> {
             line
         })
         .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SnapshotTransitionShape {
+    pub(crate) best_shift_rows: i32,
+    pub(crate) best_shift_matched_rows: usize,
+}
+
+pub(crate) fn snapshot_transition_shape(
+    old: &ScreenSnapshot,
+    new: &ScreenSnapshot,
+    max_shift: i32,
+) -> SnapshotTransitionShape {
+    if old.alt_screen != new.alt_screen
+        || old.cells.len() != new.cells.len()
+        || old.cells.is_empty()
+    {
+        return SnapshotTransitionShape {
+            best_shift_rows: 0,
+            best_shift_matched_rows: 0,
+        };
+    }
+
+    let rows = old.cells.len();
+    let mut best = SnapshotTransitionShape {
+        best_shift_rows: 0,
+        best_shift_matched_rows: count_matching_rows(&old.cells, &new.cells),
+    };
+
+    let max_shift = max_shift.max(0) as usize;
+    for shift in 1..=max_shift.min(rows.saturating_sub(1)) {
+        let up_matches = count_matching_rows(&old.cells[shift..], &new.cells[..rows - shift]);
+        if up_matches > best.best_shift_matched_rows {
+            best = SnapshotTransitionShape {
+                best_shift_rows: shift as i32,
+                best_shift_matched_rows: up_matches,
+            };
+        }
+
+        let down_matches = count_matching_rows(&old.cells[..rows - shift], &new.cells[shift..]);
+        if down_matches > best.best_shift_matched_rows {
+            best = SnapshotTransitionShape {
+                best_shift_rows: -(shift as i32),
+                best_shift_matched_rows: down_matches,
+            };
+        }
+    }
+    best
+}
+
+fn count_matching_rows(old_rows: &[Vec<CellSnapshot>], new_rows: &[Vec<CellSnapshot>]) -> usize {
+    old_rows
+        .iter()
+        .zip(new_rows.iter())
+        .filter(|(old, new)| snapshot_rows_equal(old, new))
+        .count()
+}
+
+fn count_changed_rows(old: &ScreenSnapshot, new: &ScreenSnapshot) -> usize {
+    old.cells
+        .iter()
+        .zip(new.cells.iter())
+        .filter(|(old, new)| !snapshot_rows_equal(old, new))
+        .count()
+        + old.cells.len().abs_diff(new.cells.len())
+}
+
+fn snapshot_rows_equal(old: &[CellSnapshot], new: &[CellSnapshot]) -> bool {
+    old.len() == new.len()
+        && old
+            .iter()
+            .zip(new.iter())
+            .all(|(old, new)| snapshot_cells_equal(old, new))
+}
+
+fn snapshot_cells_equal(old: &CellSnapshot, new: &CellSnapshot) -> bool {
+    old.ch == new.ch
+        && old.fg == new.fg
+        && old.bg == new.bg
+        && old.width_cols == new.width_cols
+        && old.spans_next_col == new.spans_next_col
+        && old.expands_layout == new.expands_layout
+}
+
+fn snapshot_row_summary(snapshot: &ScreenSnapshot, row: usize) -> String {
+    snapshot
+        .cells
+        .get(row)
+        .map(|r| row_summary(r))
+        .unwrap_or_default()
+}
+
+fn snapshot_last_row_summary(snapshot: &ScreenSnapshot) -> String {
+    snapshot
+        .cells
+        .last()
+        .map(|r| row_summary(r))
+        .unwrap_or_default()
+}
+
+fn row_summary(row: &[CellSnapshot]) -> String {
+    let mut line: String = row.iter().map(|cell| cell.ch).collect();
+    while line.ends_with(' ') {
+        line.pop();
+    }
+    summarize_text_for_trace(&line)
 }
 
 fn is_input_trace_enabled() -> bool {

@@ -468,8 +468,11 @@ impl AgentTerminal {
                 handled = true;
             }
         } else if y_steps != 0 {
+            let old_snapshot = self.snapshot.clone();
+            let old_grid = self.grid_size;
             self.term.scroll_display(Scroll::Delta(y_steps));
             self.refresh_snapshot();
+            self.log_snapshot_transition("wheel", &old_snapshot, old_grid, 0);
             handled = true;
         }
 
@@ -1661,6 +1664,38 @@ mod tests {
         );
 
         assert_eq!(text, "你好X");
+    }
+
+    #[test]
+    fn snapshot_transition_shape_detects_row_shift() {
+        let old = ScreenSnapshot {
+            cells: vec![
+                "aaaa".chars().map(cell).collect(),
+                "bbbb".chars().map(cell).collect(),
+                "cccc".chars().map(cell).collect(),
+            ],
+            soft_wrapped_rows: vec![false; 3],
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            alt_screen: false,
+        };
+        let new = ScreenSnapshot {
+            cells: vec![
+                "bbbb".chars().map(cell).collect(),
+                "cccc".chars().map(cell).collect(),
+                "dddd".chars().map(cell).collect(),
+            ],
+            soft_wrapped_rows: vec![false; 3],
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            alt_screen: false,
+        };
+
+        let shape = crate::terminal::snapshot_transition_shape(&old, &new, 3);
+        assert_eq!(shape.best_shift_rows, 1);
+        assert_eq!(shape.best_shift_matched_rows, 2);
     }
 
     #[test]
