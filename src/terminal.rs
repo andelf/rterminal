@@ -590,16 +590,13 @@ impl AgentTerminal {
         let mut soft_wrapped_rows = vec![false; rows];
 
         for indexed in content.display_iter {
-            let row = indexed.point.line.0;
+            let row = indexed.point.line.0 + content.display_offset as i32;
             let col = indexed.point.column.0;
-            if row < 0 || col >= cols {
+            if row < 0 || row as usize >= rows || col >= cols {
                 continue;
             }
 
             let row = row as usize;
-            if row >= rows {
-                continue;
-            }
 
             if indexed.cell.flags.contains(Flags::WRAPLINE) {
                 soft_wrapped_rows[row] = true;
