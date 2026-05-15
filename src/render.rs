@@ -164,6 +164,7 @@ impl Render for AgentTerminal {
             .clone()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| shell.clone());
+        let font_family = self.font_family.clone();
         let canvas_font_family = self.font_family.clone();
         let canvas_font_fallbacks = self.font_fallbacks.clone();
         let canvas_bounds_shared = self.canvas_bounds.clone();
