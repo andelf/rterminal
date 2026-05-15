@@ -468,11 +468,13 @@ impl AgentTerminal {
                 handled = true;
             }
         } else if y_steps != 0 {
-            let old_snapshot = self.snapshot.clone();
+            let old_snapshot = self.input_logger.is_some().then(|| self.snapshot.clone());
             let old_grid = self.grid_size;
             self.term.scroll_display(Scroll::Delta(y_steps));
             self.refresh_snapshot();
-            self.log_snapshot_transition("wheel", &old_snapshot, old_grid, 0);
+            if let Some(old) = &old_snapshot {
+                self.log_snapshot_transition("wheel", old, old_grid, 0);
+            }
             handled = true;
         }
 

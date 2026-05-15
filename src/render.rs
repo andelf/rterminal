@@ -114,6 +114,7 @@ fn palette_for(theme: Theme) -> RenderPalette {
 
 impl Render for AgentTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.mark_enter_latency_first_paint();
         window.set_window_title(&self.window_title());
         let model_line = self.input_line.clone();
         let model_cursor_utf16 = self.input_cursor_utf16;
@@ -152,8 +153,6 @@ impl Render for AgentTerminal {
         let entity = cx.entity();
         let status = self.debug.status_summary();
         let shell = self.shell.clone();
-        let font_family = self.font_family.clone();
-        let font_fallbacks = self.font_fallbacks.clone();
         let font_size = self.font_size;
         let line_height = self.line_height();
         let note = self.debug.note();
@@ -165,8 +164,8 @@ impl Render for AgentTerminal {
             .clone()
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| shell.clone());
-        let canvas_font_family = font_family.clone();
-        let canvas_font_fallbacks = font_fallbacks.clone();
+        let canvas_font_family = self.font_family.clone();
+        let canvas_font_fallbacks = self.font_fallbacks.clone();
         let canvas_bounds_shared = self.canvas_bounds.clone();
 
         let status_line = if let Some(note) = note {

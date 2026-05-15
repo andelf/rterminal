@@ -471,7 +471,6 @@ impl AgentTerminal {
 
                     this.update(cx, |this, cx| {
                         this.ingest_batch(cx, &batch);
-                        this.mark_enter_latency_first_paint();
                         cx.notify();
                     })?;
                 }
@@ -493,7 +492,7 @@ impl AgentTerminal {
             return;
         }
 
-        let old_snapshot = self.snapshot.clone();
+        let old_snapshot = self.input_logger.is_some().then(|| self.snapshot.clone());
         let old_grid = self.grid_size;
         self.mark_enter_latency_first_pty();
         for chunk in chunks {
@@ -506,7 +505,9 @@ impl AgentTerminal {
         }
         self.process_pending_terminal_events(cx);
         self.refresh_snapshot();
-        self.log_snapshot_transition("pty", &old_snapshot, old_grid, chunks.len());
+        if let Some(old) = &old_snapshot {
+            self.log_snapshot_transition("pty", old, old_grid, chunks.len());
+        }
     }
 
     fn process_pending_terminal_events(&mut self, cx: &mut Context<Self>) {
@@ -534,14 +535,9 @@ impl AgentTerminal {
         clipboard: ClipboardType,
         text: String,
     ) {
-        match clipboard {
-            ClipboardType::Clipboard => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
-            ClipboardType::Selection => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
-        }
+        // macOS has a single system clipboard; both Clipboard and Selection map to it.
+        let _ = clipboard;
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.debug
             .set_note(Some(format!("osc52 copied to {clipboard:?}")));
     }
@@ -552,8 +548,9 @@ impl AgentTerminal {
         clipboard: ClipboardType,
     ) -> String {
         let text = match clipboard {
-            ClipboardType::Clipboard => cx.read_from_clipboard().and_then(|item| item.text()),
-            ClipboardType::Selection => cx.read_from_clipboard().and_then(|item| item.text()),
+            ClipboardType::Clipboard | ClipboardType::Selection => {
+                cx.read_from_clipboard().and_then(|item| item.text())
+            }
         }
         .unwrap_or_default();
 
@@ -1184,11 +1181,8 @@ pub(crate) fn snapshot_to_lines(snapshot: &ScreenSnapshot) -> Vec<String> {
         .cells
         .iter()
         .map(|row| {
-            let mut line: String = row.iter().map(|cell| cell.ch).collect();
-            while line.ends_with(' ') {
-                line.pop();
-            }
-            line
+            let line: String = row.iter().map(|cell| cell.ch).collect();
+            line.trim_end().to_string()
         })
         .collect()
 }
