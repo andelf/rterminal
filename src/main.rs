@@ -5,7 +5,6 @@ mod api_protocol;
 mod api_server;
 mod cli;
 mod color;
-mod debug_server;
 mod history_log;
 mod input;
 mod input_log;
