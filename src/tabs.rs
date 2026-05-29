@@ -309,7 +309,30 @@ impl TerminalTabs {
     );
 
     fn apply_api_command(&mut self, cmd: crate::api_protocol::ApiCommand, cx: &mut Context<Self>) {
-        use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, TabSummaryDto};
+        use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, TabSelector, TabSummaryDto};
+
+        // Count this request against the targeted tab so that `http_requests`
+        // in the tab detail reflects API traffic. Commands without a specific
+        // target are counted against the active tab if one exists.
+        let selector = match &cmd {
+            ApiCommand::CloseTab { id, .. }
+            | ApiCommand::ActivateTab { id, .. }
+            | ApiCommand::GetTab { id, .. }
+            | ApiCommand::GetScreen { id, .. }
+            | ApiCommand::WriteInput { id, .. }
+            | ApiCommand::SendKeys { id, .. }
+            | ApiCommand::SetNote { id, .. }
+            | ApiCommand::ReplaceLine { id, .. } => Some(*id),
+            ApiCommand::ListTabs { .. } | ApiCommand::CreateTab { .. } => {
+                Some(TabSelector::Active)
+            }
+        };
+        if let Some(sel) = selector
+            && let Some((_, tab)) = self.resolve_tab(sel)
+            && let TerminalTabKind::Terminal { terminal, .. } = &tab.kind
+        {
+            terminal.read(cx).record_http_request();
+        }
 
         match cmd {
             ApiCommand::ListTabs { reply } => {
@@ -553,9 +576,15 @@ impl Render for TerminalTabs {
             let replies = std::mem::take(&mut self.pending_create_requests);
             for reply in replies {
                 let new_id = self.open_new_tab(window, cx) as u64;
+                let title = self
+                    .tabs
+                    .last()
+                    .and_then(TerminalTab::terminal)
+                    .map(|term| term.read(cx).tab_title())
+                    .unwrap_or_default();
                 let value = serde_json::json!({
                     "id": new_id,
-                    "title": "zsh",
+                    "title": title,
                     "kind": "terminal",
                 });
                 let _ = reply.send_blocking(crate::api_protocol::ApiReply::Ok {

@@ -754,6 +754,10 @@ impl AgentTerminal {
         self.debug.set_note(note);
     }
 
+    pub(crate) fn record_http_request(&self) {
+        self.debug.record_http_request();
+    }
+
     pub(crate) fn write_injected(&mut self, bytes: &[u8]) -> Result<usize, String> {
         let Some(writer) = &self.writer else {
             return Err("pty writer unavailable".to_string());
