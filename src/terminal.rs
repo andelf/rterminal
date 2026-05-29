@@ -292,8 +292,7 @@ impl AgentTerminal {
             match PtySession::spawn(grid_size.rows, grid_size.cols) {
                 Ok(session) => {
                     let shell = session.shell.clone();
-                    let debug =
-                        TabRuntimeState::new(shell.clone(), "connected".to_string(), grid_size);
+                    let debug = TabRuntimeState::new("connected".to_string(), grid_size);
                     (
                         shell,
                         Some(session.master),
@@ -305,8 +304,7 @@ impl AgentTerminal {
                 }
                 Err(err) => {
                     let message = format!("failed to start shell: {err:#}");
-                    let debug =
-                        TabRuntimeState::new("<none>".to_string(), message.clone(), grid_size);
+                    let debug = TabRuntimeState::new(message.clone(), grid_size);
                     debug.set_error(message);
                     (String::from("<none>"), None, None, None, None, debug)
                 }

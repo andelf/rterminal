@@ -13,7 +13,6 @@ use crate::terminal::GridSize;
 #[derive(Clone, Debug)]
 struct Inner {
     started_at: Instant,
-    shell: String,
     status: String,
     note: Option<String>,
     grid_size: GridSize,
@@ -31,24 +30,21 @@ pub(crate) struct TabRuntimeState {
 
 #[derive(Serialize)]
 pub(crate) struct TabRuntimeSnapshot {
-    pub(crate) shell: String,
     pub(crate) status: String,
     pub(crate) note: Option<String>,
     pub(crate) grid_size: GridSize,
     pub(crate) cursor_row: usize,
     pub(crate) cursor_col: usize,
-    pub(crate) screen_lines: Vec<String>,
     pub(crate) counters: ApiCounters,
     pub(crate) uptime_ms: u128,
     pub(crate) last_error: Option<String>,
 }
 
 impl TabRuntimeState {
-    pub(crate) fn new(shell: String, status: String, grid_size: GridSize) -> Self {
+    pub(crate) fn new(status: String, grid_size: GridSize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 started_at: Instant::now(),
-                shell,
                 status,
                 note: None,
                 grid_size,
@@ -67,10 +63,6 @@ impl TabRuntimeState {
 
     pub(crate) fn set_note(&self, note: Option<String>) {
         self.inner.lock().note = note;
-    }
-
-    pub(crate) fn note(&self) -> Option<String> {
-        self.inner.lock().note.clone()
     }
 
     pub(crate) fn record_bytes_from_pty(&self, bytes: usize) {
@@ -114,13 +106,11 @@ impl TabRuntimeState {
     pub(crate) fn snapshot(&self) -> TabRuntimeSnapshot {
         let state = self.inner.lock();
         TabRuntimeSnapshot {
-            shell: state.shell.clone(),
             status: state.status.clone(),
             note: state.note.clone(),
             grid_size: state.grid_size,
             cursor_row: state.cursor_row,
             cursor_col: state.cursor_col,
-            screen_lines: state.screen_lines.clone(),
             counters: state.counters.clone(),
             uptime_ms: state.started_at.elapsed().as_millis(),
             last_error: state.last_error.clone(),

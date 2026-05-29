@@ -500,15 +500,15 @@ fn build_tab_summary(
     tab: &TerminalTab,
     cx: &mut Context<TerminalTabs>,
 ) -> crate::api_protocol::TabSummaryDto {
-    use crate::api_protocol::TabSummaryDto;
+    use crate::api_protocol::{TabKind, TabSummaryDto};
     let (kind, cols, rows, title) = match &tab.kind {
         TerminalTabKind::Terminal { terminal, .. } => {
             let term = terminal.read(cx);
             let (cols, rows) = term.grid_dimensions();
-            ("terminal", cols, rows, term.tab_title())
+            (TabKind::Terminal, cols, rows, term.tab_title())
         }
         TerminalTabKind::Snapshot { snapshot } => {
-            ("snapshot", 0u16, 0u16, snapshot.read(cx).title())
+            (TabKind::Snapshot, 0u16, 0u16, snapshot.read(cx).title())
         }
     };
     TabSummaryDto { id: tab.api_id(), title, kind, cols, rows }
@@ -518,7 +518,7 @@ fn build_tab_detail(
     tab: &TerminalTab,
     cx: &mut Context<TerminalTabs>,
 ) -> crate::api_protocol::TabDetailDto {
-    use crate::api_protocol::TabDetailDto;
+    use crate::api_protocol::{TabDetailDto, TabKind};
     match &tab.kind {
         TerminalTabKind::Terminal { terminal, .. } => {
             let term = terminal.read(cx);
@@ -527,7 +527,7 @@ fn build_tab_detail(
             TabDetailDto {
                 id: tab.api_id(),
                 title: term.tab_title(),
-                kind: "terminal",
+                kind: TabKind::Terminal,
                 cols,
                 rows,
                 cursor_row: snap.cursor_row,
@@ -544,7 +544,7 @@ fn build_tab_detail(
             TabDetailDto {
                 id: tab.api_id(),
                 title: snap.title(),
-                kind: "snapshot",
+                kind: TabKind::Snapshot,
                 cols: 0,
                 rows: 0,
                 cursor_row: 0,
@@ -575,21 +575,17 @@ impl Render for TerminalTabs {
         if !self.pending_create_requests.is_empty() {
             let replies = std::mem::take(&mut self.pending_create_requests);
             for reply in replies {
-                let new_id = self.open_new_tab(window, cx) as u64;
-                let title = self
+                self.open_new_tab(window, cx);
+                let summary = self
                     .tabs
                     .last()
-                    .and_then(TerminalTab::terminal)
-                    .map(|term| term.read(cx).tab_title())
-                    .unwrap_or_default();
-                let value = serde_json::json!({
-                    "id": new_id,
-                    "title": title,
-                    "kind": "terminal",
-                });
+                    .map(|tab| build_tab_summary(tab, cx))
+                    .expect("just-created tab must be present");
                 let _ = reply.send_blocking(crate::api_protocol::ApiReply::Ok {
                     status: 201,
-                    body: crate::api_protocol::ReplyBody::Json(value),
+                    body: crate::api_protocol::ReplyBody::Json(
+                        serde_json::to_value(summary).unwrap_or_else(|_| serde_json::json!({})),
+                    ),
                 });
             }
         }

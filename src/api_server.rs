@@ -180,9 +180,6 @@ fn render_reply(reply: ApiReply) -> Response<Cursor<Vec<u8>>> {
                 serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
             ),
             ReplyBody::Text(text) => text_response(status, "text/plain; charset=utf-8", text),
-            ReplyBody::Empty => {
-                Response::from_data(Vec::<u8>::new()).with_status_code(StatusCode(status))
-            }
         },
         ApiReply::Err { status, error } => error_response(status, &error),
     }

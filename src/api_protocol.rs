@@ -31,7 +31,6 @@ pub(crate) enum ApiReply {
 pub(crate) enum ReplyBody {
     Json(serde_json::Value),
     Text(String),
-    Empty,
 }
 
 #[derive(Debug)]
@@ -42,6 +41,13 @@ pub(crate) enum RouteOutcome {
 
 pub(crate) fn oneshot() -> (Sender<ApiReply>, Receiver<ApiReply>) {
     bounded(1)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TabKind {
+    Terminal,
+    Snapshot,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -58,7 +64,7 @@ pub(crate) struct ApiCounters {
 pub(crate) struct TabSummaryDto {
     pub(crate) id: u64,
     pub(crate) title: String,
-    pub(crate) kind: &'static str,
+    pub(crate) kind: TabKind,
     pub(crate) cols: u16,
     pub(crate) rows: u16,
 }
@@ -67,7 +73,7 @@ pub(crate) struct TabSummaryDto {
 pub(crate) struct TabDetailDto {
     pub(crate) id: u64,
     pub(crate) title: String,
-    pub(crate) kind: &'static str,
+    pub(crate) kind: TabKind,
     pub(crate) cols: u16,
     pub(crate) rows: u16,
     pub(crate) cursor_row: usize,

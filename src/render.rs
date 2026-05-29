@@ -151,21 +151,6 @@ impl Render for AgentTerminal {
         let focused = self.focus_handle.is_focused(window);
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
-        let runtime = self.debug.snapshot();
-        let status = format!(
-            "{} | {}x{} | in:{} out:{} key:{} inj:{} req:{} resize:{} up:{}s",
-            runtime.status,
-            runtime.grid_size.cols,
-            runtime.grid_size.rows,
-            runtime.counters.bytes_from_pty,
-            runtime.counters.bytes_to_pty,
-            runtime.counters.key_events,
-            runtime.counters.injected_events,
-            runtime.counters.http_requests,
-            runtime.counters.resize_events,
-            runtime.uptime_ms / 1000,
-        );
-        let note = runtime.note;
         let shell = self.shell.clone();
         let font_size = self.font_size;
         let line_height = self.line_height();
@@ -182,11 +167,28 @@ impl Render for AgentTerminal {
         let canvas_font_fallbacks = self.font_fallbacks.clone();
         let canvas_bounds_shared = self.canvas_bounds.clone();
 
-        let status_line = if let Some(note) = note {
-            format!("agent terminal | {} | {} | note: {}", shell, status, note)
-        } else {
-            format!("agent terminal | {} | {}", shell, status)
-        };
+        // The status bar is the only consumer of runtime.snapshot(); when it's
+        // hidden we skip the lock + per-frame clone entirely.
+        let status_line = self.show_status_bar.then(|| {
+            let runtime = self.debug.snapshot();
+            let status = format!(
+                "{} | {}x{} | in:{} out:{} key:{} inj:{} req:{} resize:{} up:{}s",
+                runtime.status,
+                runtime.grid_size.cols,
+                runtime.grid_size.rows,
+                runtime.counters.bytes_from_pty,
+                runtime.counters.bytes_to_pty,
+                runtime.counters.key_events,
+                runtime.counters.injected_events,
+                runtime.counters.http_requests,
+                runtime.counters.resize_events,
+                runtime.uptime_ms / 1000,
+            );
+            match runtime.note {
+                Some(note) => format!("agent terminal | {} | {} | note: {}", shell, status, note),
+                None => format!("agent terminal | {} | {}", shell, status),
+            }
+        });
 
         let terminal_surface = div()
             .size_full()
@@ -494,7 +496,7 @@ impl Render for AgentTerminal {
             root
         };
 
-        let root = if self.show_status_bar {
+        let root = if let Some(status_line) = status_line {
             root.child(
                 div()
                     .w_full()
