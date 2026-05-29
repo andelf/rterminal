@@ -111,6 +111,64 @@ curl -sX POST --data 'C-c C-u' http://127.0.0.1:7878/tabs/active/keys
 curl -sX POST --data 'Up Up Up Enter' http://127.0.0.1:7878/tabs/active/keys
 ```
 
+### Drive any tab regardless of GUI focus
+
+Writes through `/tabs/:id/input` and `/tabs/:id/keys` go straight to the targeted tab's PTY — they do **not** require that tab to be the active/focused one. The GUI focus only routes the user's keyboard. This means an agent can drive several tabs in parallel without ever calling `/activate`:
+
+```bash
+# tab 5 keeps running cargo test in the "background";
+# meanwhile the user is interactively typing in some other tab
+curl -sX POST --data 'cargo test --release' http://127.0.0.1:7878/tabs/5/input
+curl -sX POST --data 'Enter' http://127.0.0.1:7878/tabs/5/keys
+# later, when you want output:
+curl -s http://127.0.0.1:7878/tabs/5/screen
+```
+
+Reach for `/activate` only when the *user* needs to see the tab — never as a prerequisite for writing to it.
+
+### Drive a TUI program (vim, less, htop, lazygit, …)
+
+TUI programs read directly from the PTY, just like a shell. The same `/input` and `/keys` work:
+
+```bash
+# Open vim on a file in tab 3
+curl -sX POST --data 'vim /tmp/notes.md' http://127.0.0.1:7878/tabs/3/input
+curl -sX POST --data 'Enter' http://127.0.0.1:7878/tabs/3/keys
+sleep 1  # let vim paint
+
+# Enter insert mode, type content, leave insert mode, save+quit
+curl -sX POST --data 'i' http://127.0.0.1:7878/tabs/3/keys
+curl -sX POST --data 'first line of text' http://127.0.0.1:7878/tabs/3/input
+curl -sX POST --data 'Enter' http://127.0.0.1:7878/tabs/3/keys
+curl -sX POST --data 'second line' http://127.0.0.1:7878/tabs/3/input
+curl -sX POST --data 'Escape' http://127.0.0.1:7878/tabs/3/keys
+curl -sX POST --data ':wq' http://127.0.0.1:7878/tabs/3/input
+curl -sX POST --data 'Enter' http://127.0.0.1:7878/tabs/3/keys
+```
+
+Use `GET /screen` between steps to verify the program's state — vim shows `-- INSERT --` on the status line, `less` shows a `:` prompt at the bottom, htop has its header. Greppable enough to confirm "we're in the expected mode" before sending the next keystroke.
+
+### Set a custom tab title
+
+The tab `title` field updates whenever the PTY emits an OSC 0 escape (`ESC ] 0 ; TITLE BEL`). Send the sequence as output from the shell:
+
+```bash
+# Sets the title to "agent:test-run-1" for tab 3
+curl -sX POST --data $'printf \'\\e]0;agent:test-run-1\\a\'' \
+  http://127.0.0.1:7878/tabs/3/input
+curl -sX POST --data 'Enter' http://127.0.0.1:7878/tabs/3/keys
+```
+
+**Pitfall — oh-my-zsh overrides titles on every prompt redraw.** OMZ's `precmd` hook resets the title to `user@host:cwd` after every command. Disable it first if you want your title to stick:
+
+```bash
+curl -sX POST --data 'DISABLE_AUTO_TITLE=true' http://127.0.0.1:7878/tabs/3/input
+curl -sX POST --data 'Enter' http://127.0.0.1:7878/tabs/3/keys
+# now subsequent OSC 0 writes are persistent
+```
+
+This is useful for marking agent-owned tabs so the human can see at a glance which tabs the agent is using.
+
 ### List + introspect tabs
 
 ```bash
@@ -188,6 +246,19 @@ Or do it all through `/keys` if the text has no special chars:
 ```bash
 curl -sX POST --data '"echo hi" Enter' http://127.0.0.1:7878/tabs/active/keys
 ```
+
+### Unicode / UTF-8
+
+Both endpoints are UTF-8 transparent — any well-formed UTF-8 (CJK characters, emoji, BMP-extension code points like 𗀀) passes through verbatim. The `/keys` parser only interprets `\"` and `\\` inside quoted literals; everything else is byte-for-byte.
+
+```bash
+# All four of these work and produce the same bytes in the file:
+curl -sX POST --data '你好，世界！🚀'                  $API/tabs/3/input
+curl -sX POST --data '"你好，世界！🚀" Enter'         $API/tabs/3/keys
+curl -sX POST --data 'Hello 你好 World 世界 1234 ５６' $API/tabs/3/input
+```
+
+**Display caveat — CJK characters render as double-width.** A character that's 3 UTF-8 bytes on disk takes 2 *columns* on screen. When you `GET /screen`, what looks like spaces between Chinese characters is rterminal's visual padding for the second column — the actual file content has no spaces there. Don't use the screen output as the source of truth for what was written; read the file (or use a `cat`-and-capture pattern) for byte-exact verification.
 
 ## Error handling
 
