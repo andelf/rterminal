@@ -114,9 +114,9 @@ Snapshot tabs return placeholder values: `cols=0`, `rows=0`, `cursor_row=0`, `cu
 
 Current visible screen content as plain text.
 
-**Response 200:** `Content-Type: text/plain; charset=utf-8`. The body is `cols`×`rows` characters joined by `\n`, with a trailing `\n`. Empty terminals return `"<empty screen>\n"`. Snapshot tabs return `"<snapshot tab>\n"`.
+**Response 200:** `Content-Type: text/plain; charset=utf-8`. Each row's trailing whitespace is stripped server-side — the grid pads every row to `cols`, but that padding has no semantic content. Rows are joined by `\n` with a final trailing `\n`. Empty terminals return `"<empty screen>\n"`. Snapshot tabs return `"<snapshot tab>\n"`.
 
-Whitespace is preserved as it sits in the grid — trailing spaces on each row are *not* stripped. Use `sed 's/ *$//'` if you want them gone.
+Inline whitespace within a row (e.g., spaces between aligned columns of a table) is preserved verbatim. Only run-of-spaces *at the end* of each row gets trimmed.
 
 **Error:** 404 if the id is unknown.
 

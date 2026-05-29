@@ -132,8 +132,23 @@ impl TabRuntimeState {
         if state.screen_lines.is_empty() {
             return "<empty screen>\n".to_string();
         }
-        let mut out = state.screen_lines.join("\n");
-        out.push('\n');
+        // Strip per-row trailing whitespace + drop any wholly-empty rows from
+        // the bottom. The grid pads every row to `cols`, and the unused rows
+        // below the last drawn line are layout padding with no semantic content.
+        // TUI apps that draw across the whole grid (vim with `~`, htop, less)
+        // leave non-empty content on every row, so this trim doesn't touch them.
+        let last_non_empty = state
+            .screen_lines
+            .iter()
+            .rposition(|line| !line.trim_end().is_empty());
+        let Some(last) = last_non_empty else {
+            return "<empty screen>\n".to_string();
+        };
+        let mut out = String::new();
+        for line in &state.screen_lines[..=last] {
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
         out
     }
 }
