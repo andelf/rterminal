@@ -55,6 +55,12 @@ pub(crate) struct CliOptions {
         help = "Treat macOS Option key as plain text input instead of Meta/Alt"
     )]
     pub(crate) no_option_as_meta: bool,
+    #[arg(
+        long,
+        default_value = "127.0.0.1:7878",
+        help = "Address to bind the agent control HTTP API on (host:port)"
+    )]
+    pub(crate) api_addr: String,
 }
 
 #[cfg(test)]
@@ -213,5 +219,20 @@ mod tests {
             cli.double_width_chars,
             vec!["↑".to_string(), "↓".to_string(), "↕".to_string()]
         );
+    }
+
+    #[test]
+    fn api_addr_defaults_to_loopback() {
+        let cli = parse_cli_options_from(Vec::<String>::new());
+        assert_eq!(cli.api_addr, "127.0.0.1:7878");
+    }
+
+    #[test]
+    fn api_addr_accepts_override() {
+        let cli = parse_cli_options_from(vec![
+            "--api-addr".to_string(),
+            "127.0.0.1:9000".to_string(),
+        ]);
+        assert_eq!(cli.api_addr, "127.0.0.1:9000");
     }
 }
