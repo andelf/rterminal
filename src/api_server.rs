@@ -1,6 +1,6 @@
 use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, RouteOutcome, TabSelector, oneshot};
 use async_channel::Sender;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::thread;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
