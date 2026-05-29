@@ -67,6 +67,12 @@ fn main() {
         return;
     }
 
+    let (api_tx, api_rx) = async_channel::unbounded::<crate::api_protocol::ApiCommand>();
+    if let Err(err) = crate::api_server::start_api_server(&cli.api_addr, api_tx) {
+        eprintln!("failed to start api server on {}: {err:#}", cli.api_addr);
+        std::process::exit(1);
+    }
+
     application().run(move |cx: &mut App| {
         cx.on_action(|_: &QuitApp, cx: &mut App| cx.quit());
         cx.bind_keys([
@@ -107,6 +113,7 @@ fn main() {
 
         let bounds = Bounds::centered(None, size(px(1000.0), px(520.0)), cx);
         let cli = cli.clone();
+        let api_rx = api_rx.clone();
         cx.open_window(
             WindowOptions {
                 focus: true,
@@ -120,7 +127,8 @@ fn main() {
             },
             move |window, cx| {
                 let cli = cli.clone();
-                cx.new(|cx| TerminalTabs::new(window, cx, cli))
+                let api_rx = api_rx.clone();
+                cx.new(|cx| TerminalTabs::new(window, cx, cli, api_rx))
             },
         )
         .expect("failed to open window");

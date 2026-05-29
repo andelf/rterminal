@@ -1,6 +1,6 @@
 use gpui::{
-    Context, Entity, MouseButton, Render, Subscription, Window, WindowControlArea, div, prelude::*,
-    px, rgb,
+    Context, Entity, MouseButton, Render, Subscription, Task, Window, WindowControlArea, div,
+    prelude::*, px, rgb,
 };
 
 use crate::cli::CliOptions;
@@ -80,10 +80,22 @@ pub(crate) struct TerminalTabs {
     next_tab_id: usize,
     next_snapshot_id: usize,
     pending_focus_sync: bool,
+    _api_drain: Task<()>,
 }
 
 impl TerminalTabs {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>, cli: CliOptions) -> Self {
+    pub(crate) fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        cli: CliOptions,
+        api_rx: async_channel::Receiver<crate::api_protocol::ApiCommand>,
+    ) -> Self {
+        let api_drain = cx.spawn(async move |this, cx| {
+            while let Ok(cmd) = api_rx.recv().await {
+                let _ = this.update(cx, |this, cx| this.apply_api_command(cmd, cx));
+            }
+        });
+
         let mut this = Self {
             cli,
             tabs: Vec::new(),
@@ -91,6 +103,7 @@ impl TerminalTabs {
             next_tab_id: 1,
             next_snapshot_id: 1,
             pending_focus_sync: false,
+            _api_drain: api_drain,
         };
 
         this.open_new_tab(window, cx);
@@ -287,6 +300,29 @@ impl TerminalTabs {
         (on_switch_to_tab9, crate::SwitchToTab9, 8),
         (on_switch_to_tab10, crate::SwitchToTab10, 9),
     );
+
+    fn apply_api_command(
+        &mut self,
+        cmd: crate::api_protocol::ApiCommand,
+        _cx: &mut Context<Self>,
+    ) {
+        use crate::api_protocol::{ApiCommand, ApiReply};
+        let err = ApiReply::Err { status: 501, error: "not yet implemented".to_string() };
+        match cmd {
+            ApiCommand::ListTabs { reply }
+            | ApiCommand::CreateTab { reply }
+            | ApiCommand::CloseTab { reply, .. }
+            | ApiCommand::ActivateTab { reply, .. }
+            | ApiCommand::GetTab { reply, .. }
+            | ApiCommand::GetScreen { reply, .. }
+            | ApiCommand::WriteInput { reply, .. }
+            | ApiCommand::SendKeys { reply, .. }
+            | ApiCommand::SetNote { reply, .. }
+            | ApiCommand::ReplaceLine { reply, .. } => {
+                let _ = reply.send_blocking(err);
+            }
+        }
+    }
 }
 
 impl Render for TerminalTabs {
