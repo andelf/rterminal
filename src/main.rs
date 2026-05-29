@@ -2,6 +2,7 @@
 
 mod api_keys;
 mod api_protocol;
+mod api_server;
 mod cli;
 mod color;
 mod debug_server;
