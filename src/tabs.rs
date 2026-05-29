@@ -27,6 +27,10 @@ struct TerminalTab {
 }
 
 impl TerminalTab {
+    fn api_id(&self) -> u64 {
+        self.id as u64
+    }
+
     fn title(&self, cx: &mut Context<TerminalTabs>) -> String {
         let raw_title = match &self.kind {
             TerminalTabKind::Terminal { terminal, .. } => terminal.read(cx).tab_title(),
@@ -80,6 +84,7 @@ pub(crate) struct TerminalTabs {
     next_tab_id: usize,
     next_snapshot_id: usize,
     pending_focus_sync: bool,
+    pending_create_requests: Vec<async_channel::Sender<crate::api_protocol::ApiReply>>,
     _api_drain: Task<()>,
 }
 
@@ -103,6 +108,7 @@ impl TerminalTabs {
             next_tab_id: 1,
             next_snapshot_id: 1,
             pending_focus_sync: false,
+            pending_create_requests: Vec::new(),
             _api_drain: api_drain,
         };
 
@@ -110,7 +116,7 @@ impl TerminalTabs {
         this
     }
 
-    fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> usize {
         let terminal = cx.new(|cx| AgentTerminal::new_embedded(window, cx, self.cli.clone()));
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -132,6 +138,7 @@ impl TerminalTabs {
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.request_focus_active_tab(window, cx);
         cx.notify();
+        tab_id
     }
 
     fn open_snapshot_tab_from_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -301,32 +308,263 @@ impl TerminalTabs {
         (on_switch_to_tab10, crate::SwitchToTab10, 9),
     );
 
-    fn apply_api_command(
-        &mut self,
-        cmd: crate::api_protocol::ApiCommand,
-        _cx: &mut Context<Self>,
-    ) {
-        use crate::api_protocol::{ApiCommand, ApiReply};
-        let err = ApiReply::Err { status: 501, error: "not yet implemented".to_string() };
+    fn apply_api_command(&mut self, cmd: crate::api_protocol::ApiCommand, cx: &mut Context<Self>) {
+        use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, TabSummaryDto};
+
         match cmd {
-            ApiCommand::ListTabs { reply }
-            | ApiCommand::CreateTab { reply }
-            | ApiCommand::CloseTab { reply, .. }
-            | ApiCommand::ActivateTab { reply, .. }
-            | ApiCommand::GetTab { reply, .. }
-            | ApiCommand::GetScreen { reply, .. }
-            | ApiCommand::WriteInput { reply, .. }
-            | ApiCommand::SendKeys { reply, .. }
-            | ApiCommand::SetNote { reply, .. }
-            | ApiCommand::ReplaceLine { reply, .. } => {
-                let _ = reply.send_blocking(err);
+            ApiCommand::ListTabs { reply } => {
+                let tabs: Vec<TabSummaryDto> = self
+                    .tabs
+                    .iter()
+                    .map(|tab| build_tab_summary(tab, cx))
+                    .collect();
+                let active = self.tabs.get(self.active_tab).map(|t| t.api_id());
+                let value = serde_json::json!({ "active": active, "tabs": tabs });
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(value),
+                });
+            }
+
+            ApiCommand::CreateTab { reply } => {
+                // Defer until next render where we have &mut Window.
+                self.pending_create_requests.push(reply);
+                cx.notify();
+            }
+
+            ApiCommand::CloseTab { id, reply } => {
+                let Some((index, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let closed_id = tab.api_id();
+                let _ = tab;
+                self.close_tab_at_index(index, cx);
+                self.pending_focus_sync = true;
+                cx.notify();
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({ "closed": closed_id })),
+                });
+            }
+
+            ApiCommand::ActivateTab { id, reply } => {
+                let Some((index, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let new_id = tab.api_id();
+                let _ = tab;
+                self.active_tab = index;
+                self.pending_focus_sync = true;
+                cx.notify();
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({ "active": new_id })),
+                });
+            }
+
+            ApiCommand::GetTab { id, reply } => {
+                let Some((_, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let detail = build_tab_detail(tab, cx);
+                let value = serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(value),
+                });
+            }
+
+            ApiCommand::GetScreen { id, reply } => {
+                let Some((_, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let text = match &tab.kind {
+                    TerminalTabKind::Terminal { terminal, .. } => terminal.read(cx).screen_text(),
+                    TerminalTabKind::Snapshot { .. } => "<snapshot tab>\n".to_string(),
+                };
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Text(text),
+                });
+            }
+
+            ApiCommand::WriteInput { id, bytes, reply } => {
+                self.with_terminal_write(id, &reply, cx, move |term| term.write_injected(&bytes));
+            }
+
+            ApiCommand::SendKeys { id, body, reply } => {
+                match crate::api_keys::parse_keys(&body) {
+                    Ok(bytes) => {
+                        self.with_terminal_write(id, &reply, cx, move |term| {
+                            term.write_injected(&bytes)
+                        });
+                    }
+                    Err(err) => reply_err(&reply, 400, &err),
+                }
+            }
+
+            ApiCommand::SetNote { id, note, reply } => {
+                let Some((_, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                match &tab.kind {
+                    TerminalTabKind::Terminal { terminal, .. } => {
+                        terminal.read(cx).set_note(note.clone());
+                        let _ = reply.send_blocking(ApiReply::Ok {
+                            status: 200,
+                            body: ReplyBody::Json(serde_json::json!({ "note": note })),
+                        });
+                    }
+                    TerminalTabKind::Snapshot { .. } => {
+                        reply_err(&reply, 409, "cannot set note on snapshot tab");
+                    }
+                }
+            }
+
+            ApiCommand::ReplaceLine { id, bytes, reply } => {
+                self.with_terminal_write(id, &reply, cx, move |term| {
+                    term.replace_line_injected(&bytes)
+                });
+            }
+        }
+    }
+
+    fn resolve_tab(
+        &self,
+        selector: crate::api_protocol::TabSelector,
+    ) -> Option<(usize, &TerminalTab)> {
+        use crate::api_protocol::TabSelector;
+        let index = match selector {
+            TabSelector::Active => self.active_tab,
+            TabSelector::Id(id) => self.tabs.iter().position(|tab| tab.api_id() == id)?,
+        };
+        self.tabs.get(index).map(|t| (index, t))
+    }
+
+    fn with_terminal_write<F>(
+        &mut self,
+        selector: crate::api_protocol::TabSelector,
+        reply: &async_channel::Sender<crate::api_protocol::ApiReply>,
+        cx: &mut Context<Self>,
+        op: F,
+    ) where
+        F: FnOnce(&mut AgentTerminal) -> Result<usize, String>,
+    {
+        use crate::api_protocol::{ApiReply, ReplyBody};
+        let Some((_, tab)) = self.resolve_tab(selector) else {
+            return reply_err(reply, 404, "unknown tab");
+        };
+        let terminal = match &tab.kind {
+            TerminalTabKind::Terminal { terminal, .. } => terminal.clone(),
+            TerminalTabKind::Snapshot { .. } => {
+                return reply_err(reply, 409, "cannot write to snapshot tab");
+            }
+        };
+        let result = terminal.update(cx, |term, _cx| op(term));
+        match result {
+            Ok(wrote) => {
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({ "wrote": wrote })),
+                });
+            }
+            Err(err) => reply_err(reply, 503, &err),
+        }
+    }
+}
+
+fn build_tab_summary(
+    tab: &TerminalTab,
+    cx: &mut Context<TerminalTabs>,
+) -> crate::api_protocol::TabSummaryDto {
+    use crate::api_protocol::TabSummaryDto;
+    let (kind, cols, rows, title) = match &tab.kind {
+        TerminalTabKind::Terminal { terminal, .. } => {
+            let term = terminal.read(cx);
+            let (cols, rows) = term.grid_dimensions();
+            ("terminal", cols, rows, term.tab_title())
+        }
+        TerminalTabKind::Snapshot { snapshot } => {
+            ("snapshot", 0u16, 0u16, snapshot.read(cx).title())
+        }
+    };
+    TabSummaryDto { id: tab.api_id(), title, kind, cols, rows }
+}
+
+fn build_tab_detail(
+    tab: &TerminalTab,
+    cx: &mut Context<TerminalTabs>,
+) -> crate::api_protocol::TabDetailDto {
+    use crate::api_protocol::TabDetailDto;
+    match &tab.kind {
+        TerminalTabKind::Terminal { terminal, .. } => {
+            let term = terminal.read(cx);
+            let snap = term.runtime_snapshot();
+            let (cols, rows) = term.grid_dimensions();
+            TabDetailDto {
+                id: tab.api_id(),
+                title: term.tab_title(),
+                kind: "terminal",
+                cols,
+                rows,
+                cursor_row: snap.cursor_row,
+                cursor_col: snap.cursor_col,
+                status: snap.status,
+                note: snap.note,
+                counters: snap.counters,
+                uptime_ms: snap.uptime_ms,
+                last_error: snap.last_error,
+            }
+        }
+        TerminalTabKind::Snapshot { snapshot } => {
+            let snap = snapshot.read(cx);
+            TabDetailDto {
+                id: tab.api_id(),
+                title: snap.title(),
+                kind: "snapshot",
+                cols: 0,
+                rows: 0,
+                cursor_row: 0,
+                cursor_col: 0,
+                status: "snapshot".to_string(),
+                note: None,
+                counters: Default::default(),
+                uptime_ms: 0,
+                last_error: None,
             }
         }
     }
 }
 
+fn reply_err(
+    reply: &async_channel::Sender<crate::api_protocol::ApiReply>,
+    status: u16,
+    error: &str,
+) {
+    let _ = reply.send_blocking(crate::api_protocol::ApiReply::Err {
+        status,
+        error: error.to_string(),
+    });
+}
+
 impl Render for TerminalTabs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.pending_create_requests.is_empty() {
+            let replies = std::mem::take(&mut self.pending_create_requests);
+            for reply in replies {
+                let new_id = self.open_new_tab(window, cx) as u64;
+                let value = serde_json::json!({
+                    "id": new_id,
+                    "title": "zsh",
+                    "kind": "terminal",
+                });
+                let _ = reply.send_blocking(crate::api_protocol::ApiReply::Ok {
+                    status: 201,
+                    body: crate::api_protocol::ReplyBody::Json(value),
+                });
+            }
+        }
+
         if self.pending_focus_sync {
             self.pending_focus_sync = false;
             self.request_focus_active_tab(window, cx);

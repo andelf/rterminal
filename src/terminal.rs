@@ -742,6 +742,38 @@ impl AgentTerminal {
             .unwrap_or_else(|| self.shell.clone())
     }
 
+    pub(crate) fn runtime_snapshot(&self) -> crate::tab_runtime::TabRuntimeSnapshot {
+        self.debug.snapshot()
+    }
+
+    pub(crate) fn screen_text(&self) -> String {
+        self.debug.screen_text()
+    }
+
+    pub(crate) fn set_note(&self, note: Option<String>) {
+        self.debug.set_note(note);
+    }
+
+    pub(crate) fn write_injected(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        let Some(writer) = &self.writer else {
+            return Err("pty writer unavailable".to_string());
+        };
+        crate::pty::write_to_pty(writer, bytes).map_err(|e| format!("write failed: {e:#}"))?;
+        self.debug.record_bytes_to_pty(bytes.len(), true);
+        Ok(bytes.len())
+    }
+
+    pub(crate) fn replace_line_injected(&mut self, suffix: &[u8]) -> Result<usize, String> {
+        let mut payload = Vec::with_capacity(suffix.len() + 1);
+        payload.push(0x15);
+        payload.extend_from_slice(suffix);
+        self.write_injected(&payload)
+    }
+
+    pub(crate) fn grid_dimensions(&self) -> (u16, u16) {
+        (self.grid_size.cols, self.grid_size.rows)
+    }
+
     pub(crate) fn capture_snapshot_data(&self, title: String) -> SnapshotTabData {
         let grid = self.term.grid();
         let colors = self.term.colors();
