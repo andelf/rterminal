@@ -1,5 +1,6 @@
 #![allow(unexpected_cfgs)]
 
+mod api_keys;
 mod api_protocol;
 mod cli;
 mod color;
