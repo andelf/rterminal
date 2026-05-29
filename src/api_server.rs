@@ -1,7 +1,8 @@
-#[allow(unused_imports)]
 use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, RouteOutcome, TabSelector, oneshot};
-#[allow(unused_imports)]
-use async_channel::Receiver;
+use async_channel::Sender;
+use std::io::{Cursor, Read};
+use std::thread;
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 #[derive(Debug)]
 pub(crate) struct RouteError {
@@ -117,6 +118,91 @@ fn legacy_help_text() -> String {
         "",
     ]
     .join("\n")
+}
+
+pub(crate) fn start_api_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> std::io::Result<()> {
+    let server = Server::http(addr).map_err(|err| {
+        std::io::Error::new(std::io::ErrorKind::AddrInUse, format!("bind {addr}: {err}"))
+    })?;
+    let addr_owned = addr.to_string();
+    thread::Builder::new()
+        .name("agent-api-http".to_string())
+        .spawn(move || serve(server, cmd_tx, addr_owned))?;
+    Ok(())
+}
+
+fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
+    eprintln!("agent api listening on http://{addr}");
+    for mut request in server.incoming_requests() {
+        let method = method_str(request.method()).to_string();
+        let path = request.url().split('?').next().unwrap_or("/").to_string();
+        let mut body = Vec::new();
+        if let Err(err) = request.as_reader().read_to_end(&mut body) {
+            let _ = request.respond(error_response(400, &format!("read body: {err}")));
+            continue;
+        }
+        let response = match parse_request(&method, &path, body) {
+            Ok(RouteOutcome::Immediate { status, content_type, body }) => {
+                text_response(status, content_type, body)
+            }
+            Ok(RouteOutcome::Command(cmd, rx)) => match cmd_tx.send_blocking(cmd) {
+                Ok(()) => match rx.recv_blocking() {
+                    Ok(reply) => render_reply(reply),
+                    Err(_) => error_response(504, "command channel closed"),
+                },
+                Err(_) => error_response(503, "command channel closed"),
+            },
+            Err(err) => error_response(err.status, &err.message),
+        };
+        if let Err(err) = request.respond(response) {
+            eprintln!("agent api: failed to send response: {err}");
+        }
+    }
+}
+
+fn method_str(m: &Method) -> &'static str {
+    match m {
+        Method::Get => "GET",
+        Method::Post => "POST",
+        Method::Put => "PUT",
+        Method::Delete => "DELETE",
+        Method::Patch => "PATCH",
+        _ => "OTHER",
+    }
+}
+
+fn render_reply(reply: ApiReply) -> Response<Cursor<Vec<u8>>> {
+    match reply {
+        ApiReply::Ok { status, body } => match body {
+            ReplyBody::Json(value) => text_response(
+                status,
+                "application/json; charset=utf-8",
+                serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
+            ),
+            ReplyBody::Text(text) => text_response(status, "text/plain; charset=utf-8", text),
+            ReplyBody::Empty => {
+                Response::from_data(Vec::<u8>::new()).with_status_code(StatusCode(status))
+            }
+        },
+        ApiReply::Err { status, error } => error_response(status, &error),
+    }
+}
+
+fn text_response(
+    status: u16,
+    content_type: &str,
+    body: impl Into<Vec<u8>>,
+) -> Response<Cursor<Vec<u8>>> {
+    let mut resp = Response::from_data(body.into()).with_status_code(StatusCode(status));
+    if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
+        resp = resp.with_header(header);
+    }
+    resp
+}
+
+fn error_response(status: u16, message: &str) -> Response<Cursor<Vec<u8>>> {
+    let body = serde_json::json!({ "error": message }).to_string();
+    text_response(status, "application/json; charset=utf-8", body)
 }
 
 #[cfg(test)]
@@ -269,5 +355,96 @@ mod tests {
     fn bad_id_returns_400() {
         let err = parse_request("GET", "/tabs/notanumber", Vec::new()).unwrap_err();
         assert_eq!(err.status, 400);
+    }
+
+    use crate::api_protocol::{ApiReply, ReplyBody};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    fn reserve_local_addr() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener);
+        addr.to_string()
+    }
+
+    fn wait_for_server(addr: &str) {
+        for _ in 0..40 {
+            if TcpStream::connect(addr).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("server did not start: {addr}");
+    }
+
+    fn send_http(addr: &str, request: &str) -> String {
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        stream.write_all(request.as_bytes()).expect("write");
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read");
+        response
+    }
+
+    #[test]
+    fn server_round_trip_get_tabs_via_fake_handler() {
+        let addr = reserve_local_addr();
+        let (cmd_tx, cmd_rx) = async_channel::unbounded::<ApiCommand>();
+
+        std::thread::spawn(move || {
+            while let Ok(cmd) = cmd_rx.recv_blocking() {
+                if let ApiCommand::ListTabs { reply } = cmd {
+                    let body = serde_json::json!({
+                        "active": 1,
+                        "tabs": [{"id":1,"title":"zsh","kind":"terminal","cols":80,"rows":24}],
+                    });
+                    let _ = reply.send_blocking(ApiReply::Ok {
+                        status: 200,
+                        body: ReplyBody::Json(body),
+                    });
+                }
+            }
+        });
+
+        start_api_server(&addr, cmd_tx).expect("server starts");
+        wait_for_server(&addr);
+
+        let response = send_http(
+            &addr,
+            &format!("GET /tabs HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(response.contains("200 OK"), "response: {response}");
+        assert!(response.contains("\"active\":1"), "response: {response}");
+    }
+
+    #[test]
+    fn server_returns_404_for_unknown_route() {
+        let addr = reserve_local_addr();
+        let (cmd_tx, _cmd_rx) = async_channel::unbounded::<ApiCommand>();
+        start_api_server(&addr, cmd_tx).expect("server starts");
+        wait_for_server(&addr);
+
+        let response = send_http(
+            &addr,
+            &format!("GET /nope HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(response.contains("404"), "response: {response}");
+    }
+
+    #[test]
+    fn server_serves_immediate_help_for_debug_root() {
+        let addr = reserve_local_addr();
+        let (cmd_tx, _cmd_rx) = async_channel::unbounded::<ApiCommand>();
+        start_api_server(&addr, cmd_tx).expect("server starts");
+        wait_for_server(&addr);
+
+        let response = send_http(
+            &addr,
+            &format!("GET /debug HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(response.contains("200 OK"), "response: {response}");
+        assert!(response.contains("/tabs"), "response: {response}");
     }
 }
