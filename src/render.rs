@@ -151,11 +151,24 @@ impl Render for AgentTerminal {
         let focused = self.focus_handle.is_focused(window);
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
-        let status = self.debug.status_summary();
+        let runtime = self.debug.snapshot();
+        let status = format!(
+            "{} | {}x{} | in:{} out:{} key:{} inj:{} req:{} resize:{} up:{}s",
+            runtime.status,
+            runtime.grid_size.cols,
+            runtime.grid_size.rows,
+            runtime.counters.bytes_from_pty,
+            runtime.counters.bytes_to_pty,
+            runtime.counters.key_events,
+            runtime.counters.injected_events,
+            runtime.counters.http_requests,
+            runtime.counters.resize_events,
+            runtime.uptime_ms / 1000,
+        );
+        let note = runtime.note;
         let shell = self.shell.clone();
         let font_size = self.font_size;
         let line_height = self.line_height();
-        let note = self.debug.note();
         let selection = self.selection_bounds();
         let palette = palette_for(self.theme);
         let terminal_title = self

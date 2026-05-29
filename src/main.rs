@@ -14,6 +14,7 @@ mod macos_ax;
 mod pty;
 mod render;
 mod snapshot_tab;
+mod tab_runtime;
 mod tabs;
 mod terminal;
 mod text_utils;

@@ -364,6 +364,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    #[ignore = "replaced by api_server; debug_server.rs is removed in T9"]
     fn debug_http_serves_state_and_note() {
         let addr = reserve_local_addr();
         let debug = SharedDebugState::new(
@@ -401,6 +402,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "replaced by api_server; debug_server.rs is removed in T9"]
     fn debug_http_injects_input_to_writer() {
         let addr = reserve_local_addr();
         let debug = SharedDebugState::new(
@@ -436,6 +438,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "replaced by api_server; debug_server.rs is removed in T9"]
     fn debug_http_replaces_input_line_in_writer() {
         let addr = reserve_local_addr();
         let debug = SharedDebugState::new(

@@ -25,7 +25,7 @@ use serde_json::json;
 use crate::cli::{AmbiguousWidth, CliOptions, Theme};
 use crate::color::indexed_to_rgb;
 use crate::color::{ansi_bg_to_hsla, ansi_to_hsla};
-use crate::debug_server::{SharedDebugState, start_debug_http_server};
+use crate::tab_runtime::TabRuntimeState;
 use crate::history_log::HistoryLogger;
 use crate::input_log::InputLogger;
 use crate::keyboard::encode_keystroke;
@@ -237,7 +237,7 @@ pub(crate) struct AgentTerminal {
     pub(crate) canvas_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     pub(crate) paste_guard_prompt_open: bool,
     pub(crate) shell_exited: bool,
-    pub(crate) debug: SharedDebugState,
+    pub(crate) debug: TabRuntimeState,
     pending_term_events: Arc<Mutex<Vec<PendingTerminalEvent>>>,
     pub(crate) _window_bounds_sub: Option<Subscription>,
     pub(crate) _focus_in_sub: Option<Subscription>,
@@ -293,7 +293,7 @@ impl AgentTerminal {
                 Ok(session) => {
                     let shell = session.shell.clone();
                     let debug =
-                        SharedDebugState::new(shell.clone(), "connected".to_string(), grid_size);
+                        TabRuntimeState::new(shell.clone(), "connected".to_string(), grid_size);
                     (
                         shell,
                         Some(session.master),
@@ -306,7 +306,7 @@ impl AgentTerminal {
                 Err(err) => {
                     let message = format!("failed to start shell: {err:#}");
                     let debug =
-                        SharedDebugState::new("<none>".to_string(), message.clone(), grid_size);
+                        TabRuntimeState::new("<none>".to_string(), message.clone(), grid_size);
                     debug.set_error(message);
                     (String::from("<none>"), None, None, None, None, debug)
                 }
@@ -326,7 +326,6 @@ impl AgentTerminal {
         );
         let processor = Processor::<StdSyncHandler>::new();
 
-        start_debug_http_server(debug.clone(), writer.clone());
         let input_logger = match cli.input_log_file.as_ref() {
             Some(path) => match InputLogger::new(path, cli.input_log_raw) {
                 Ok(logger) => {
