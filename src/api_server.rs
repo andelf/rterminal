@@ -124,10 +124,13 @@ pub(crate) fn start_api_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> std::i
     let server = Server::http(addr).map_err(|err| {
         std::io::Error::new(std::io::ErrorKind::AddrInUse, format!("bind {addr}: {err}"))
     })?;
-    let addr_owned = addr.to_string();
+    // Resolve the OS-assigned port when the caller passed `:0`, and round-trip
+    // hostnames into their concrete socket address. The user-facing log should
+    // always be reachable as-is.
+    let bound = server.server_addr().to_string();
     thread::Builder::new()
         .name("agent-api-http".to_string())
-        .spawn(move || serve(server, cmd_tx, addr_owned))?;
+        .spawn(move || serve(server, cmd_tx, bound))?;
     Ok(())
 }
 
