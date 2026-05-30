@@ -1214,7 +1214,21 @@ pub(crate) fn snapshot_to_lines(snapshot: &ScreenSnapshot) -> Vec<String> {
         .cells
         .iter()
         .map(|row| {
-            let line: String = row.iter().map(|cell| cell.ch).collect();
+            // Wide characters (CJK, full-width emoji) occupy two grid cells:
+            // the character lives in the first, the second is a placeholder
+            // spacer left at its default ' '. Including the spacer would make
+            // `你好` come out as `你 好`. Skip the cell that follows any cell
+            // marked `spans_next_col`.
+            let mut line = String::new();
+            let mut skip_next = false;
+            for cell in row {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                line.push(cell.ch);
+                skip_next = cell.spans_next_col;
+            }
             line.trim_end().to_string()
         })
         .collect()
