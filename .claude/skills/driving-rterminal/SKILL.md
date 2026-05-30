@@ -258,7 +258,7 @@ curl -sX POST --data '"你好，世界！🚀" Enter'         $API/tabs/3/keys
 curl -sX POST --data 'Hello 你好 World 世界 1234 ５６' $API/tabs/3/input
 ```
 
-**Display caveat — CJK characters render as double-width.** A character that's 3 UTF-8 bytes on disk takes 2 *columns* on screen. When you `GET /screen`, what looks like spaces between Chinese characters is rterminal's visual padding for the second column — the actual file content has no spaces there. Don't use the screen output as the source of truth for what was written; read the file (or use a `cat`-and-capture pattern) for byte-exact verification.
+**Screen rendering note — wide characters are reported without their grid spacer.** CJK and full-width emoji each occupy two columns in the grid, but `GET /screen` strips the spacer cell so `你好` reads as `你好`, not `你 好`. Inline whitespace you sent yourself is preserved verbatim.
 
 ## Error handling
 
