@@ -120,6 +120,49 @@ Inline whitespace within a row (e.g., spaces between aligned columns of a table)
 
 **Error:** 404 if the id is unknown.
 
+### `GET /tabs/:id/scrollback`
+
+Plain text dump of the tab's grid history plus the current viewport.
+
+**Query params:**
+- `lines=N` — return the last N **content** rows (rows that have actual text, not the empty padding the grid keeps below the last drawn line). Default = all retained history. Hard cap = 10000 rows server-side to bound response size.
+
+**Response 200:** `Content-Type: text/plain; charset=utf-8`. Rows from oldest to newest, joined by `\n` with a trailing `\n`. Per-row trailing whitespace is stripped and wide-char spacer cells are skipped, matching `/screen`'s semantics. Empty tabs return `"<empty scrollback>\n"`.
+
+**Errors:**
+- 400 if `lines` is non-numeric
+- 404 unknown tab id
+- 409 if the target is a snapshot tab (snapshots have no scrollback)
+
+Reading scrollback is **read-only** — it does not move the viewport. The shell user still sees the live tail. Use this when you need to ingest output longer than the visible screen without disturbing the human.
+
+## Viewport scroll
+
+### `POST /tabs/:id/scroll`
+
+Move the visible viewport up/down through history.
+
+**Request body:** `application/json`
+```json
+{"action": "up|down|page_up|page_down|top|bottom", "lines": 5}
+```
+
+`lines` is only used by `up` and `down` (default 1); other actions ignore it. The six actions map to `alacritty_terminal::grid::Scroll::{Delta(+N), Delta(-N), PageUp, PageDown, Top, Bottom}`.
+
+**Response 200:**
+```json
+{"display_offset": 25}
+```
+
+`display_offset` is the new viewport position: `0` means the live tail (most recent content), positive integers mean the viewport has been scrolled up by that many rows. Alacritty clamps the offset to the available history range — over-scrolling silently stops at the boundary.
+
+**Errors:**
+- 400 if the body isn't valid JSON or the `action` value is unknown
+- 404 unknown tab id
+- 409 if the target is a snapshot tab
+
+After a scroll, subsequent `GET /tabs/:id/screen` returns the new viewport position; the GUI also reflects the change. Use `/scrollback` instead when you only want to *read* history without moving what the user sees.
+
 ## Input
 
 ### `POST /tabs/:id/input`
@@ -188,7 +231,6 @@ All error bodies have shape `{"error": "<message>"}` with `Content-Type: applica
 
 The spec acknowledges these gaps; if you hit one, work around it client-side or surface to the user:
 
-- **No scrollback** — only the visible viewport is returned by `/screen`. For long outputs, capture incrementally or redirect inside the shell.
 - **No resize endpoint** — grid size follows the GUI window.
 - **No rename endpoint** — but the shell can emit `\e]0;new title\a` (OSC 0) which rterminal honours and surfaces via `tab_title`.
 - **No streaming / SSE** — all reads are pull-based. Poll `/screen` or `counters.bytes_from_pty`.

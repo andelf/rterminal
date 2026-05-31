@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{ClipboardType, Config, TermMode};
@@ -774,6 +774,84 @@ impl AgentTerminal {
 
     pub(crate) fn grid_dimensions(&self) -> (u16, u16) {
         (self.grid_size.cols, self.grid_size.rows)
+    }
+
+    pub(crate) fn scroll_viewport(&mut self, action: crate::api_protocol::ScrollAction) -> usize {
+        use crate::api_protocol::ScrollAction;
+        let scroll = match action {
+            ScrollAction::Up(n) => Scroll::Delta(n as i32),
+            ScrollAction::Down(n) => Scroll::Delta(-(n as i32)),
+            ScrollAction::PageUp => Scroll::PageUp,
+            ScrollAction::PageDown => Scroll::PageDown,
+            ScrollAction::Top => Scroll::Top,
+            ScrollAction::Bottom => Scroll::Bottom,
+        };
+        self.term.scroll_display(scroll);
+        self.refresh_snapshot();
+        self.term.grid().display_offset()
+    }
+
+    /// Dump the last `max_lines` *content* rows of grid history + viewport as
+    /// plain text. Wide-char spacer cells are skipped; trailing empty rows
+    /// below the last drawn line are not counted toward the limit, so
+    /// `?lines=N` returns up to N meaningful rows even when the viewport has
+    /// empty padding at the bottom.
+    pub(crate) fn scrollback_text(&self, max_lines: Option<usize>) -> String {
+        const SCROLLBACK_HARD_CAP: usize = 10_000;
+        let want = max_lines.unwrap_or(SCROLLBACK_HARD_CAP).min(SCROLLBACK_HARD_CAP);
+        if want == 0 {
+            return "<empty scrollback>\n".to_string();
+        }
+
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let top = grid.topmost_line().0;
+        let bottom = grid.bottommost_line().0;
+
+        let row_text = |line_index: i32| -> String {
+            let mut s = String::new();
+            for col in 0..cols {
+                let cell = &grid[Line(line_index)][Column(col)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let ch = if cell.flags.contains(Flags::HIDDEN) {
+                    ' '
+                } else {
+                    cell.c
+                };
+                s.push(ch);
+            }
+            s
+        };
+
+        // Walk backward from the viewport bottom to find the last row with
+        // actual content. Beyond that point the grid is just empty padding
+        // waiting for future output; counting it would shrink the useful
+        // window the caller asked for.
+        let mut last_content = top - 1;
+        for line_index in (top..=bottom).rev() {
+            if !row_text(line_index).trim_end().is_empty() {
+                last_content = line_index;
+                break;
+            }
+        }
+        if last_content < top {
+            return "<empty scrollback>\n".to_string();
+        }
+        let available = (last_content - top + 1) as usize;
+        let start = if available > want {
+            last_content - want as i32 + 1
+        } else {
+            top
+        };
+
+        let mut out = String::new();
+        for line_index in start..=last_content {
+            out.push_str(row_text(line_index).trim_end());
+            out.push('\n');
+        }
+        out
     }
 
     pub(crate) fn capture_snapshot_data(&self, title: String) -> SnapshotTabData {

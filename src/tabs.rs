@@ -319,6 +319,8 @@ impl TerminalTabs {
             | ApiCommand::ActivateTab { id, .. }
             | ApiCommand::GetTab { id, .. }
             | ApiCommand::GetScreen { id, .. }
+            | ApiCommand::GetScrollback { id, .. }
+            | ApiCommand::ScrollDisplay { id, .. }
             | ApiCommand::WriteInput { id, .. }
             | ApiCommand::SendKeys { id, .. }
             | ApiCommand::SetNote { id, .. }
@@ -408,6 +410,42 @@ impl TerminalTabs {
                 let _ = reply.send_blocking(ApiReply::Ok {
                     status: 200,
                     body: ReplyBody::Text(text),
+                });
+            }
+
+            ApiCommand::GetScrollback { id, lines, reply } => {
+                let Some((_, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let text = match &tab.kind {
+                    TerminalTabKind::Terminal { terminal, .. } => {
+                        terminal.read(cx).scrollback_text(lines)
+                    }
+                    TerminalTabKind::Snapshot { .. } => {
+                        return reply_err(&reply, 409, "cannot read scrollback of snapshot tab");
+                    }
+                };
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Text(text),
+                });
+            }
+
+            ApiCommand::ScrollDisplay { id, action, reply } => {
+                let Some((_, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let terminal = match &tab.kind {
+                    TerminalTabKind::Terminal { terminal, .. } => terminal.clone(),
+                    TerminalTabKind::Snapshot { .. } => {
+                        return reply_err(&reply, 409, "cannot scroll a snapshot tab");
+                    }
+                };
+                let offset = terminal.update(cx, |term, _| term.scroll_viewport(action));
+                cx.notify();
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({ "display_offset": offset })),
                 });
             }
 

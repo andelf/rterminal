@@ -36,6 +36,8 @@ All responses are JSON unless noted. Errors return `{"error":"..."}` with the ap
 | `POST` | `/tabs/:id/activate` | Make a tab the active/focused one |
 | `GET` | `/tabs/:id` | Tab detail: title, cursor, status, counters, uptime |
 | `GET` | `/tabs/:id/screen` | Current visible screen as plain text |
+| `GET` | `/tabs/:id/scrollback?lines=N` | Plain text: last N content rows of history + viewport (default = all, capped at 10000) |
+| `POST` | `/tabs/:id/scroll` | Move the viewport. JSON body `{"action":"up\|down\|page_up\|page_down\|top\|bottom","lines":N}` |
 | `POST` | `/tabs/:id/input` | Write raw bytes to PTY (any content-type) |
 | `POST` | `/tabs/:id/keys` | tmux-style key tokens (`Enter`, `C-c`, `Up`, `"text"`) |
 
@@ -110,6 +112,42 @@ curl -sX POST --data 'C-c C-u' http://127.0.0.1:7878/tabs/active/keys
 # Up arrow N times, then Enter
 curl -sX POST --data 'Up Up Up Enter' http://127.0.0.1:7878/tabs/active/keys
 ```
+
+### Capture full output beyond the visible viewport
+
+`/screen` only returns the visible rows — for long commands the older output has scrolled off the top. Use `/scrollback` to read history + viewport in one shot:
+
+```bash
+# Run a long command
+curl -sX POST --data 'find /usr/local -type f' http://127.0.0.1:7878/tabs/3/input
+curl -sX POST --data 'Enter' http://127.0.0.1:7878/tabs/3/keys
+# Wait for it to finish (see wait-for-quiet pattern below)
+sleep 5
+# Grab the last 200 content rows (skips trailing empty padding)
+curl -s 'http://127.0.0.1:7878/tabs/3/scrollback?lines=200'
+# Or grab everything alacritty has retained (up to 10000 rows)
+curl -s 'http://127.0.0.1:7878/tabs/3/scrollback'
+```
+
+`/scrollback` is read-only — it does **not** move the viewport. The shell user keeps seeing the live tail.
+
+### Scroll the viewport remotely (move what the human sees)
+
+When you want the user's GUI to actually scroll (e.g. to highlight an earlier portion of output), `POST /scroll` with a JSON body:
+
+```bash
+# Scroll up 10 rows into scrollback
+curl -sX POST -d '{"action":"up","lines":10}'  http://127.0.0.1:7878/tabs/3/scroll
+# Page up / page down (one full grid worth)
+curl -sX POST -d '{"action":"page_up"}'        http://127.0.0.1:7878/tabs/3/scroll
+curl -sX POST -d '{"action":"page_down"}'      http://127.0.0.1:7878/tabs/3/scroll
+# Jump to the oldest retained history
+curl -sX POST -d '{"action":"top"}'            http://127.0.0.1:7878/tabs/3/scroll
+# Return to live tail (display_offset = 0)
+curl -sX POST -d '{"action":"bottom"}'         http://127.0.0.1:7878/tabs/3/scroll
+```
+
+The response includes `display_offset`: `0` means live tail, positive integers mean the viewport has been scrolled up by that many rows. After a scroll, subsequent `GET /screen` calls reflect the new viewport position — to read content without disturbing the user's view, use `/scrollback` instead.
 
 ### Drive any tab regardless of GUI focus
 
@@ -275,7 +313,7 @@ The server has **no per-request timeout** today — clients should add their own
 
 ## Limits to be aware of
 
-- **Screen only shows the visible viewport.** Anything that scrolled off is gone — no scrollback endpoint in v1. For long outputs, capture progressively or redirect to a file inside the shell.
+- **`/screen` only shows the visible viewport.** Use `GET /tabs/:id/scrollback` to read history beyond what fits on screen. Up to 10000 rows of history are retained by the underlying terminal — older content is gone.
 - **No resize endpoint.** The tab's grid follows the GUI window — adjust the window size if you need more rows/cols.
 - **Snapshot tabs are read-only.** Writes return 409. You can identify them via `kind: "snapshot"` in `GET /tabs`.
 - **No streaming.** All reads are pull-based. Implement waits client-side.

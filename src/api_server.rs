@@ -1,4 +1,6 @@
-use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, RouteOutcome, TabSelector, oneshot};
+use crate::api_protocol::{
+    ApiCommand, ApiReply, ReplyBody, RouteOutcome, ScrollAction, TabSelector, oneshot,
+};
 use async_channel::Sender;
 use std::io::Cursor;
 use std::thread;
@@ -13,6 +15,7 @@ pub(crate) struct RouteError {
 pub(crate) fn parse_request(
     method: &str,
     path: &str,
+    query: &str,
     body: Vec<u8>,
 ) -> Result<RouteOutcome, RouteError> {
     let (tx, rx) = oneshot();
@@ -30,6 +33,16 @@ pub(crate) fn parse_request(
         ("GET", ["tabs", sel, "screen"]) => {
             ApiCommand::GetScreen { id: parse_selector(sel)?, reply: tx }
         }
+        ("GET", ["tabs", sel, "scrollback"]) => ApiCommand::GetScrollback {
+            id: parse_selector(sel)?,
+            lines: parse_lines_query(query)?,
+            reply: tx,
+        },
+        ("POST", ["tabs", sel, "scroll"]) => ApiCommand::ScrollDisplay {
+            id: parse_selector(sel)?,
+            action: parse_scroll_body(&body)?,
+            reply: tx,
+        },
         ("POST", ["tabs", sel, "input"]) => {
             ApiCommand::WriteInput { id: parse_selector(sel)?, bytes: body, reply: tx }
         }
@@ -97,6 +110,52 @@ fn parse_selector(s: &str) -> Result<TabSelector, RouteError> {
         })
 }
 
+fn parse_lines_query(query: &str) -> Result<Option<usize>, RouteError> {
+    for pair in query.split('&').filter(|s| !s.is_empty()) {
+        let mut it = pair.splitn(2, '=');
+        let key = it.next().unwrap_or("");
+        let val = it.next().unwrap_or("");
+        if key == "lines" {
+            return val
+                .parse::<usize>()
+                .map(Some)
+                .map_err(|_| RouteError {
+                    status: 400,
+                    message: format!("invalid `lines` value: {val}"),
+                });
+        }
+    }
+    Ok(None)
+}
+
+fn parse_scroll_body(body: &[u8]) -> Result<ScrollAction, RouteError> {
+    #[derive(serde::Deserialize)]
+    struct Req {
+        action: String,
+        #[serde(default)]
+        lines: Option<u32>,
+    }
+    let req: Req = serde_json::from_slice(body).map_err(|err| RouteError {
+        status: 400,
+        message: format!("invalid scroll body (expected JSON {{action, lines?}}): {err}"),
+    })?;
+    let lines = req.lines.unwrap_or(1);
+    match req.action.as_str() {
+        "up" => Ok(ScrollAction::Up(lines)),
+        "down" => Ok(ScrollAction::Down(lines)),
+        "page_up" => Ok(ScrollAction::PageUp),
+        "page_down" => Ok(ScrollAction::PageDown),
+        "top" => Ok(ScrollAction::Top),
+        "bottom" => Ok(ScrollAction::Bottom),
+        other => Err(RouteError {
+            status: 400,
+            message: format!(
+                "unknown scroll action: {other} (want up|down|page_up|page_down|top|bottom)"
+            ),
+        }),
+    }
+}
+
 fn legacy_help_text() -> String {
     [
         "available endpoints:",
@@ -106,6 +165,8 @@ fn legacy_help_text() -> String {
         "  POST   /tabs/:id/activate",
         "  GET    /tabs/:id",
         "  GET    /tabs/:id/screen",
+        "  GET    /tabs/:id/scrollback    (?lines=N, default all up to 10000)",
+        "  POST   /tabs/:id/scroll        (JSON: {action,lines?})",
         "  POST   /tabs/:id/input         (raw body)",
         "  POST   /tabs/:id/keys          (tmux key tokens)",
         "legacy:",
@@ -138,13 +199,16 @@ fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
     eprintln!("agent api listening on http://{addr}");
     for mut request in server.incoming_requests() {
         let method = method_str(request.method()).to_string();
-        let path = request.url().split('?').next().unwrap_or("/").to_string();
+        let url = request.url();
+        let mut parts = url.splitn(2, '?');
+        let path = parts.next().unwrap_or("/").to_string();
+        let query = parts.next().unwrap_or("").to_string();
         let mut body = Vec::new();
         if let Err(err) = request.as_reader().read_to_end(&mut body) {
             let _ = request.respond(error_response(400, &format!("read body: {err}")));
             continue;
         }
-        let response = match parse_request(&method, &path, body) {
+        let response = match parse_request(&method, &path, &query, body) {
             Ok(RouteOutcome::Immediate { status, content_type, body }) => {
                 text_response(status, content_type, body)
             }
@@ -210,7 +274,16 @@ mod tests {
     use super::*;
 
     fn route(method: &str, path: &str, body: &[u8]) -> Result<ApiCommand, RouteError> {
-        match parse_request(method, path, body.to_vec())? {
+        route_q(method, path, "", body)
+    }
+
+    fn route_q(
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &[u8],
+    ) -> Result<ApiCommand, RouteError> {
+        match parse_request(method, path, query, body.to_vec())? {
             RouteOutcome::Command(cmd, _rx) => Ok(cmd),
             RouteOutcome::Immediate { .. } => panic!("expected command, got immediate response"),
         }
@@ -336,7 +409,7 @@ mod tests {
 
     #[test]
     fn legacy_debug_root_is_immediate_text() {
-        match parse_request("GET", "/debug", Vec::new()).unwrap() {
+        match parse_request("GET", "/debug", "", Vec::new()).unwrap() {
             RouteOutcome::Immediate { status, body, .. } => {
                 assert_eq!(status, 200);
                 assert!(body.contains("/tabs"));
@@ -347,13 +420,74 @@ mod tests {
 
     #[test]
     fn unknown_path_returns_404() {
-        let err = parse_request("GET", "/nope", Vec::new()).unwrap_err();
+        let err = parse_request("GET", "/nope", "", Vec::new()).unwrap_err();
         assert_eq!(err.status, 404);
     }
 
     #[test]
     fn bad_id_returns_400() {
-        let err = parse_request("GET", "/tabs/notanumber", Vec::new()).unwrap_err();
+        let err = parse_request("GET", "/tabs/notanumber", "", Vec::new()).unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn get_scrollback_routes() {
+        match route("GET", "/tabs/3/scrollback", b"").unwrap() {
+            ApiCommand::GetScrollback { id, lines, .. } => {
+                assert_eq!(id, TabSelector::Id(3));
+                assert_eq!(lines, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_scrollback_with_lines_query() {
+        match route_q("GET", "/tabs/active/scrollback", "lines=200", b"").unwrap() {
+            ApiCommand::GetScrollback { id, lines, .. } => {
+                assert_eq!(id, TabSelector::Active);
+                assert_eq!(lines, Some(200));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_scrollback_rejects_non_numeric_lines() {
+        let err = route_q("GET", "/tabs/1/scrollback", "lines=abc", b"").unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn post_scroll_up_with_lines() {
+        match route("POST", "/tabs/2/scroll", br#"{"action":"up","lines":5}"#).unwrap() {
+            ApiCommand::ScrollDisplay { id, action, .. } => {
+                assert_eq!(id, TabSelector::Id(2));
+                assert_eq!(action, crate::api_protocol::ScrollAction::Up(5));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn post_scroll_top_no_lines() {
+        match route("POST", "/tabs/active/scroll", br#"{"action":"top"}"#).unwrap() {
+            ApiCommand::ScrollDisplay { action, .. } => {
+                assert_eq!(action, crate::api_protocol::ScrollAction::Top);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn post_scroll_unknown_action_rejected() {
+        let err = route("POST", "/tabs/1/scroll", br#"{"action":"sideways"}"#).unwrap_err();
+        assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn post_scroll_missing_action_rejected() {
+        let err = route("POST", "/tabs/1/scroll", br#"{"lines":5}"#).unwrap_err();
         assert_eq!(err.status, 400);
     }
 

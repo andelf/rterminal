@@ -7,6 +7,16 @@ pub(crate) enum TabSelector {
     Active,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScrollAction {
+    Up(u32),
+    Down(u32),
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
 #[derive(Debug)]
 pub(crate) enum ApiCommand {
     ListTabs { reply: Sender<ApiReply> },
@@ -15,6 +25,8 @@ pub(crate) enum ApiCommand {
     ActivateTab { id: TabSelector, reply: Sender<ApiReply> },
     GetTab { id: TabSelector, reply: Sender<ApiReply> },
     GetScreen { id: TabSelector, reply: Sender<ApiReply> },
+    GetScrollback { id: TabSelector, lines: Option<usize>, reply: Sender<ApiReply> },
+    ScrollDisplay { id: TabSelector, action: ScrollAction, reply: Sender<ApiReply> },
     WriteInput { id: TabSelector, bytes: Vec<u8>, reply: Sender<ApiReply> },
     SendKeys { id: TabSelector, body: String, reply: Sender<ApiReply> },
     SetNote { id: TabSelector, note: Option<String>, reply: Sender<ApiReply> },
