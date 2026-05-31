@@ -11,6 +11,7 @@ Agent Terminal takes a different approach:
 - It maintains a **shadow input-line model** that mirrors what the user is typing in the shell
 - It exposes this model to macOS Accessibility APIs as an `AXTextField`, allowing external tools to **read the current input**, **know the cursor position**, and **inject or replace text**
 - It bridges bidirectionally between the native accessibility tree and the internal input state on every render frame
+- It also exposes a **tmux-style HTTP control API** (single global server, all tabs addressable by stable id) so agents that prefer scripting over the AX bridge can list/create/close tabs, send raw input or named keystrokes (`Enter`, `C-c`, `Up`, `"text"`), capture screen and scrollback, and move the viewport — without needing accessibility permissions
 
 The architecture draws from research into how Zed and Ghostty implement their terminal layers (documented in `research/terminal-implementation-research.md`), adopting the pattern of:
 
@@ -60,18 +61,23 @@ This is **not** intended to be a general-purpose terminal replacement. It is an 
 
 | File | Lines | Responsibility |
 |------|------:|----------------|
-| `terminal.rs` | ~1100 | Core terminal state: PTY lifecycle, `Term` wiring, snapshot generation, cursor animation |
-| `input.rs` | ~1600 | Keyboard/mouse/IME/paste handling, input-line shadow model, AX override logic, selection |
-| `render.rs` | ~510 | GPUI `Render` impl, per-cell canvas painting, cursor drawing, AX sync entry point |
+| `input.rs` | ~1730 | Keyboard/mouse/IME/paste handling, input-line shadow model, AX override logic, selection |
+| `terminal.rs` | ~1620 | Core terminal state: PTY lifecycle, `Term` wiring, snapshot generation, cursor animation, scrollback dump |
+| `tabs.rs` | ~810 | Multi-tab management, drain task for the HTTP control API, tab bar rendering, Cmd+N shortcuts |
+| `api_server.rs` | ~580 | HTTP listener (tiny_http) + request routing + response rendering for the tmux-style control API |
+| `snapshot_tab.rs` | ~560 | Read-only snapshot tabs with scrollback, selection, copy |
+| `render.rs` | ~550 | GPUI `Render` impl, per-cell canvas painting, cursor drawing, AX sync entry point |
+| `api_keys.rs` | ~300 | tmux-style key token parser (`Enter`, `C-c`, `"text"`, modifiers, F-keys) |
 | `keyboard.rs` | ~300 | Keystroke-to-terminal-byte encoding (special keys, Ctrl chords, Alt, modifiers) |
-| `tabs.rs` | ~470 | Multi-tab management, tab bar rendering, Cmd+N shortcuts |
-| `snapshot_tab.rs` | ~540 | Read-only snapshot tabs with scrollback, selection, copy |
-| `macos_ax.rs` | ~140 | Native Objective-C bridge: `setAccessibilityValue` / `setAccessibilitySelectedTextRange` |
-| `debug_server.rs` | ~520 | HTTP debug API (`/debug/state`, `/debug/screen`, `/debug/input`, `/debug/replace-line`) |
+| `cli.rs` | ~240 | CLI argument parsing via `clap` (including `--api-addr`) |
 | `text_utils.rs` | ~180 | UTF-16 ↔ byte index conversion, word deletion, AX override heuristics |
-| `pty.rs` | ~85 | PTY creation via `portable-pty`, background reader thread |
 | `color.rs` | ~150 | ANSI → HSLA color mapping (named, indexed 256, dim/bright, spec RGB) |
-| `cli.rs` | ~170 | CLI argument parsing via `clap` |
+| `tab_runtime.rs` | ~145 | Per-tab counters, status, screen snapshot mirror shared with the HTTP API |
+| `macos_ax.rs` | ~140 | Native Objective-C bridge: `setAccessibilityValue` / `setAccessibilitySelectedTextRange` |
+| `main.rs` | ~135 | Process entry: CLI parsing, API server bootstrap, GPUI app launch |
+| `history_log.rs` | ~135 | Per-tab raw PTY transcripts and metadata sidecars under `~/.rterminal/history` |
+| `api_protocol.rs` | ~110 | Wire types shared by HTTP layer and command handlers (`ApiCommand`, DTOs, `ScrollAction`) |
+| `pty.rs` | ~85 | PTY creation via `portable-pty`, background reader thread |
 | `input_log.rs` | ~85 | Structured JSONL input event logger for debugging |
 
 ## Features
@@ -113,12 +119,18 @@ This is **not** intended to be a general-purpose terminal replacement. It is an 
 - Configurable double-width character overrides
 - Option key behavior: Meta/Alt (default) or native macOS character input (`--no-option-as-meta`)
 
-### Debugging & Observability
-- HTTP debug server on `localhost:7878` (auto-increments port per tab)
-- `GET /debug/state` — JSON snapshot of terminal state, counters, uptime
-- `GET /debug/screen` — plain-text dump of visible terminal content
-- `POST /debug/input` — inject raw bytes into PTY
-- `POST /debug/replace-line` — replace current shell input line
+### HTTP Control API
+A single global HTTP server (default `127.0.0.1:7878`, override with `--api-addr`) lets external agents drive any tab. Stable numeric tab ids, plus the alias `active` for the currently-focused tab. No auth — loopback only.
+
+- **Tab management**: `GET /tabs` (list + active), `POST /tabs` (create, returns id+title), `DELETE /tabs/:id`, `POST /tabs/:id/activate`
+- **Observation**: `GET /tabs/:id` (DTO with title, kind, cols/rows, cursor, status, counters, note, uptime), `GET /tabs/:id/screen` (current viewport as plain text), `GET /tabs/:id/scrollback?lines=N` (history + viewport, trailing padding stripped)
+- **Input**: `POST /tabs/:id/input` (raw bytes), `POST /tabs/:id/keys` (tmux-style tokens: `Enter`, `C-c`, `M-x`, `Up`, `F5`, `"literal text"`, ...)
+- **Viewport scroll**: `POST /tabs/:id/scroll` with JSON `{"action":"up|down|page_up|page_down|top|bottom","lines":N}`
+- **Legacy aliases**: `/debug/state`, `/debug/screen`, `/debug/input`, `/debug/replace-line`, `/debug/note` all route to the active tab
+
+A consumer-side skill lives in `.claude/skills/driving-rterminal/` with the full grammar, error semantics, and common-workflow recipes.
+
+### Logging & Tracing
 - Input event tracing: `AGENT_TUI_INPUT_TRACE=1`
 - Structured JSONL input logging: `--input-log-file <path>` (with optional `--input-log-raw`)
 - Per-tab persistent PTY transcripts: raw `.ansi` output plus `.meta.json` under `~/.rterminal/history`
@@ -163,6 +175,7 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 | `--no-cursor-slide` | off | Disable smooth cursor movement animation |
 | `--no-option-as-meta` | off | Treat Option key as native input instead of Meta/Alt |
 | `--show-status-bar` | off | Show debug status bar at bottom |
+| `--api-addr <host:port>` | `127.0.0.1:7878` | Bind address for the HTTP control API (use `:0` for an OS-assigned port; the actual port is logged on startup) |
 | `--input-log-file <path>` | — | Write structured input events to JSONL file |
 | `--input-log-raw` | off | Include full text values in input log (not truncated) |
 | `--history-log-dir <dir>` | `~/.rterminal/history` | Write per-tab raw PTY output transcripts (`.ansi`) and metadata sidecars |
