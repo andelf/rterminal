@@ -1,5 +1,5 @@
 use async_channel::{Receiver, Sender, bounded};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TabSelector {
@@ -15,6 +15,16 @@ pub(crate) enum ScrollAction {
     PageDown,
     Top,
     Bottom,
+}
+
+/// Wire shape of `POST /tabs/:id/scroll`. `action` is one of
+/// `up|down|page_up|page_down|top|bottom`; `lines` is honoured only by
+/// `up` and `down`. The api_server layer maps this to `ScrollAction`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ScrollRequest {
+    pub(crate) action: String,
+    #[serde(default)]
+    pub(crate) lines: Option<u32>,
 }
 
 #[derive(Debug)]

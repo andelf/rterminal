@@ -45,6 +45,11 @@ pub(crate) const DEFAULT_FONT_SIZE: Pixels = px(14.0);
 pub(crate) const MIN_FONT_SIZE: Pixels = px(8.0);
 pub(crate) const MAX_FONT_SIZE: Pixels = px(48.0);
 const INPUT_TRACE_ENV: &str = "AGENT_TUI_INPUT_TRACE";
+/// Maximum rows returned by `scrollback_text` regardless of the caller's
+/// `?lines=N` request. Bounds response size for the HTTP `/scrollback`
+/// endpoint so a single GET cannot allocate gigabytes when alacritty has
+/// retained a long history.
+const SCROLLBACK_HARD_CAP: usize = 10_000;
 const MAX_PTY_BATCH_CHUNKS: usize = 256;
 const MAX_PTY_BATCH_BYTES: usize = 256 * 1024;
 const CURSOR_SLIDE_DURATION: Duration = Duration::from_millis(80);
@@ -786,9 +791,13 @@ impl AgentTerminal {
             ScrollAction::Top => Scroll::Top,
             ScrollAction::Bottom => Scroll::Bottom,
         };
+        let before = self.term.grid().display_offset();
         self.term.scroll_display(scroll);
-        self.refresh_snapshot();
-        self.term.grid().display_offset()
+        let after = self.term.grid().display_offset();
+        if after != before {
+            self.refresh_snapshot();
+        }
+        after
     }
 
     /// Dump the last `max_lines` *content* rows of grid history + viewport as
@@ -797,8 +806,9 @@ impl AgentTerminal {
     /// `?lines=N` returns up to N meaningful rows even when the viewport has
     /// empty padding at the bottom.
     pub(crate) fn scrollback_text(&self, max_lines: Option<usize>) -> String {
-        const SCROLLBACK_HARD_CAP: usize = 10_000;
-        let want = max_lines.unwrap_or(SCROLLBACK_HARD_CAP).min(SCROLLBACK_HARD_CAP);
+        let want = max_lines
+            .unwrap_or(SCROLLBACK_HARD_CAP)
+            .min(SCROLLBACK_HARD_CAP);
         if want == 0 {
             return "<empty scrollback>\n".to_string();
         }
@@ -808,8 +818,9 @@ impl AgentTerminal {
         let top = grid.topmost_line().0;
         let bottom = grid.bottommost_line().0;
 
-        let row_text = |line_index: i32| -> String {
-            let mut s = String::new();
+        // Find the last row with actual content without allocating a String
+        // per probe — most of the grid below the last draw is padding spaces.
+        let row_is_empty = |line_index: i32| -> bool {
             for col in 0..cols {
                 let cell = &grid[Line(line_index)][Column(col)];
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -820,25 +831,15 @@ impl AgentTerminal {
                 } else {
                     cell.c
                 };
-                s.push(ch);
+                if !ch.is_whitespace() {
+                    return false;
+                }
             }
-            s
+            true
         };
-
-        // Walk backward from the viewport bottom to find the last row with
-        // actual content. Beyond that point the grid is just empty padding
-        // waiting for future output; counting it would shrink the useful
-        // window the caller asked for.
-        let mut last_content = top - 1;
-        for line_index in (top..=bottom).rev() {
-            if !row_text(line_index).trim_end().is_empty() {
-                last_content = line_index;
-                break;
-            }
-        }
-        if last_content < top {
+        let Some(last_content) = (top..=bottom).rev().find(|i| !row_is_empty(*i)) else {
             return "<empty scrollback>\n".to_string();
-        }
+        };
         let available = (last_content - top + 1) as usize;
         let start = if available > want {
             last_content - want as i32 + 1
@@ -846,9 +847,26 @@ impl AgentTerminal {
             top
         };
 
-        let mut out = String::new();
+        // Single-pass build into `out`, reusing one scratch buffer across rows
+        // to keep allocation counts down for large dumps.
+        let row_count = (last_content - start + 1) as usize;
+        let mut out = String::with_capacity(row_count * (cols + 1));
+        let mut scratch = String::with_capacity(cols);
         for line_index in start..=last_content {
-            out.push_str(row_text(line_index).trim_end());
+            scratch.clear();
+            for col in 0..cols {
+                let cell = &grid[Line(line_index)][Column(col)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let ch = if cell.flags.contains(Flags::HIDDEN) {
+                    ' '
+                } else {
+                    cell.c
+                };
+                scratch.push(ch);
+            }
+            out.push_str(scratch.trim_end());
             out.push('\n');
         }
         out

@@ -1,5 +1,6 @@
 use crate::api_protocol::{
-    ApiCommand, ApiReply, ReplyBody, RouteOutcome, ScrollAction, TabSelector, oneshot,
+    ApiCommand, ApiReply, ReplyBody, RouteOutcome, ScrollAction, ScrollRequest, TabSelector,
+    oneshot,
 };
 use async_channel::Sender;
 use std::io::Cursor;
@@ -129,13 +130,7 @@ fn parse_lines_query(query: &str) -> Result<Option<usize>, RouteError> {
 }
 
 fn parse_scroll_body(body: &[u8]) -> Result<ScrollAction, RouteError> {
-    #[derive(serde::Deserialize)]
-    struct Req {
-        action: String,
-        #[serde(default)]
-        lines: Option<u32>,
-    }
-    let req: Req = serde_json::from_slice(body).map_err(|err| RouteError {
+    let req: ScrollRequest = serde_json::from_slice(body).map_err(|err| RouteError {
         status: 400,
         message: format!("invalid scroll body (expected JSON {{action, lines?}}): {err}"),
     })?;
