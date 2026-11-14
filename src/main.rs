@@ -96,6 +96,7 @@ fn main() {
         ]);
         cx.set_menus(vec![Menu {
             name: "Agent Terminal".into(),
+            disabled: false,
             items: vec![
                 MenuItem::action("New Tab", NewTab),
                 MenuItem::action("Capture Snapshot Tab", CaptureSnapshotTab),

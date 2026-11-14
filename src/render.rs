@@ -199,7 +199,7 @@ impl Render for AgentTerminal {
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up_middle))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up_right))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_scroll(cx.listener(Self::on_scroll_wheel))
             .child(
                 canvas(
                     move |_, _, _| {},

@@ -1,7 +1,7 @@
 use gpui::{
     ClipboardItem, Context, FocusHandle, FontFallbacks, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent, Window, canvas,
-    div, fill, font, point, prelude::*, px, rgb, rgba, size,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollEvent, Window, canvas, div,
+    fill, font, point, prelude::*, px, rgb, rgba, size,
 };
 
 use crate::cli::Theme;
@@ -282,7 +282,7 @@ impl SnapshotTab {
 
     pub(crate) fn on_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -328,7 +328,7 @@ impl Render for SnapshotTab {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_scroll(cx.listener(Self::on_scroll_wheel))
             .child(
                 canvas(
                     move |_, _, _| {},

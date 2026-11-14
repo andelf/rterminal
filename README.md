@@ -184,7 +184,7 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 ## Tech Stack
 
 - **UI Framework**: [GPUI](https://github.com/zed-industries/zed) — Zed's GPU-accelerated, Rust-native UI framework
-- **Terminal Core**: [alacritty_terminal](https://github.com/alacritty/alacritty) (vendored) — VT/ANSI parsing and terminal state machine
+- **Terminal Core**: [alacritty_terminal](https://github.com/andelf/alacritty/tree/rterminal-patches/alacritty_terminal) (fork with rterminal patches) — VT/ANSI parsing and terminal state machine
 - **PTY**: [portable-pty](https://crates.io/crates/portable-pty) — Cross-platform PTY abstraction
 - **macOS Interop**: [cocoa](https://crates.io/crates/cocoa) + [objc](https://crates.io/crates/objc) — Native Objective-C bridge for accessibility APIs
 - **CLI**: [clap](https://crates.io/crates/clap) — Argument parsing

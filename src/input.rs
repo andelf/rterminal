@@ -6,7 +6,7 @@ use alacritty_terminal::term::TermMode;
 use gpui::{
     App, Bounds, ClipboardItem, Context, EntityInputHandler, InputHandler, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PromptLevel, ScrollDelta,
-    ScrollWheelEvent, UTF16Selection, Window, point, px, size,
+    ScrollEvent, UTF16Selection, Window, point, px, size,
 };
 use serde_json::json;
 
@@ -445,7 +445,7 @@ impl AgentTerminal {
 
     pub(crate) fn on_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -601,7 +601,7 @@ impl AgentTerminal {
         handled
     }
 
-    fn scroll_steps(&mut self, event: &ScrollWheelEvent, window: &mut Window) -> (i32, i32) {
+    fn scroll_steps(&mut self, event: &ScrollEvent, window: &mut Window) -> (i32, i32) {
         match event.delta {
             ScrollDelta::Lines(lines) => (lines.x as i32, lines.y as i32),
             ScrollDelta::Pixels(pixels) => {
