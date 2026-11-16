@@ -1,2 +1,5 @@
+# Match the zed revision pinned in Cargo.toml, whose own rust-toolchain.toml
+# also pins 1.98.1. gpui_macos uses APIs that are still unstable in 1.95.0
+# (e.g. Option::map_or_default), so the older pin could not build macOS.
 [toolchain]
-channel = "1.95.0"
+channel = "1.98.1"

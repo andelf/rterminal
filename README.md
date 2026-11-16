@@ -192,8 +192,9 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 
 ## Building
 
-Requires Rust 2024 edition (`edition = "2024"` in `Cargo.toml`). GPUI ships native
-backends for both macOS and Windows, so the project builds on either. All
+Requires Rust 1.98.1 (pinned in `rust-toolchain.toml`, matching the upstream zed
+revision) and the 2024 edition (`edition = "2024"` in `Cargo.toml`). GPUI ships
+native backends for both macOS and Windows, so the project builds on either. All
 platform-specific defaults (shell, font, home directory, key chords, menus) are
 isolated in `src/platform.rs`; the macOS branches preserve the original behaviour.
 
