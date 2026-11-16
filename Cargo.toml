@@ -8,13 +8,18 @@ alacritty_terminal = { git = "https://github.com/andelf/alacritty.git", branch =
 anyhow = "1"
 async-channel = "2"
 clap = { version = "4.5", features = ["derive"] }
-cocoa = "0.26"
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "f0fa51bb510fc91f6da7ec55f3e0f317f1f975ec", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "f0fa51bb510fc91f6da7ec55f3e0f317f1f975ec", default-features = false, features = ["font-kit"] }
-objc = "0.2"
 parking_lot = "0.12"
 portable-pty = "0.9.0"
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiny_http = "0.12"
+
+# The Objective-C bridge in src/macos_ax.rs is the only consumer of these.
+# Keeping them unconditional used to pull core-foundation/core-graphics into
+# Windows builds, where they cannot even compile.
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"

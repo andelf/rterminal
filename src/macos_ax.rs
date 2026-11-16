@@ -12,6 +12,7 @@ use std::{ffi::CStr, os::raw::c_char};
 
 use gpui::Window;
 
+#[cfg(target_os = "macos")]
 use crate::text_utils::{should_accept_ax_override, should_publish_model_to_ax};
 
 #[derive(Clone, Debug)]

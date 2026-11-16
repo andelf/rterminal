@@ -20,7 +20,7 @@ pub(crate) struct CliOptions {
     pub(crate) self_check: bool,
     #[arg(long, help = "Show the status bar at the bottom of the window")]
     pub(crate) show_status_bar: bool,
-    #[arg(long, default_value = "Menlo", help = "Primary font family for terminal text")]
+    #[arg(long, default_value_t = crate::platform::default_font_family().to_string(), help = "Primary font family for terminal text")]
     pub(crate) font_family: String,
     #[arg(long = "font-fallback", value_delimiter = ',', help = "Fallback font families, comma-separated or repeated")]
     pub(crate) font_fallbacks: Vec<String>,
@@ -76,18 +76,7 @@ pub(crate) fn parse_cli_options() -> CliOptions {
 }
 
 fn parse_history_log_dir(value: &str) -> Result<PathBuf, String> {
-    if let Some(rest) = value.strip_prefix("~/") {
-        let home = std::env::var_os("HOME").ok_or_else(|| {
-            "cannot expand '~' in --history-log-dir because HOME is unset".to_string()
-        })?;
-        Ok(PathBuf::from(home).join(rest))
-    } else if value == "~" {
-        std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-            "cannot expand '~' in --history-log-dir because HOME is unset".to_string()
-        })
-    } else {
-        Ok(PathBuf::from(value))
-    }
+    crate::platform::expand_home(value)
 }
 
 #[cfg(test)]
@@ -136,9 +125,16 @@ mod tests {
         let cli = parse_cli_options_from(Vec::<String>::new());
         assert_eq!(
             cli.history_log_dir,
-            std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME set"))
+            crate::platform::home_dir()
+                .expect("home directory set")
                 .join(".rterminal/history")
         );
+    }
+
+    #[test]
+    fn font_family_defaults_to_platform_font() {
+        let cli = parse_cli_options_from(Vec::<String>::new());
+        assert_eq!(cli.font_family, crate::platform::default_font_family());
     }
 
     #[test]

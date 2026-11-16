@@ -223,15 +223,7 @@ pub(crate) fn is_paste_shortcut(keystroke: &gpui::Keystroke) -> bool {
 }
 
 pub(crate) fn is_select_all_shortcut(keystroke: &gpui::Keystroke) -> bool {
-    let is_a = keystroke.key.eq_ignore_ascii_case("a");
-    let modifiers = keystroke.modifiers;
-    cfg!(target_os = "macos")
-        && modifiers.platform
-        && !modifiers.control
-        && !modifiers.alt
-        && !modifiers.shift
-        && !modifiers.function
-        && is_a
+    crate::platform::is_select_all_shortcut(keystroke)
 }
 
 pub(crate) fn is_zoom_in_shortcut(keystroke: &gpui::Keystroke) -> bool {

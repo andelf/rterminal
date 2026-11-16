@@ -10,6 +10,7 @@ mod input;
 mod input_log;
 mod keyboard;
 mod macos_ax;
+mod platform;
 mod pty;
 mod render;
 mod snapshot_tab;
@@ -19,8 +20,7 @@ mod terminal;
 mod text_utils;
 
 use gpui::{
-    App, Bounds, KeyBinding, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds,
-    WindowOptions, actions, prelude::*, px, size,
+    App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, actions, prelude::*, px, size,
 };
 use gpui_platform::application;
 
@@ -74,42 +74,8 @@ fn main() {
 
     application().run(move |cx: &mut App| {
         cx.on_action(|_: &QuitApp, cx: &mut App| cx.quit());
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", QuitApp, None),
-            KeyBinding::new("cmd-t", NewTab, None),
-            KeyBinding::new("cmd-shift-s", CaptureSnapshotTab, None),
-            KeyBinding::new("cmd-w", CloseTab, None),
-            KeyBinding::new("ctrl-tab", NextTab, None),
-            KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-            KeyBinding::new("cmd-shift-]", NextTab, None),
-            KeyBinding::new("cmd-shift-[", PrevTab, None),
-            KeyBinding::new("cmd-1", SwitchToTab1, None),
-            KeyBinding::new("cmd-2", SwitchToTab2, None),
-            KeyBinding::new("cmd-3", SwitchToTab3, None),
-            KeyBinding::new("cmd-4", SwitchToTab4, None),
-            KeyBinding::new("cmd-5", SwitchToTab5, None),
-            KeyBinding::new("cmd-6", SwitchToTab6, None),
-            KeyBinding::new("cmd-7", SwitchToTab7, None),
-            KeyBinding::new("cmd-8", SwitchToTab8, None),
-            KeyBinding::new("cmd-9", SwitchToTab9, None),
-            KeyBinding::new("cmd-0", SwitchToTab10, None),
-        ]);
-        cx.set_menus(vec![Menu {
-            name: "Agent Terminal".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action("New Tab", NewTab),
-                MenuItem::action("Capture Snapshot Tab", CaptureSnapshotTab),
-                MenuItem::action("Close Tab", CloseTab),
-                MenuItem::separator(),
-                MenuItem::action("Next Tab", NextTab),
-                MenuItem::action("Previous Tab", PrevTab),
-                MenuItem::separator(),
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Quit Agent Terminal", QuitApp),
-            ],
-        }]);
+        cx.bind_keys(crate::platform::key_bindings());
+        cx.set_menus(crate::platform::app_menu());
 
         let bounds = Bounds::centered(None, size(px(1000.0), px(520.0)), cx);
         let cli = cli.clone();

@@ -19,7 +19,7 @@ pub(crate) struct PtySession {
 
 impl PtySession {
     pub(crate) fn spawn(rows: u16, cols: u16) -> Result<Self> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell = crate::platform::default_shell();
         let system = native_pty_system();
         let pair = system
             .openpty(PtySize {
@@ -31,7 +31,9 @@ impl PtySession {
             .context("failed to create PTY")?;
 
         let mut command = CommandBuilder::new(shell.clone());
-        command.arg("-i");
+        for arg in crate::platform::shell_args() {
+            command.arg(*arg);
+        }
 
         let child = pair
             .slave

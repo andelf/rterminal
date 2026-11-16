@@ -1,6 +1,6 @@
 # Agent Terminal
 
-A GPU-accelerated terminal emulator built with [GPUI](https://github.com/zed-industries/zed) (Zed's UI framework) and [alacritty_terminal](https://github.com/alacritty/alacritty), designed as a standalone native macOS terminal with first-class accessibility and input method support.
+A GPU-accelerated terminal emulator built with [GPUI](https://github.com/zed-industries/zed) (Zed's UI framework) and [alacritty_terminal](https://github.com/alacritty/alacritty), designed as a standalone native desktop terminal (macOS and Windows) with first-class accessibility and input method support.
 
 ## Background
 
@@ -165,7 +165,7 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--font-family <name>` | `Menlo` | Terminal font family |
+| `--font-family <name>` | `Menlo` (macOS) / `Cascadia Mono` (Windows) | Terminal font family |
 | `--font-fallback <name,...>` | — | Comma-separated fallback font families |
 | `--double-width-char <char,...>` | — | Characters forced to double-width rendering |
 | `--ambiguous-width <single\|double>` | `single` | Width for Unicode ambiguous-width characters |
@@ -186,13 +186,16 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 - **UI Framework**: [GPUI](https://github.com/zed-industries/zed) — Zed's GPU-accelerated, Rust-native UI framework
 - **Terminal Core**: [alacritty_terminal](https://github.com/andelf/alacritty/tree/rterminal-patches/alacritty_terminal) (fork with rterminal patches) — VT/ANSI parsing and terminal state machine
 - **PTY**: [portable-pty](https://crates.io/crates/portable-pty) — Cross-platform PTY abstraction
-- **macOS Interop**: [cocoa](https://crates.io/crates/cocoa) + [objc](https://crates.io/crates/objc) — Native Objective-C bridge for accessibility APIs
+- **macOS Interop** (macOS target only): [cocoa](https://crates.io/crates/cocoa) + [objc](https://crates.io/crates/objc) — Native Objective-C bridge for accessibility APIs
 - **CLI**: [clap](https://crates.io/crates/clap) — Argument parsing
 - **Debug HTTP**: [tiny_http](https://crates.io/crates/tiny_http) — Lightweight HTTP server for debug endpoints
 
 ## Building
 
-Requires Rust 2024 edition (edition = "2024" in Cargo.toml) and macOS (GPUI currently targets macOS).
+Requires Rust 2024 edition (`edition = "2024"` in `Cargo.toml`). GPUI ships native
+backends for both macOS and Windows, so the project builds on either. All
+platform-specific defaults (shell, font, home directory, key chords, menus) are
+isolated in `src/platform.rs`; the macOS branches preserve the original behaviour.
 
 ```bash
 cargo build
@@ -200,9 +203,19 @@ cargo test
 cargo run -- --self-check
 ```
 
+On Windows the default PTY shell is `powershell.exe`; set `RTERMINAL_SHELL` to
+use `pwsh.exe`, Git Bash, or another shell. The `~/.rterminal/history` default
+expands via `USERPROFILE` (falling back to `HOME`).
+
+Powerline/Nerd Font prompts (for example `oh-my-posh`) emit Private Use Area
+code points such as U+E0B0. Plain `Cascadia Mono` has no glyphs there, and the
+`--font-fallback` list is empty by default, so DirectWrite falls back to a
+missing-glyph box. Install a Nerd Font (or `Cascadia Code PL`) and select it
+with `--font-family`, or list it via `--font-fallback`.
+
 ## Known Limitations
 
-- **macOS only** — GPUI's platform layer currently targets macOS; Linux/Windows support depends on upstream
+- **Native accessibility bridge is macOS only** — the `AXTextField` input-line bridge in `src/macos_ax.rs` needs AppKit; on Windows it is a no-op, and the tmux-style HTTP control API is the supported way for agents to read/inject input
 - **Per-cell text shaping** — rendering shapes each character individually rather than batching runs per line; functional but not optimal for performance
 - **Input-line model drift** — the shadow `input_line` can desynchronize from the actual shell state in complex scenarios (tmux prefix sequences, shell history navigation, tab completion)
 - **No search** — no find-in-terminal functionality

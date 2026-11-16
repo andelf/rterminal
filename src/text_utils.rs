@@ -25,6 +25,7 @@ pub(crate) fn utf16_substring(text: &str, range: Range<usize>) -> Option<String>
     text.get(start..end).map(ToString::to_string)
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn should_accept_ax_override(
     ax_text: &str,
     ax_cursor_utf16: usize,
@@ -48,6 +49,7 @@ pub(crate) fn should_accept_ax_override(
     differs_from_model && !is_stale_last_publish
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn should_publish_model_to_ax(
     ax_text: &str,
     ax_cursor_utf16: usize,

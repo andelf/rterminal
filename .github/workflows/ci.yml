@@ -1,0 +1,69 @@
+name: CI
+
+# Build both native backends on every change so a Windows-only or macOS-only
+# regression is visible without a local cross-compile.
+on:
+  push:
+    branches: [main, TPR]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  build:
+    name: Build & test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            binary: target/debug/agent_terminal
+          - name: Windows
+            os: windows-latest
+            binary: target/debug/agent_terminal.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Keep this in sync with rust-toolchain.toml (channel = "1.95.0").
+      - name: Install Rust 1.95.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}
+
+      - name: Toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Self-check
+        run: cargo run --locked -- --self-check
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent_terminal-${{ matrix.name }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error

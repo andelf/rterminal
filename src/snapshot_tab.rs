@@ -187,12 +187,7 @@ impl SnapshotTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_copy = cfg!(target_os = "macos")
-            && event.keystroke.modifiers.platform
-            && !event.keystroke.modifiers.control
-            && !event.keystroke.modifiers.alt
-            && !event.keystroke.modifiers.function
-            && event.keystroke.key.eq_ignore_ascii_case("c");
+        let is_copy = crate::platform::is_copy_shortcut(&event.keystroke);
         if is_copy {
             if !self.copy_selection_to_clipboard(cx) {
                 self.copy_all_to_clipboard(cx);
@@ -202,13 +197,7 @@ impl SnapshotTab {
             return;
         }
 
-        let is_select_all = cfg!(target_os = "macos")
-            && event.keystroke.modifiers.platform
-            && !event.keystroke.modifiers.control
-            && !event.keystroke.modifiers.alt
-            && !event.keystroke.modifiers.shift
-            && !event.keystroke.modifiers.function
-            && event.keystroke.key.eq_ignore_ascii_case("a");
+        let is_select_all = crate::platform::is_select_all_shortcut(&event.keystroke);
         if is_select_all && !self.lines.is_empty() {
             let last_row = self.lines.len() - 1;
             let last_col = self.cols.saturating_sub(1);
