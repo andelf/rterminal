@@ -22,25 +22,33 @@ jobs:
     name: Build & test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    # Overrides rust-toolchain.toml, which still pins 1.95.0 for local Windows
+    # work. See the macOS toolchain note below.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # gpui_macos at the pinned zed rev calls Option::map_or_default,
+          # which rustc 1.95.0 still rejects as unstable. 1.98.1 is the
+          # toolchain zed itself pins, so macOS has to build with it.
           - name: macOS
             os: macos-latest
+            toolchain: 1.98.1
             binary: target/debug/agent_terminal
           - name: Windows
             os: windows-latest
+            toolchain: 1.95.0
             binary: target/debug/agent_terminal.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Keep this in sync with rust-toolchain.toml (channel = "1.95.0").
-      - name: Install Rust 1.95.0
+      - name: Install Rust ${{ matrix.toolchain }}
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.95.0
+          toolchain: ${{ matrix.toolchain }}
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
