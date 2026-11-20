@@ -472,7 +472,7 @@ impl Render for AgentTerminal {
             .flex()
             .items_center()
             .justify_between()
-            .child(div().w(px(52.0)))
+            .child(crate::platform::titlebar_left_gutter(px(52.0)))
             .child(
                 div()
                     .flex_1()
@@ -481,7 +481,7 @@ impl Render for AgentTerminal {
                     .text_center()
                     .child(terminal_title),
             )
-            .child(div().w(px(52.0)));
+            .child(crate::platform::titlebar_right_slot(window, px(52.0)));
 
         let root = div()
             .id("agent-terminal")

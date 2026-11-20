@@ -12,9 +12,11 @@
 
 use std::path::PathBuf;
 
-use gpui::{KeyBinding, Keystroke, Menu, MenuItem};
+use gpui::{KeyBinding, Keystroke, Menu, MenuItem, Pixels, Window, div, px};
 #[cfg(target_os = "macos")]
 use gpui::SystemMenuType;
+#[cfg(target_os = "windows")]
+use gpui::{WindowControlArea, prelude::*, rgb};
 
 use crate::{
     CaptureSnapshotTab, CloseTab, NewTab, NextTab, PrevTab, QuitApp, SwitchToTab1, SwitchToTab10,
@@ -237,6 +239,92 @@ pub(crate) fn app_menu() -> Vec<Menu> {
             MenuItem::action("Quit Agent Terminal", QuitApp),
         ],
     }]
+}
+
+/// Space reserved for the macOS traffic lights at the left of a self-drawn
+/// title bar. Windows has no traffic lights, so the strip starts at the normal
+/// padding instead.
+#[cfg(target_os = "windows")]
+pub(crate) fn titlebar_left_gutter(_mac_width: Pixels) -> gpui::Div {
+    div().w(px(8.0))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn titlebar_left_gutter(mac_width: Pixels) -> gpui::Div {
+    div().w(mac_width)
+}
+
+/// Right-hand slot of a self-drawn title bar. GPUI's Windows backend hides the
+/// native title bar by keeping the top frame in the client area (`WM_NCCALCSIZE`),
+/// so the OS caption buttons are not visible and the application must draw its
+/// own. Three elements are mapped to `WindowControlArea`, which the backend
+/// turns into `HTMINBUTTON` / `HTMAXBUTTON` / `HTCLOSE` hit tests. Segoe MDL2
+/// Assets ships with Windows and contains all four glyphs used here.
+#[cfg(target_os = "windows")]
+pub(crate) fn titlebar_right_slot(window: &Window, _mac_width: Pixels) -> gpui::Div {
+    fn caption_button(
+        id: &'static str,
+        glyph: &'static str,
+        area: WindowControlArea,
+        close: bool,
+    ) -> impl gpui::IntoElement {
+        let hover_bg = if close {
+            rgb(0xc42b32)
+        } else {
+            rgb(0x2a2f3a)
+        };
+        let active_bg = if close {
+            rgb(0x9e2228)
+        } else {
+            rgb(0x353b48)
+        };
+        div()
+            .id(id)
+            .w(px(38.0))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .font_family("Segoe MDL2 Assets")
+            .text_size(px(10.0))
+            .text_color(rgb(0xa9b1c6))
+            .hover(move |style| style.bg(hover_bg).text_color(rgb(0xffffff)))
+            .active(move |style| style.bg(active_bg).text_color(rgb(0xffffff)))
+            .window_control_area(area)
+            .child(glyph)
+    }
+
+    div()
+        .flex()
+        .h_full()
+        .items_center()
+        .child(caption_button(
+            "window-minimize",
+            "\u{e921}",
+            WindowControlArea::Min,
+            false,
+        ))
+        .child(caption_button(
+            "window-zoom",
+            if window.is_maximized() {
+                "\u{e923}"
+            } else {
+                "\u{e922}"
+            },
+            WindowControlArea::Max,
+            false,
+        ))
+        .child(caption_button(
+            "window-close",
+            "\u{e8bb}",
+            WindowControlArea::Close,
+            true,
+        ))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn titlebar_right_slot(_window: &Window, mac_width: Pixels) -> gpui::Div {
+    div().w(mac_width)
 }
 
 #[cfg(test)]

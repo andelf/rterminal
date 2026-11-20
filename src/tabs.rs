@@ -657,7 +657,9 @@ impl Render for TerminalTabs {
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(div().w(TRAFFIC_LIGHT_LEFT_GUTTER)),
+                .child(crate::platform::titlebar_left_gutter(
+                    TRAFFIC_LIGHT_LEFT_GUTTER,
+                )),
             |row, (tab_id, title, active)| {
                 let this = this.clone();
                 let bg = if active { rgb(0x252a34) } else { rgb(0x1d222b) };
@@ -692,7 +694,7 @@ impl Render for TerminalTabs {
                     })
                     .child("+"),
             )
-            .child(div().w(px(8.0)));
+            .child(crate::platform::titlebar_right_slot(window, px(8.0)));
 
         let content = match active_content {
             Some(ActiveTabContent::Terminal(active_terminal)) => {
