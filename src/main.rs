@@ -18,6 +18,8 @@ mod tab_runtime;
 mod tabs;
 mod terminal;
 mod text_utils;
+mod web_ansi;
+mod web_ui;
 
 use gpui::{
     App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, actions, prelude::*, px, size,

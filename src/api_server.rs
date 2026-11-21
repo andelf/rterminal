@@ -1,6 +1,6 @@
 use crate::api_protocol::{
-    ApiCommand, ApiReply, ReplyBody, RouteOutcome, ScrollAction, ScrollRequest, TabSelector,
-    oneshot,
+    ApiCommand, ApiReply, ReplyBody, ResizeRequest, RouteOutcome, ScrollAction, ScrollRequest,
+    TabSelector, oneshot,
 };
 use async_channel::Sender;
 use std::io::Cursor;
@@ -19,6 +19,10 @@ pub(crate) fn parse_request(
     query: &str,
     body: Vec<u8>,
 ) -> Result<RouteOutcome, RouteError> {
+    if let Some(outcome) = crate::web_ui::static_response(path) {
+        return Ok(outcome);
+    }
+
     let (tx, rx) = oneshot();
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
 
@@ -33,6 +37,30 @@ pub(crate) fn parse_request(
         ("GET", ["tabs", sel]) => ApiCommand::GetTab { id: parse_selector(sel)?, reply: tx },
         ("GET", ["tabs", sel, "screen"]) => {
             ApiCommand::GetScreen { id: parse_selector(sel)?, reply: tx }
+        }
+        ("GET", ["tabs", sel, "screen.ansi"]) => {
+            ApiCommand::GetScreenAnsi { id: parse_selector(sel)?, reply: tx }
+        }
+        ("POST", ["tabs", sel, "resize"]) => {
+            let req: ResizeRequest = serde_json::from_slice(&body).map_err(|err| RouteError {
+                status: 400,
+                message: format!("invalid resize body (expected JSON {{cols, rows}}): {err}"),
+            })?;
+            if !(20..=300).contains(&req.cols) || !(5..=200).contains(&req.rows) {
+                return Err(RouteError {
+                    status: 400,
+                    message: format!(
+                        "resize out of range: cols={} rows={} (want cols 20..=300, rows 5..=200)",
+                        req.cols, req.rows
+                    ),
+                });
+            }
+            ApiCommand::ResizeTab {
+                id: parse_selector(sel)?,
+                cols: req.cols,
+                rows: req.rows,
+                reply: tx,
+            }
         }
         ("GET", ["tabs", sel, "scrollback"]) => ApiCommand::GetScrollback {
             id: parse_selector(sel)?,
@@ -160,10 +188,14 @@ fn legacy_help_text() -> String {
         "  POST   /tabs/:id/activate",
         "  GET    /tabs/:id",
         "  GET    /tabs/:id/screen",
+        "  GET    /tabs/:id/screen.ansi     (ANSI repaint for the built-in web UI)",
         "  GET    /tabs/:id/scrollback    (?lines=N, default all up to 10000)",
+        "  POST   /tabs/:id/resize        (JSON: {cols, rows})",
         "  POST   /tabs/:id/scroll        (JSON: {action,lines?})",
         "  POST   /tabs/:id/input         (raw body)",
         "  POST   /tabs/:id/keys          (tmux key tokens)",
+        "web UI:",
+        "  GET    /web/                   (xterm.js client with mirrored tabs)",
         "legacy:",
         "  GET    /debug                  (this page)",
         "  GET    /debug/state            -> /tabs/active",
@@ -192,6 +224,7 @@ pub(crate) fn start_api_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> std::i
 
 fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
     eprintln!("agent api listening on http://{addr}");
+    eprintln!("web ui available at http://{addr}/web/");
     for mut request in server.incoming_requests() {
         let method = method_str(request.method()).to_string();
         let url = request.url();
@@ -324,6 +357,28 @@ mod tests {
             route("GET", "/tabs/3/screen", b"").unwrap(),
             ApiCommand::GetScreen { .. }
         ));
+    }
+
+    #[test]
+    fn get_screen_ansi_routes() {
+        assert!(matches!(
+            route("GET", "/tabs/3/screen.ansi", b"").unwrap(),
+            ApiCommand::GetScreenAnsi { .. }
+        ));
+    }
+
+    #[test]
+    fn post_resize_routes_with_bounds() {
+        match route("POST", "/tabs/3/resize", br#"{"cols":120,"rows":30}"#).unwrap() {
+            ApiCommand::ResizeTab { id, cols, rows, .. } => {
+                assert_eq!(id, TabSelector::Id(3));
+                assert_eq!(cols, 120);
+                assert_eq!(rows, 30);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let err = route("POST", "/tabs/3/resize", br#"{"cols":1,"rows":30}"#).unwrap_err();
+        assert_eq!(err.status, 400);
     }
 
     #[test]

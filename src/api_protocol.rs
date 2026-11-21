@@ -27,6 +27,13 @@ pub(crate) struct ScrollRequest {
     pub(crate) lines: Option<u32>,
 }
 
+/// Wire shape of `POST /tabs/:id/resize`. Bounds-enforced in `api_server`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResizeRequest {
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+}
+
 #[derive(Debug)]
 pub(crate) enum ApiCommand {
     ListTabs { reply: Sender<ApiReply> },
@@ -35,8 +42,12 @@ pub(crate) enum ApiCommand {
     ActivateTab { id: TabSelector, reply: Sender<ApiReply> },
     GetTab { id: TabSelector, reply: Sender<ApiReply> },
     GetScreen { id: TabSelector, reply: Sender<ApiReply> },
+    /// Whole-screen repaint encoded as ANSI (colour + cursor + alt-screen flag
+    /// in the first byte) for the built-in xterm.js web client.
+    GetScreenAnsi { id: TabSelector, reply: Sender<ApiReply> },
     GetScrollback { id: TabSelector, lines: Option<usize>, reply: Sender<ApiReply> },
     ScrollDisplay { id: TabSelector, action: ScrollAction, reply: Sender<ApiReply> },
+    ResizeTab { id: TabSelector, cols: u16, rows: u16, reply: Sender<ApiReply> },
     WriteInput { id: TabSelector, bytes: Vec<u8>, reply: Sender<ApiReply> },
     SendKeys { id: TabSelector, body: String, reply: Sender<ApiReply> },
     SetNote { id: TabSelector, note: Option<String>, reply: Sender<ApiReply> },

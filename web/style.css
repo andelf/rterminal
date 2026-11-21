@@ -1,0 +1,147 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e2230;
+  --line: #2a2f3a;
+  --fg: #d7dae0;
+  --muted: #8b93a7;
+  --accent: #3b82f6;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 "Segoe UI", system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
+
+body {
+  display: grid;
+  grid-template-rows: 38px 34px minmax(0, 1fr) 26px;
+}
+
+.topbar, .statusbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.statusbar {
+  border-bottom: 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.statusbar .hint { margin-left: auto; opacity: 0.75; }
+.statusbar.error #status { color: #ff7b72; }
+
+.brand { font-weight: 600; letter-spacing: 0.2px; }
+.brand-dim { color: var(--muted); font-weight: 400; }
+.actions { margin-left: auto; display: flex; gap: 6px; }
+
+button {
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover { background: #2a3040; border-color: #3a4256; }
+button:active { background: #343c4e; }
+
+.tabstrip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 6px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 110px;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tab.active {
+  background: var(--bg);
+  color: var(--fg);
+  border-color: var(--line);
+}
+
+.tab .title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.tab .close {
+  padding: 0 4px;
+  line-height: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 3px;
+}
+
+.tab .close:hover { background: #c42b32; color: #fff; }
+
+.panes {
+  position: relative;
+  min-height: 0;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.pane {
+  position: absolute;
+  inset: 0;
+  padding: 4px;
+}
+
+.pane[hidden] { display: none; }
+
+.pane .xterm {
+  height: 100%;
+}
+
+.scrollback {
+  position: absolute;
+  inset: 38px 0 26px;
+  z-index: 10;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  background: rgba(15, 17, 21, 0.97);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font: 12px/1.35 "Cascadia Mono", Consolas, monospace;
+  white-space: pre;
+}
+
+.scrollback[hidden] { display: none; }

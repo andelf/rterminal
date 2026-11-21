@@ -6,7 +6,8 @@ use gpui::{
 use crate::cli::CliOptions;
 use crate::render::CUSTOM_TITLE_BAR_HEIGHT;
 use crate::snapshot_tab::SnapshotTab;
-use crate::terminal::{AgentTerminal, TerminalExitedEvent};
+use crate::terminal::{AgentTerminal, GridSize, TerminalExitedEvent};
+use crate::web_ansi::encode_screen;
 
 const TRAFFIC_LIGHT_LEFT_GUTTER: gpui::Pixels = px(68.0);
 const MAX_TAB_TITLE_CHARS: usize = 28;
@@ -319,8 +320,10 @@ impl TerminalTabs {
             | ApiCommand::ActivateTab { id, .. }
             | ApiCommand::GetTab { id, .. }
             | ApiCommand::GetScreen { id, .. }
+            | ApiCommand::GetScreenAnsi { id, .. }
             | ApiCommand::GetScrollback { id, .. }
             | ApiCommand::ScrollDisplay { id, .. }
+            | ApiCommand::ResizeTab { id, .. }
             | ApiCommand::WriteInput { id, .. }
             | ApiCommand::SendKeys { id, .. }
             | ApiCommand::SetNote { id, .. }
@@ -410,6 +413,44 @@ impl TerminalTabs {
                 let _ = reply.send_blocking(ApiReply::Ok {
                     status: 200,
                     body: ReplyBody::Text(text),
+                });
+            }
+
+            ApiCommand::GetScreenAnsi { id, reply } => {
+                let Some((_, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let text = match &tab.kind {
+                    TerminalTabKind::Terminal { terminal, .. } => {
+                        encode_screen(&terminal.read(cx).snapshot)
+                    }
+                    TerminalTabKind::Snapshot { .. } => {
+                        "0\u{1b}[2J\u{1b}[H[snapshot tab]\r\n".to_string()
+                    }
+                };
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Text(text),
+                });
+            }
+
+            ApiCommand::ResizeTab { id, cols, rows, reply } => {
+                let Some((_, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let terminal = match &tab.kind {
+                    TerminalTabKind::Terminal { terminal, .. } => terminal.clone(),
+                    TerminalTabKind::Snapshot { .. } => {
+                        return reply_err(&reply, 409, "cannot resize a snapshot tab");
+                    }
+                };
+                terminal.update(cx, |term, _| {
+                    term.apply_grid_size(GridSize { cols, rows });
+                });
+                cx.notify();
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({ "cols": cols, "rows": rows })),
                 });
             }
 

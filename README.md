@@ -73,6 +73,8 @@ This is **not** intended to be a general-purpose terminal replacement. It is an 
 | `text_utils.rs` | ~180 | UTF-16 ↔ byte index conversion, word deletion, AX override heuristics |
 | `color.rs` | ~150 | ANSI → HSLA color mapping (named, indexed 256, dim/bright, spec RGB) |
 | `tab_runtime.rs` | ~145 | Per-tab counters, status, screen snapshot mirror shared with the HTTP API |
+| `web_ui.rs` | ~60 | Embeds and serves the vendored xterm.js browser client from the binary |
+| `web_ansi.rs` | ~120 | Encodes `ScreenSnapshot` as an ANSI repaint (colour + cursor + alt-screen) for the web client |
 | `macos_ax.rs` | ~140 | Native Objective-C bridge: `setAccessibilityValue` / `setAccessibilitySelectedTextRange` |
 | `main.rs` | ~135 | Process entry: CLI parsing, API server bootstrap, GPUI app launch |
 | `history_log.rs` | ~135 | Per-tab raw PTY transcripts and metadata sidecars under `~/.rterminal/history` |
@@ -123,12 +125,25 @@ This is **not** intended to be a general-purpose terminal replacement. It is an 
 A single global HTTP server (default `127.0.0.1:7878`, override with `--api-addr`) lets external agents drive any tab. Stable numeric tab ids, plus the alias `active` for the currently-focused tab. No auth — loopback only.
 
 - **Tab management**: `GET /tabs` (list + active), `POST /tabs` (create, returns id+title), `DELETE /tabs/:id`, `POST /tabs/:id/activate`
-- **Observation**: `GET /tabs/:id` (DTO with title, kind, cols/rows, cursor, status, counters, note, uptime), `GET /tabs/:id/screen` (current viewport as plain text), `GET /tabs/:id/scrollback?lines=N` (history + viewport, trailing padding stripped)
+- **Observation**: `GET /tabs/:id` (DTO with title, kind, cols/rows, cursor, status, counters, note, uptime), `GET /tabs/:id/screen` (current viewport as plain text), `GET /tabs/:id/screen.ansi` (full ANSI repaint with colours/cursor for the web client), `GET /tabs/:id/scrollback?lines=N` (history + viewport, trailing padding stripped)
 - **Input**: `POST /tabs/:id/input` (raw bytes), `POST /tabs/:id/keys` (tmux-style tokens: `Enter`, `C-c`, `M-x`, `Up`, `F5`, `"literal text"`, ...)
 - **Viewport scroll**: `POST /tabs/:id/scroll` with JSON `{"action":"up|down|page_up|page_down|top|bottom","lines":N}`
+- **Size**: `POST /tabs/:id/resize` with JSON `{"cols":100,"rows":30}` (also resizes the native PTY)
 - **Legacy aliases**: `/debug/state`, `/debug/screen`, `/debug/input`, `/debug/replace-line`, `/debug/note` all route to the active tab
 
 A consumer-side skill lives in `.claude/skills/driving-rterminal/` with the full grammar, error semantics, and common-workflow recipes.
+
+### Browser Client (`xterm.js`)
+
+Open **http://127.0.0.1:7878/web/** while the app is running. The page is served by the same tiny_http server and has no external assets — xterm.js 5.5.0 (MIT, see `web/vendor/xterm-LICENSE`) is vendored and embedded in the binary.
+
+- The tab strip mirrors the native window's tab list (stable ids, titles, active tab). `+` / `×` / click create, close and activate real tabs.
+- Each active tab polls `GET /tabs/:id/screen.ansi`, which rewrites every cell with its original ANSI foreground/background and positions the cursor. Alt-screen and cursor visibility are preserved.
+- Keyboard input goes to `POST /tabs/:id/input` on the same PTY the native window drives, so both views stay in sync.
+- Resizing the browser pane calls `POST /tabs/:id/resize`; this **also resizes the native terminal grid/PTY**.
+- "Scrollback" fetches `GET /tabs/:id/scrollback` into an overlay (xterm.js's own scrollback is only a local replay buffer).
+
+The server has no authentication. Keep the default loopback bind; exposing `--api-addr 0.0.0.0` exposes full terminal control to anyone who can reach the port.
 
 ### Logging & Tracing
 - Input event tracing: `AGENT_TUI_INPUT_TRACE=1`
