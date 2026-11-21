@@ -261,11 +261,13 @@ pub(crate) fn titlebar_left_gutter(mac_width: Pixels) -> gpui::Div {
 /// turns into `HTMINBUTTON` / `HTMAXBUTTON` / `HTCLOSE` hit tests. Segoe MDL2
 /// Assets ships with Windows and contains all four glyphs used here.
 #[cfg(target_os = "windows")]
-pub(crate) fn titlebar_right_slot(window: &Window, _mac_width: Pixels) -> gpui::Div {
+pub(crate) fn titlebar_right_slot(_window: &Window, _mac_width: Pixels) -> gpui::Div {
+    use gpui::MouseButton;
+
     fn caption_button(
         id: &'static str,
         glyph: &'static str,
-        area: WindowControlArea,
+        action: WindowButton,
         close: bool,
     ) -> impl gpui::IntoElement {
         let hover_bg = if close {
@@ -290,8 +292,36 @@ pub(crate) fn titlebar_right_slot(window: &Window, _mac_width: Pixels) -> gpui::
             .text_color(rgb(0xa9b1c6))
             .hover(move |style| style.bg(hover_bg).text_color(rgb(0xffffff)))
             .active(move |style| style.bg(active_bg).text_color(rgb(0xffffff)))
-            .window_control_area(area)
+            .occlude()
+            // Two complementary paths, exactly like zed's own caption buttons:
+            // WindowControlArea gives the OS native HTMINBUTTON/HTMAXBUTTON/HTCLOSE
+            // semantics (hover, double-click restore, system menu). The explicit
+            // mouse handler is a fallback for the case where the window-control
+            // hitbox is not registered on this GPUI revision.
+            .window_control_area(action.control_area())
+            .on_mouse_down(MouseButton::Left, move |_, window, _cx| match action {
+                WindowButton::Minimize => window.minimize_window(),
+                WindowButton::Zoom => window.zoom_window(),
+                WindowButton::Close => window.remove_window(),
+            })
             .child(glyph)
+    }
+
+    #[derive(Clone, Copy)]
+    enum WindowButton {
+        Minimize,
+        Zoom,
+        Close,
+    }
+
+    impl WindowButton {
+        fn control_area(self) -> WindowControlArea {
+            match self {
+                WindowButton::Minimize => WindowControlArea::Min,
+                WindowButton::Zoom => WindowControlArea::Max,
+                WindowButton::Close => WindowControlArea::Close,
+            }
+        }
     }
 
     div()
@@ -301,23 +331,23 @@ pub(crate) fn titlebar_right_slot(window: &Window, _mac_width: Pixels) -> gpui::
         .child(caption_button(
             "window-minimize",
             "\u{e921}",
-            WindowControlArea::Min,
+            WindowButton::Minimize,
             false,
         ))
         .child(caption_button(
             "window-zoom",
-            if window.is_maximized() {
+            if _window.is_maximized() {
                 "\u{e923}"
             } else {
                 "\u{e922}"
             },
-            WindowControlArea::Max,
+            WindowButton::Zoom,
             false,
         ))
         .child(caption_button(
             "window-close",
             "\u{e8bb}",
-            WindowControlArea::Close,
+            WindowButton::Close,
             true,
         ))
 }
