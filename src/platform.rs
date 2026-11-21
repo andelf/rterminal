@@ -12,11 +12,13 @@
 
 use std::path::PathBuf;
 
-use gpui::{KeyBinding, Keystroke, Menu, MenuItem, Pixels, Window, div, px};
+use gpui::{KeyBinding, Keystroke, Menu, MenuItem, Pixels, Window, div};
 #[cfg(target_os = "macos")]
 use gpui::SystemMenuType;
+#[cfg(not(target_os = "windows"))]
+use gpui::Styled;
 #[cfg(target_os = "windows")]
-use gpui::{WindowControlArea, prelude::*, rgb};
+use gpui::{WindowControlArea, prelude::*, px, rgb};
 
 use crate::{
     CaptureSnapshotTab, CloseTab, NewTab, NextTab, PrevTab, QuitApp, SwitchToTab1, SwitchToTab10,
