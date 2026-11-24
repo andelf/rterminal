@@ -22,22 +22,39 @@
 
 * { box-sizing: border-box; }
 
+/* The document itself never scrolls, ever. `overflow: clip` (where supported)
+   is the stronger form: unlike `hidden` it also refuses programmatic and
+   gesture-driven scrolling, so no amount of dragging can move the chrome. This
+   matters on iPad Safari because there the visual viewport can grow taller
+   than the layout viewport once the browser chrome collapses, and a body sized
+   from that number used to overflow the document -- producing a page scroll
+   whose only effect was to carry the top bar off screen. */
+html {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  overflow: clip;
+  overscroll-behavior: none;
+  background: var(--bg);
+}
+
 html, body {
   margin: 0;
-  height: var(--app-height, 100%);
-  background: var(--bg);
   color: var(--fg);
   font: 13px/1.4 "Segoe UI", system-ui, -apple-system, sans-serif;
-  overflow: hidden;
-  overscroll-behavior: none;
 }
 
 body {
-  /* Pin the whole chrome to the viewport: only .pane ever scrolls. */
+  /* Pin the whole chrome to the viewport: only .pane ever scrolls.
+     --app-height follows the visual viewport so the layout survives the soft
+     keyboard; max-height keeps a stale value from ever overflowing again. */
   position: fixed;
   top: 0;
   left: 0;
   width: 100%;
+  height: var(--app-height, 100%);
+  max-height: 100%;
+  overflow: hidden;
   display: grid;
   grid-template-rows: 38px 34px minmax(0, 1fr) 26px;
 }

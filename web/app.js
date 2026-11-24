@@ -265,6 +265,12 @@ function sessionFacts(tab) {
     vw: viewport ? Math.round(viewport.width) : null,
     vh: viewport ? Math.round(viewport.height) : null,
     scale: viewport ? viewport.scale : null,
+    // Document geometry, so a "the page scrolls for no reason" report can be
+    // checked from the log alone: the two numbers must stay equal.
+    doc: (() => {
+      const el = document.scrollingElement || document.documentElement;
+      return [el.scrollHeight, el.clientHeight];
+    })(),
     kb: keyboardInset,
     mode: state.sizeMode,
     cols: tab ? tab.term.cols : null,
@@ -1601,9 +1607,13 @@ function syncViewportHeight() {
   const wasActive = keyboardInset > 0;
   keyboardInset = inset;
 
+  // Never taller than the layout viewport. iPad Safari reports a visual
+  // viewport LARGER than the layout viewport once its chrome collapses, and
+  // sizing the app from that number overflowed the document: the page became
+  // scrollable for no reason and dragging it only hid the top bar.
   document.documentElement.style.setProperty(
     "--app-height",
-    `${Math.max(1, Math.floor(visualViewport.height))}px`
+    `${Math.max(1, Math.floor(appViewportHeight()))}px`
   );
 
   if (inset > 0) {
@@ -1628,6 +1638,23 @@ function syncViewportHeight() {
   }
 }
 
+// Height the app may occupy: the visual viewport (so it ends above the soft
+// keyboard) clamped to the layout viewport (so it can never overflow).
+function appViewportHeight() {
+  const layout = document.documentElement.clientHeight || window.innerHeight || 0;
+  const visual = visualViewport ? visualViewport.height || 0 : layout;
+  if (!layout) return visual;
+  if (!visual) return layout;
+  return Math.min(visual, layout);
+}
+
+// Belt and braces for engines where overflow:clip is unavailable or the
+// viewport was panned anyway (iOS scrolling an off-screen focused field into
+// view). A no-op once the document is genuinely unscrollable.
+function pinDocument() {
+  if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+}
+
 if (visualViewport) {
   syncViewportHeight();
   visualViewport.addEventListener("resize", () => {
@@ -1636,14 +1663,18 @@ if (visualViewport) {
     scheduleFit();
   });
   visualViewport.addEventListener("scroll", () => {
+    pinDocument();
     syncViewportHeight();
     scheduleFit();
   });
 } else {
   window.addEventListener("resize", () => {
     normalViewportHeight = window.innerHeight;
+    syncViewportHeight();
   });
 }
+window.addEventListener("scroll", pinDocument);
+
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleFit);
 if (document.fonts && document.fonts.load) {
   document.fonts
