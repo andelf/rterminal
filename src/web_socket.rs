@@ -8,6 +8,7 @@
 use std::cell::Cell;
 use std::io;
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -22,6 +23,17 @@ use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, TabSelector, oneshot}
 
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 const MAX_BATCH: usize = 64 * 1024;
+static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Drop exactly one subscription. Called from the socket thread on every exit
+/// path, including a failed snapshot send.
+fn detach_stream(cmd_tx: &Sender<ApiCommand>, stream_id: u64) {
+    let (reply_tx, _) = oneshot();
+    let _ = cmd_tx.send_blocking(ApiCommand::WebStreamDetach {
+        stream_id,
+        reply: reply_tx,
+    });
+}
 
 struct Connection {
     tab_id: u64,
@@ -94,25 +106,43 @@ fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), Str
     let mut socket = accept_hdr(stream, callback).map_err(|err| format!("handshake: {err}"))?;
     let Connection { tab_id, client, debug } =
         conn.into_inner().ok_or_else(|| "handshake lost connection info".to_string())?;
+    let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
 
-    let (pty_rx, mut snapshot) = attach(&cmd_tx, tab_id, client.clone())?;
+    let (pty_rx, mut snapshot) = attach(&cmd_tx, tab_id, client.clone(), stream_id)?;
     snapshot["type"] = json!("snapshot");
-    socket
-        .send(Message::Text(snapshot.to_string().into()))
-        .map_err(|err| format!("send snapshot: {err}"))?;
+    if let Err(err) = socket.send(Message::Text(snapshot.to_string().into())) {
+        // The subscription is already registered: unwind it here, otherwise
+        // this stream stays alive until its buffer fills up.
+        detach_stream(&cmd_tx, stream_id);
+        return Err(format!("send snapshot: {err}"));
+    }
 
     loop {
         // Drain what the PTY has produced. The first chunk goes out immediately;
         // only an existing backlog is coalesced, so latency stays low.
-        if let Ok(first) = pty_rx.try_recv() {
-            let mut bytes = first;
+        // A closed channel means the tab is gone or the subscriber was dropped;
+        // keep polling would spin forever with a socket nobody closes.
+        let first = match pty_rx.try_recv() {
+            Ok(first) => Some(first),
+            Err(async_channel::TryRecvError::Empty) => None,
+            Err(async_channel::TryRecvError::Closed) => break,
+        };
+        if let Some(mut bytes) = first {
+            let mut disconnected = false;
             while bytes.len() < MAX_BATCH {
                 match pty_rx.try_recv() {
                     Ok(more) => bytes.extend_from_slice(&more),
-                    Err(_) => break,
+                    Err(async_channel::TryRecvError::Empty) => break,
+                    Err(async_channel::TryRecvError::Closed) => {
+                        disconnected = true;
+                        break;
+                    }
                 }
             }
             if socket.send(Message::Binary(bytes.into())).is_err() {
+                break;
+            }
+            if disconnected {
                 break;
             }
         }
@@ -128,8 +158,16 @@ fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), Str
                     bytes: data.to_vec(),
                     reply: reply_tx,
                 };
-                if cmd_tx.send_blocking(cmd).is_err() || reply_rx.recv_blocking().is_err() {
+                if cmd_tx.send_blocking(cmd).is_err() {
                     break;
+                }
+                match reply_rx.recv_blocking() {
+                    Ok(ApiReply::Ok { .. }) => {}
+                    Ok(ApiReply::Err { status, error }) => {
+                        eprintln!("web socket input rejected ({status}): {error}");
+                        break;
+                    }
+                    Err(_) => break,
                 }
             }
             Ok(Message::Text(text)) => {
@@ -148,11 +186,7 @@ fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), Str
         }
     }
 
-    let (reply_tx, _) = oneshot();
-    let _ = cmd_tx.send_blocking(ApiCommand::WebStreamDetach {
-        client,
-        reply: reply_tx,
-    });
+    detach_stream(&cmd_tx, stream_id);
     Ok(())
 }
 
@@ -160,6 +194,7 @@ fn attach(
     cmd_tx: &Sender<ApiCommand>,
     tab_id: u64,
     client: String,
+    stream_id: u64,
 ) -> Result<(Receiver<Vec<u8>>, Value), String> {
     let (reply_tx, reply_rx) = oneshot();
     let (stream_tx, stream_rx) = async_channel::bounded(1);
@@ -167,6 +202,7 @@ fn attach(
         .send_blocking(ApiCommand::WebStreamAttach {
             id: TabSelector::Id(tab_id),
             client,
+            stream_id,
             reply: reply_tx,
             stream: stream_tx,
         })

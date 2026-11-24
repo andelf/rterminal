@@ -93,12 +93,18 @@ pub(crate) enum ApiCommand {
     WebStreamAttach {
         id: TabSelector,
         client: String,
+        /// Unique per connection. Detach must identify the exact stream: a
+        /// late detach from an old connection must not remove the subscription
+        /// a newer connection just installed for the same client id.
+        stream_id: u64,
         reply: Sender<ApiReply>,
         /// Private channel used to hand the PTY receiver to the socket thread.
         stream: Sender<async_channel::Receiver<Vec<u8>>>,
     },
-    /// Drop the stream when its WebSocket closes.
-    WebStreamDetach { client: String, reply: Sender<ApiReply> },
+    /// Drop one specific stream when its WebSocket closes. The heartbeat
+    /// registry is deliberately untouched here — HTTP `connected:false` and
+    /// the 5 s stale timeout own client lifetime.
+    WebStreamDetach { stream_id: u64, reply: Sender<ApiReply> },
 }
 
 #[derive(Debug)]

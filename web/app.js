@@ -84,8 +84,7 @@ const state = {
   webConnected: false,
   clientBlocked: false,
   // WebSocket data plane. HTTP remains the control plane.
-  wsPort: 7879,
-  wsFailures: 0
+  wsPort: 7879
 };
 function applySizeModeUi() {
   const browser = state.sizeMode === "browser";
@@ -143,12 +142,21 @@ async function notifyClient(connected) {
       throw new Error(`${response.status} ${detail}`);
     }
     state.webConnected = connected;
+    if (connected) state.clientBlocked = false;
   } catch (error) {
     if (connected && /409|already connected/.test(String(error))) {
-      state.clientBlocked = true;
       statusEl.textContent = "另一个 Web 客户端已连接";
       const active = currentTab();
       if (active) stopPolling(active);
+      if (!state.clientBlocked) {
+        // A transient duplicate registration must not lock this page out
+        // forever: retry once the server's 5 s stale-client window has passed.
+        state.clientBlocked = true;
+        setTimeout(() => {
+          state.clientBlocked = false;
+          refresh();
+        }, 6000);
+      }
     } else if (connected) {
       report(error);
     }
@@ -532,23 +540,22 @@ function sendInput(tab, data, source = "key") {
   consumeOneShotModifiers(source);
   tab.inputChain = tab.inputChain
     .then(() => {
+      // onBinary strings are byte buckets (one char per PTY byte), not UTF-8;
+      // encoding them as text corrupts legacy mouse reports >= 0x80. Build the
+      // payload once so the WebSocket and its HTTP fallback agree byte-for-byte.
+      const payload = source === "binary"
+        ? Uint8Array.from(data, (ch) => ch.charCodeAt(0) & 0xff)
+        : new TextEncoder().encode(data);
       const socket = tab.socket;
       if (socket && socket.readyState === WebSocket.OPEN && !state.clientBlocked) {
-        if (source === "binary") {
-          // onBinary strings are byte buckets (one char per PTY byte), not UTF-8.
-          const bytes = new Uint8Array(data.length);
-          for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
-          socket.send(bytes);
-        } else {
-          socket.send(new TextEncoder().encode(data));
-        }
+        socket.send(payload);
         return;
       }
       // Fallback: keep the HTTP input endpoint alive for old servers and for
       // the short window while the WebSocket is reconnecting.
       return api(`/tabs/${tab.id}/input`, {
         method: "POST",
-        body: data,
+        body: payload,
         headers: debugHeaders()
       });
     })
@@ -1303,6 +1310,9 @@ function screenKeyButton(def) {
   let delayTimer = null;
   let repeatTimer = null;
   const stop = () => {
+    // Share the global stop registry with the compact toolbar: switching tabs
+    // or keyboard modes must be able to cancel an in-flight key repeat.
+    repeatStops.delete(stop);
     if (delayTimer !== null) clearTimeout(delayTimer);
     if (repeatTimer !== null) clearInterval(repeatTimer);
     delayTimer = null;
@@ -1326,6 +1336,7 @@ function screenKeyButton(def) {
     event.preventDefault();
     button.blur();
     stop();
+    repeatStops.add(stop);
     pointer = event.pointerId;
     // A synthetic PointerEvent (the replay harness) has no live pointer to
     // capture; attempting it would emit lostpointercapture and release the
@@ -1388,6 +1399,7 @@ function buildScreenKeyboard() {
   // Rebuilding is only used by the Win/Mac layout switch. Drop the old button
   // tree (and its modifiers) instead of leaving stale handlers on detached
   // nodes that would still be reachable through screenModButtons.
+  stopAllRepeats();
   releaseAllScreenModifiers();
   screenModButtons.clear();
   screenShiftLabels.length = 0;
@@ -1458,6 +1470,7 @@ function setKeyboardMode(mode) {
   // Caps Lock is a virtual lock: never let it survive a mode switch and
   // silently change what the next typed letter means.
   screenCapsLock = false;
+  stopAllRepeats();
   releaseAllScreenModifiers();
   state.keyboardMode = mode;
   applyKeyboardModeUi();
@@ -1762,7 +1775,7 @@ function startStream(tab) {
 
   socket.addEventListener("open", () => {
     if (gen !== tab.streamGen) return;
-    state.wsFailures = 0;
+    tab.wsFailures = 0;
     clearError();
   });
 
@@ -1798,14 +1811,14 @@ function startStream(tab) {
     if (gen !== tab.streamGen) return;
     tab.socket = null;
     if (state.active !== tab.id || state.clientBlocked) return;
-    state.wsFailures += 1;
+    tab.wsFailures += 1;
     // A couple of quick retries cover a server restart. After that, fall back
     // to snapshots so the view is never permanently frozen.
-    if (state.wsFailures >= 3) {
+    if (tab.wsFailures >= 3) {
       poll(tab);
       return;
     }
-    tab.reconnectTimer = setTimeout(() => startStream(tab), 300 * state.wsFailures);
+    tab.reconnectTimer = setTimeout(() => startStream(tab), 300 * tab.wsFailures);
   });
 }
 
@@ -1883,10 +1896,15 @@ function activate(id, fromUser) {
   const previous = currentTab();
   if (previous) {
     stopPolling(previous);
-    // A tab switched away mid-IME may never receive compositionend. Clear the
-    // stale gate so it cannot swallow input when it becomes active again.
+    // Release screen-keyboard modifiers while currentTab() still points at
+    // the old tab; otherwise they leak into the new tab as ctrl/alt/meta flags.
+    releaseAllScreenModifiers();
+    // A tab switched away mid-IME may never receive compositionend. Clear all
+    // three gate inputs — leaving `lastInputType` set swallowed the first key
+    // typed after coming back (xterm's listener runs before ours).
     previous.composing = false;
     previous.lastInputIsComposing = false;
+    previous.lastInputType = "";
     // A held retraction would otherwise be lost when the tab is reactivated.
     flushHold(previous);
     flushPendingPaint(previous);
@@ -1979,6 +1997,9 @@ function createTab(dto) {
     socket: null,
     reconnectTimer: null,
     streamGen: 0,
+    // Retry budget belongs to the tab: a global counter let failures in one
+    // tab consume another tab's chances to reconnect after a server restart.
+    wsFailures: 0,
     alt: null,
     inputChain: Promise.resolve(),
     followCursor: true,
@@ -2103,7 +2124,10 @@ function createTab(dto) {
         it: tab.lastInputType, ime: tab.lastInputIsComposing,
         composing: tab.composing, printable: false, binary: true
       });
-      sendInput(tab, text, "key");
+      // onBinary strings are byte buckets (one char per PTY byte), not UTF-8.
+      // The "key" route would expand bytes >= 0x80 into two UTF-8 bytes and
+      // corrupt legacy mouse reports.
+      sendInput(tab, text, "binary");
       endUtterance(tab);
     });
   }

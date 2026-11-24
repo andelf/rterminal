@@ -255,7 +255,10 @@ pub(crate) struct AgentTerminal {
     /// Web clients attached over WebSocket. Only the UI thread touches this,
     /// so no lock is needed; a full channel means the reader cannot keep up
     /// and is dropped so it can reconnect from a fresh screen snapshot.
-    web_streams: Vec<(String, async_channel::Sender<Vec<u8>>)>,
+    // (connection id, client id, sender). The connection id makes detach
+    // precise; the client id is only used to replace a stale stream to the
+    // same tab on reconnect.
+    web_streams: Vec<(u64, String, async_channel::Sender<Vec<u8>>)>,
     pending_term_events: Arc<Mutex<Vec<PendingTerminalEvent>>>,
     pub(crate) _window_bounds_sub: Option<Subscription>,
     pub(crate) _focus_in_sub: Option<Subscription>,
@@ -515,21 +518,26 @@ impl AgentTerminal {
     /// first so the browser has a consistent starting state.
     pub(crate) fn attach_web_stream(
         &mut self,
+        stream_id: u64,
         client: String,
     ) -> async_channel::Receiver<Vec<u8>> {
         let (tx, rx) = async_channel::bounded(4096);
-        self.web_streams.retain(|(id, _)| id != &client);
-        self.web_streams.push((client, tx));
+        // A reconnect to this same tab replaces the old stream immediately,
+        // without waiting for the old socket thread to process its detach.
+        self.web_streams.retain(|(_, owner, _)| owner != &client);
+        self.web_streams.push((stream_id, client, tx));
         rx
     }
 
-    pub(crate) fn detach_web_stream(&mut self, client: &str) {
-        self.web_streams.retain(|(id, _)| id != client);
+    pub(crate) fn detach_web_stream(&mut self, stream_id: u64) {
+        // Never match on client id: attach and detach run on different threads
+        // and an old connection's detach can overtake a new one's attach.
+        self.web_streams.retain(|(id, _, _)| id != &stream_id);
     }
 
     fn broadcast_web_streams(&mut self, bytes: &[u8]) {
         self.web_streams
-            .retain(|(_, tx)| tx.try_send(bytes.to_vec()).is_ok());
+            .retain(|(_, _, tx)| tx.try_send(bytes.to_vec()).is_ok());
     }
 
     pub(crate) fn ingest_batch(&mut self, cx: &mut Context<Self>, chunks: &[Vec<u8>]) {

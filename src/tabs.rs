@@ -618,7 +618,7 @@ impl TerminalTabs {
                 });
             }
 
-            ApiCommand::WebStreamAttach { id, client, reply, stream } => {
+            ApiCommand::WebStreamAttach { id, client, stream_id, reply, stream } => {
                 let Some((_, tab)) = self.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -650,7 +650,7 @@ impl TerminalTabs {
                 // turn: PTY batches are also applied on this thread, so no
                 // output can slip between the seed and the live stream.
                 let (rx, alt, ansi, cols, rows) = terminal.update(cx, |term, _| {
-                    let rx = term.attach_web_stream(client);
+                    let rx = term.attach_web_stream(stream_id, client);
                     let encoded = encode_screen(&term.snapshot, term.term.mode().clone());
                     let alt = encoded.starts_with('1');
                     (rx, alt, encoded[1..].to_string(), term.grid_size.cols, term.grid_size.rows)
@@ -667,15 +667,14 @@ impl TerminalTabs {
                 });
             }
 
-            ApiCommand::WebStreamDetach { client, reply } => {
+            ApiCommand::WebStreamDetach { stream_id, reply } => {
+                // Remove exactly this connection's subscription. Clearing the
+                // client registry here let an old socket's late detach log out
+                // the browser's newer connection.
                 for tab in &self.tabs {
                     if let TerminalTabKind::Terminal { terminal, .. } = &tab.kind {
-                        terminal.update(cx, |term, _| term.detach_web_stream(&client));
+                        terminal.update(cx, |term, _| term.detach_web_stream(stream_id));
                     }
-                }
-                if self.web_client.as_ref().is_some_and(|c| c.id == client) {
-                    self.web_client = None;
-                    self.pending_sync_to_window = true;
                 }
                 let _ = reply.send_blocking(ApiReply::Ok {
                     status: 200,
