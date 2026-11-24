@@ -1042,6 +1042,11 @@ function skLetters(letters) {
   // Shift is held, matching the on-screen keyboards people are used to.
   return [...letters].map((c) => sk(c.toLowerCase(), c.toLowerCase(), `Key${c}`, c.charCodeAt(0), c));
 }
+function skCaps() {
+  return sk("Caps", "CapsLock", "CapsLock", 20, null, {
+    wide: true, caps: true, title: "Caps Lock（切换字母大小写）"
+  });
+}
 const SK_DIGITS = "1234567890";
 const SK_SHIFTED_DIGITS = "!@#$%^&*()";
 
@@ -1065,10 +1070,11 @@ const SCREEN_KEY_ROWS_WIN = [
     sk("\\", "\\", "Backslash", 220, "|")
   ],
   [
-    sk("Enter", "Enter", "Enter", 13, null, { wide: true }),
+    skCaps(),
     ...skLetters("ASDFGHJKL"),
     sk(";", ";", "Semicolon", 186, ":"),
-    sk("'", "'", "Quote", 222, '"')
+    sk("'", "'", "Quote", 222, '"'),
+    sk("Enter", "Enter", "Enter", 13, null, { wide: true })
   ],
   [
     skMod("Shift", "shift", "ShiftLeft", 16),
@@ -1098,10 +1104,11 @@ const SCREEN_KEY_ROWS_MAC = [
   SCREEN_KEY_ROWS_WIN[1],
   SCREEN_KEY_ROWS_WIN[2],
   [
-    sk("return", "Enter", "Enter", 13, null, { wide: true }),
+    skCaps(),
     ...skLetters("ASDFGHJKL"),
     sk(";", ";", "Semicolon", 186, ":"),
-    sk("'", "'", "Quote", 222, '"')
+    sk("'", "'", "Quote", 222, '"'),
+    sk("return", "Enter", "Enter", 13, null, { wide: true })
   ],
   SCREEN_KEY_ROWS_WIN[4],
   [
@@ -1142,9 +1149,19 @@ const screenModButtons = new Map();
 // state instead of hard-coding one symbol: digits and punctuation show both
 // variants at once, letters swap between lower and upper case.
 const screenShiftLabels = [];
+// Caps Lock is a real lock, unlike the held modifiers above: it survives
+// subsequent keys and only affects letters (Shift inverts it, as on a PC).
+let screenCapsLock = false;
+let screenCapsButton = null;
 
 function isLetterShift(def) {
   return !!def.shifted && def.shifted.toLowerCase() === def.key.toLowerCase();
+}
+
+function screenLetterUpper(def) {
+  if (!isLetterShift(def)) return false;
+  const shift = screenHeldMods.has("shift");
+  return screenCapsLock ? !shift : shift;
 }
 
 function screenKeyEvent(type, def, charCode) {
@@ -1178,8 +1195,11 @@ function dispatchScreenKey(type, def, charCode) {
 }
 
 function effectiveScreenKey(def) {
-  if (!def.shifted || !screenHeldMods.has("shift")) return def;
-  return { ...def, key: def.shifted };
+  if (!def.shifted) return def;
+  if (isLetterShift(def)) {
+    return screenLetterUpper(def) ? { ...def, key: def.shifted } : def;
+  }
+  return screenHeldMods.has("shift") ? { ...def, key: def.shifted } : def;
 }
 
 function releaseAllScreenModifiers() {
@@ -1197,9 +1217,10 @@ function updateScreenShiftLabels() {
     const { def, button } = entry;
     const main = button.querySelector(".sk-key-main");
     const secondary = button.querySelector(".sk-key-shift");
-    main.textContent = shifted ? def.shifted : def.label;
-    if (secondary) secondary.textContent = shifted ? def.label : def.shifted;
-    button.classList.toggle("sk-shifted", shifted);
+    const upper = secondary ? shifted : screenLetterUpper(def);
+    main.textContent = upper ? def.shifted : def.label;
+    if (secondary) secondary.textContent = upper ? def.label : def.shifted;
+    button.classList.toggle("sk-shifted", upper);
   }
 }
 
@@ -1207,6 +1228,10 @@ function refreshScreenModButtons() {
   for (const [mod, buttons] of screenModButtons) {
     const held = screenHeldMods.has(mod);
     for (const button of buttons) button.classList.toggle("sk-held", held);
+  }
+  if (screenCapsButton) {
+    screenCapsButton.classList.toggle("sk-caps", screenCapsLock);
+    screenCapsButton.setAttribute("aria-pressed", String(screenCapsLock));
   }
   updateScreenShiftLabels();
 }
@@ -1238,6 +1263,10 @@ function screenKeyButton(def) {
   if (def.mod) {
     if (!screenModButtons.has(def.mod)) screenModButtons.set(def.mod, []);
     screenModButtons.get(def.mod).push(button);
+  }
+  if (def.caps) {
+    screenCapsButton = button;
+    button.setAttribute("aria-pressed", "false");
   }
 
   let pointer = null;
@@ -1276,6 +1305,14 @@ function screenKeyButton(def) {
       try { button.setPointerCapture?.(event.pointerId); } catch {}
     }
     button.classList.add("sk-down");
+    if (def.caps) {
+      // A lock, not a key event: nothing is sent to the PTY, only the letter
+      // caps and the next keystrokes change.
+      screenCapsLock = !screenCapsLock;
+      refreshScreenModButtons();
+      dbg("screen-caps", null, { on: screenCapsLock });
+      return;
+    }
     activeDef = def.mod ? def : effectiveScreenKey(def);
     dbg("skdown", null, { key: def.label, mod: def.mod || null, held: [...screenHeldMods] });
     if (def.mod) {
@@ -1318,6 +1355,8 @@ function buildScreenKeyboard() {
   releaseAllScreenModifiers();
   screenModButtons.clear();
   screenShiftLabels.length = 0;
+  screenCapsLock = false;
+  screenCapsButton = null;
   const layout = document.createElement("div");
   layout.className = "sk-layout";
   const main = document.createElement("div");
@@ -1378,6 +1417,9 @@ function applyKeyboardModeUi() {
 
 function setKeyboardMode(mode) {
   if (state.keyboardMode === mode) return;
+  // Caps Lock is a virtual lock: never let it survive a mode switch and
+  // silently change what the next typed letter means.
+  screenCapsLock = false;
   releaseAllScreenModifiers();
   state.keyboardMode = mode;
   applyKeyboardModeUi();

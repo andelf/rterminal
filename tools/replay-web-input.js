@@ -5,7 +5,7 @@
 //   node tools/replay-web-input.js [scenario...]     (default: all)
 //
 // Scenarios: spaces, keys, typing, dictation, rewrite, mixed, commit, mods, ime,
-// screen, screen-mac, screen-shift
+// screen, screen-mac, screen-shift, screen-caps
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -192,6 +192,27 @@ const SCENARIOS = {
       { mode: "system", delay: 300 }
     ]
   },
+  // Caps Lock is a lock, not a held modifier: it sends no byte itself, makes
+  // letters upper case, and Shift inverts it for the next letter.
+  "screen-caps": {
+    steps: [
+      { mode: "screen", delay: 300 },
+      { screenLetter: "a", delay: 60 },
+      { screenTap: "a", delay: 90 },
+      { screenTap: "Caps", delay: 90 },
+      { screenLetter: "A", delay: 60 },
+      { screenTap: "a", delay: 90 },
+      { screenDown: "Shift", delay: 60 },
+      { screenLetter: "a", delay: 60 },
+      { screenTap: "a", delay: 90 },
+      { screenUp: "Shift", delay: 60 },
+      { screenLetter: "A", delay: 60 },
+      { screenTap: "Caps", delay: 90 },
+      { screenLetter: "a", delay: 60 },
+      { screenTap: "a", delay: 90 },
+      { mode: "system", delay: 300 }
+    ]
+  },
   // IME commit: pre-edit is gated, the commit must go out exactly once even
   // though xterm raises onData from compositionend after the input event.
   ime: {
@@ -233,6 +254,11 @@ const PAGE_SCRIPT = (steps) => `(async () => {
       if (state.screenLayout !== step.screenLayout) {
         return "wrong screen layout: " + state.screenLayout;
       }
+    }
+    if (step.screenLetter) {
+      const a = skButton("a");
+      const cap = a?.querySelector(".sk-key-main")?.textContent ?? a?.textContent;
+      if (cap !== step.screenLetter) return "bad letter cap: " + cap;
     }
     if (step.screenCap) {
       const one = skButton("1"), a = skButton("a"), semi = skButton(";");
