@@ -19,6 +19,9 @@
       <button id="size-mode" class="mode-toggle" aria-pressed="false" title="切换尺寸权威方。PC 尺寸（默认）：以 PC 窗口为准，浏览器镜像网格并滚动/补点。浏览器尺寸：以浏览器视口为准，PC 窗口自动调整到相同网格，两端都不滚动。">
         <span id="size-mode-label">PC 尺寸</span>
       </button>
+      <button id="keyboard-mode" class="mode-toggle" aria-pressed="false" title="切换输入方式。系统键盘（默认）：使用浏览器/系统软键盘，支持中文听写与 IME。屏幕键盘：使用页面内置全键盘，按键直接送入终端，不唤起系统软键盘；外接物理键盘仍然可用。">
+        <span id="keyboard-mode-label">系统键盘</span>
+      </button>
     </div>
   </header>
 
@@ -36,6 +39,8 @@
     <div id="key-scroll" class="key-scroll"></div>
     <div id="key-nav" class="key-nav"></div>
   </div>
+
+  <section id="screen-keyboard" class="screen-keyboard" aria-label="Built-in screen keyboard" hidden></section>
 
   <footer class="statusbar">
     <span id="status">connecting…</span>

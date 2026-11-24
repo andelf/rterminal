@@ -134,6 +134,25 @@ const SCENARIOS = {
       { tool: "Shift" }
     ]
   },
+  // Built-in screen keyboard. Each tap is a native-shaped keydown/keyup with
+  // real modifier flags, so xterm does all the encoding: held Ctrl + A -> 0x01,
+  // plain A -> 0x61, held Shift + Left -> CSI 1;2D, F1 and Enter. No virtual
+  // modifier state and no textarea reconciliation are involved.
+  screen: {
+    steps: [
+      { mode: "screen", delay: 300 },
+      { screenDown: "Ctrl" },
+      { screenTap: "A", delay: 90 },
+      { screenUp: "Ctrl" },
+      { screenTap: "A", delay: 90 },
+      { screenDown: "Shift" },
+      { screenTap: "←", delay: 90 },
+      { screenUp: "Shift" },
+      { screenTap: "F1", delay: 90 },
+      { screenTap: "Enter", delay: 90 },
+      { mode: "system", delay: 300 }
+    ]
+  },
   // IME commit: pre-edit is gated, the commit must go out exactly once even
   // though xterm raises onData from compositionend after the input event.
   ime: {
@@ -163,6 +182,26 @@ const PAGE_SCRIPT = (steps) => `(async () => {
   field.focus();
   const steps = ${JSON.stringify(steps)};
   for (const step of steps) {
+    if (step.mode) {
+      document.getElementById("keyboard-mode").click();
+    }
+    if (step.screenDown || step.screenTap || step.screenUp) {
+      const label = step.screenDown || step.screenTap || step.screenUp;
+      const b = [...document.querySelectorAll("#screen-keyboard button")]
+        .find((x) => x.textContent === label);
+      if (!b) return "no screen key " + label;
+      // The held modifier keeps its own pointer id until screenUp.
+      const id = step.screenDown ? 5 : 6;
+      const type = step.screenDown ? "pointerdown" : step.screenTap ? "pointerdown" : "pointerup";
+      b.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, cancelable: true, pointerId: id
+      }));
+      if (step.screenTap) {
+        b.dispatchEvent(new PointerEvent("pointerup", {
+          bubbles: true, cancelable: true, pointerId: id
+        }));
+      }
+    }
     if (step.tool) {
       const b = [...document.querySelectorAll(".key-toolbar button")]
         .find((x) => x.textContent === step.tool);

@@ -12,6 +12,9 @@ const scrollbackView = document.getElementById("scrollback-view");
 const emptyState = document.getElementById("empty-state");
 const sizeModeButton = document.getElementById("size-mode");
 const sizeModeLabel = document.getElementById("size-mode-label");
+const keyboardModeButton = document.getElementById("keyboard-mode");
+const keyboardModeLabel = document.getElementById("keyboard-mode-label");
+const screenKeyboard = document.getElementById("screen-keyboard");
 const toolbarToggle = document.getElementById("toggle-toolbar");
 const keyToolbar = document.getElementById("key-toolbar");
 const keyScroll = document.getElementById("key-scroll");
@@ -40,11 +43,25 @@ function savedToolbar() {
   }
 }
 
+function savedKeyboardMode() {
+  // "system" (default) keeps the browser's own keyboard, IME and dictation.
+  // "screen" uses the built-in keyboard and deliberately does not focus
+  // xterm's helper textarea, so the OS soft keyboard stays out of the way.
+  try {
+    return localStorage.getItem("rterminal.keyboardMode") === "screen"
+      ? "screen"
+      : "system";
+  } catch {
+    return "system";
+  }
+}
+
 const state = {
   tabs: new Map(),
   active: null,
   refreshing: false,
   sizeMode: savedSizeMode(),
+  keyboardMode: savedKeyboardMode(),
   showToolbar: savedToolbar(),
   // Toolbar modifiers have three states, matching a hardware keyboard and
   // the platform on-screen keyboards: off / one-shot (applies to the next
@@ -703,6 +720,10 @@ function modifierCode() {
 }
 
 function anyModifier() {
+  // In screen-keyboard mode the modifier flags live in the synthetic key
+  // events themselves; xterm encodes them. Applying the toolbar modifiers a
+  // second time here would produce doubled Ctrl/Alt prefixes.
+  if (state.keyboardMode === "screen") return false;
   return MODIFIER_KEYS.some((key) => modOn(key.id));
 }
 
@@ -889,7 +910,11 @@ function bindHoldRepeat(button, press) {
     button.blur();
     pointer = event.pointerId;
     // Keep receiving pointerup when the finger drifts off the small button.
-    button.setPointerCapture?.(event.pointerId);
+    // A synthetic pointer has no live capture target: attempting it fires
+    // lostpointercapture immediately and would release a held key at once.
+    if (event.isTrusted) {
+      try { button.setPointerCapture?.(event.pointerId); } catch {}
+    }
     repeatStops.add(stop);
     button.classList.add("repeating");
     press();
@@ -980,6 +1005,291 @@ function setToolbar(visible) {
   }
   scheduleFit();
 }
+
+// --- Built-in screen keyboard ------------------------------------------------
+//
+// This is a different input model from the compact toolbar above. The toolbar
+// edits text through the browser's hidden textarea; here we act *as* the
+// keyboard: each tap dispatches a real-shaped keydown/keyup at xterm's textarea
+// with modifier flags on the event, and xterm does the encoding. There is no
+// one-shot/lock state, no textarea reconciliation and no IME — by design. The
+// system keyboard is one button away for those.
+
+function sk(label, key, code, vk, shifted, extra) {
+  return { label, key, code, vk, shifted, ...(extra || {}) };
+}
+function skMod(label, mod, code, vk) {
+  return { label, key: label, code, vk, mod };
+}
+function skLetters(letters) {
+  return [...letters].map((c) => sk(c, c.toLowerCase(), `Key${c}`, c.charCodeAt(0), c));
+}
+const SK_DIGITS = "1234567890";
+const SK_SHIFTED_DIGITS = "!@#$%^&*()";
+
+const SCREEN_KEY_ROWS = [
+  [
+    sk("Esc", "Escape", "Escape", 27),
+    ...Array.from({ length: 12 }, (_, i) => sk(`F${i + 1}`, `F${i + 1}`, `F${i + 1}`, 112 + i))
+  ],
+  [
+    sk("`", "`", "Backquote", 192, "~"),
+    ...[...SK_DIGITS].map((d, i) => sk(d, d, `Digit${d}`, 49 + i, SK_SHIFTED_DIGITS[i])),
+    sk("-", "-", "Minus", 189, "_"),
+    sk("=", "=", "Equal", 187, "+"),
+    sk("⌫", "Backspace", "Backspace", 8, null, { wide: true, repeat: true })
+  ],
+  [
+    sk("Tab", "Tab", "Tab", 9, null, { wide: true }),
+    ...skLetters("QWERTYUIOP"),
+    sk("[", "[", "BracketLeft", 219, "{"),
+    sk("]", "]", "BracketRight", 221, "}"),
+    sk("\\", "\\", "Backslash", 220, "|")
+  ],
+  [
+    sk("Enter", "Enter", "Enter", 13, null, { wide: true }),
+    ...skLetters("ASDFGHJKL"),
+    sk(";", ";", "Semicolon", 186, ":"),
+    sk("'", "'", "Quote", 222, '"')
+  ],
+  [
+    skMod("Shift", "shift", "ShiftLeft", 16),
+    ...skLetters("ZXCVBNM"),
+    sk(",", ",", "Comma", 188, "<"),
+    sk(".", ".", "Period", 190, ">"),
+    sk("/", "/", "Slash", 191, "?"),
+    skMod("Shift", "shift", "ShiftRight", 16)
+  ],
+  [
+    skMod("Ctrl", "ctrl", "ControlLeft", 17),
+    skMod("Win", "meta", "MetaLeft", 91),
+    skMod("Alt", "alt", "AltLeft", 18),
+    sk("Space", " ", "Space", 32, null, { space: true }),
+    skMod("Alt", "alt", "AltRight", 18),
+    skMod("Win", "meta", "MetaRight", 92),
+    skMod("Ctrl", "ctrl", "ControlRight", 17)
+  ]
+];
+
+const SCREEN_NAV_KEYS = [
+  [sk("Ins", "Insert", "Insert", 45), sk("Home", "Home", "Home", 36), sk("PgUp", "PageUp", "PageUp", 33)],
+  [sk("Del", "Delete", "Delete", 46), sk("End", "End", "End", 35), sk("PgDn", "PageDown", "PageDown", 34)]
+];
+const SCREEN_ARROW_KEYS = [
+  [sk("↑", "ArrowUp", "ArrowUp", 38, null, { repeat: true })],
+  [
+    sk("←", "ArrowLeft", "ArrowLeft", 37, null, { repeat: true }),
+    sk("↓", "ArrowDown", "ArrowDown", 40, null, { repeat: true }),
+    sk("→", "ArrowRight", "ArrowRight", 39, null, { repeat: true })
+  ]
+];
+
+// Which modifiers are currently DOWN on the on-screen keyboard. This is held
+// key state, not a latched mode: it can only be true while a finger is on a
+// modifier button, exactly like a physical keyboard.
+const screenHeldMods = new Set();
+const screenHeldDefs = new Map();
+const screenModButtons = new Map();
+
+function screenKeyEvent(type, def) {
+  const event = new KeyboardEvent(type, {
+    key: def.key,
+    code: def.code,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    shiftKey: screenHeldMods.has("shift"),
+    ctrlKey: screenHeldMods.has("ctrl"),
+    altKey: screenHeldMods.has("alt"),
+    metaKey: screenHeldMods.has("meta")
+  });
+  // Chrome's KeyboardEvent constructor does not accept keyCode/which. xterm
+  // still reads them, so define them the same way the replay harness does.
+  Object.defineProperty(event, "keyCode", { get: () => def.vk });
+  Object.defineProperty(event, "which", { get: () => def.vk });
+  return event;
+}
+
+function dispatchScreenKey(type, def) {
+  const tab = currentTab();
+  const field = tab && textareaEl(tab);
+  if (!field) return false;
+  field.dispatchEvent(screenKeyEvent(type, def));
+  return true;
+}
+
+function effectiveScreenKey(def) {
+  if (!def.shifted || !screenHeldMods.has("shift")) return def;
+  return { ...def, key: def.shifted };
+}
+
+function releaseAllScreenModifiers() {
+  // Send the keyups while the flag is still set, so xterm sees the same state
+  // that was on the matching keydown.
+  for (const [mod, def] of screenHeldDefs) dispatchScreenKey("keyup", def);
+  screenHeldMods.clear();
+  screenHeldDefs.clear();
+  for (const [mod, buttons] of screenModButtons) {
+    const held = screenHeldMods.has(mod);
+    for (const button of buttons) button.classList.toggle("sk-held", held);
+  }
+}
+
+function refreshScreenModButtons() {
+  for (const [mod, buttons] of screenModButtons) {
+    const held = screenHeldMods.has(mod);
+    for (const button of buttons) button.classList.toggle("sk-held", held);
+  }
+}
+
+function screenKeyButton(def) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = def.label;
+  button.title = def.mod ? `${def.label}（按住）` : def.label;
+  button.classList.add("sk-key");
+  if (def.wide) button.classList.add("sk-wide");
+  if (def.space) button.classList.add("sk-space");
+  if (def.mod) {
+    if (!screenModButtons.has(def.mod)) screenModButtons.set(def.mod, []);
+    screenModButtons.get(def.mod).push(button);
+  }
+
+  let pointer = null;
+  let activeDef = null;
+  let delayTimer = null;
+  let repeatTimer = null;
+  const stop = () => {
+    if (delayTimer !== null) clearTimeout(delayTimer);
+    if (repeatTimer !== null) clearInterval(repeatTimer);
+    delayTimer = null;
+    repeatTimer = null;
+    if (pointer !== null && button.hasPointerCapture?.(pointer)) {
+      try { button.releasePointerCapture(pointer); } catch {}
+    }
+    pointer = null;
+    button.classList.remove("sk-down");
+    if (!activeDef) return;
+    if (activeDef.mod) {
+      screenHeldMods.delete(activeDef.mod);
+      screenHeldDefs.delete(activeDef.mod);
+      refreshScreenModButtons();
+    }
+    dispatchScreenKey("keyup", activeDef);
+    activeDef = null;
+  };
+
+  button.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    button.blur();
+    stop();
+    pointer = event.pointerId;
+    // A synthetic PointerEvent (the replay harness) has no live pointer to
+    // capture; attempting it would emit lostpointercapture and release the
+    // modifier before the next key is pressed.
+    if (event.isTrusted) {
+      try { button.setPointerCapture?.(event.pointerId); } catch {}
+    }
+    button.classList.add("sk-down");
+    activeDef = def.mod ? def : effectiveScreenKey(def);
+    dbg("skdown", null, { key: def.label, mod: def.mod || null, held: [...screenHeldMods] });
+    if (def.mod) {
+      if (screenHeldMods.has(def.mod)) { activeDef = null; return; }
+      screenHeldMods.add(def.mod);
+      screenHeldDefs.set(def.mod, def);
+      refreshScreenModButtons();
+    }
+    dispatchScreenKey("keydown", activeDef);
+    if (def.repeat) {
+      // A real key repeats by sending another keydown; xterm turns each one
+      // into bytes. Pairing it with a keyup is what the probe verified.
+      delayTimer = setTimeout(() => {
+        delayTimer = null;
+        repeatTimer = setInterval(() => {
+          dispatchScreenKey("keydown", activeDef);
+          dispatchScreenKey("keyup", activeDef);
+        }, 70);
+      }, 420);
+    }
+  });
+  button.addEventListener("pointerup", stop);
+  button.addEventListener("pointercancel", stop);
+  button.addEventListener("lostpointercapture", stop);
+  button.addEventListener("contextmenu", (event) => event.preventDefault());
+  return button;
+}
+
+function buildScreenKeyboard() {
+  const layout = document.createElement("div");
+  layout.className = "sk-layout";
+  const main = document.createElement("div");
+  main.className = "sk-main";
+  for (const row of SCREEN_KEY_ROWS) {
+    const el = document.createElement("div");
+    el.className = "sk-row";
+    for (const def of row) el.appendChild(screenKeyButton(def));
+    main.appendChild(el);
+  }
+  layout.appendChild(main);
+
+  const side = document.createElement("div");
+  side.className = "sk-side";
+  for (const group of [SCREEN_NAV_KEYS, SCREEN_ARROW_KEYS]) {
+    const pad = document.createElement("div");
+    pad.className = "sk-pad";
+    for (const row of group) {
+      const el = document.createElement("div");
+      el.className = "sk-row";
+      for (const def of row) el.appendChild(screenKeyButton(def));
+      pad.appendChild(el);
+    }
+    side.appendChild(pad);
+  }
+  layout.appendChild(side);
+  screenKeyboard.appendChild(layout);
+}
+
+function applyKeyboardModeUi() {
+  const screen = state.keyboardMode === "screen";
+  keyboardModeButton.setAttribute("aria-pressed", String(screen));
+  keyboardModeLabel.textContent = screen ? "屏幕键盘" : "系统键盘";
+  screenKeyboard.hidden = !screen;
+  document.body.classList.toggle("with-screen-keyboard", screen);
+}
+
+function setKeyboardMode(mode) {
+  if (state.keyboardMode === mode) return;
+  releaseAllScreenModifiers();
+  state.keyboardMode = mode;
+  applyKeyboardModeUi();
+  if (mode === "screen") {
+    // Toolbar modifiers are a text-editing concept; they must not leak into
+    // a keyboard that carries its own modifier flags on every key event.
+    clearModifiers();
+    if (state.showToolbar) setToolbar(false);
+    // Keep the OS soft keyboard from opening over the built-in one.
+    for (const tab of state.tabs.values()) {
+      const field = textareaEl(tab);
+      if (field && document.activeElement === field) field.blur();
+    }
+  }
+  try {
+    localStorage.setItem("rterminal.keyboardMode", mode);
+  } catch {}
+  dbg("keyboard-mode", null, { mode });
+  scheduleFit();
+}
+
+keyboardModeButton.addEventListener("click", () => {
+  setKeyboardMode(state.keyboardMode === "screen" ? "system" : "screen");
+});
+
+// A physical key arriving while an on-screen modifier is down must release
+// it, or the terminal would keep receiving carrying modifier flags.
+document.addEventListener("keydown", (event) => {
+  if (!event.isTrusted || state.keyboardMode !== "screen") return;
+  if (screenHeldMods.size) releaseAllScreenModifiers();
+}, true);
 
 function makeTerm(cols, rows) {
   return new Terminal({
@@ -1404,6 +1714,12 @@ function createTab(dto) {
   // idempotent reconciler, so an extra or missing call cannot duplicate text.
   const textarea = term.element && term.element.querySelector(".xterm-helper-textarea");
   if (textarea) {
+    // The built-in keyboard dispatches events directly at this field; it does
+    // not need focus. Blurring it here stops the OS soft keyboard from popping
+    // up over the built-in one when a tap lands on the terminal.
+    textarea.addEventListener("focus", () => {
+      if (state.keyboardMode === "screen") textarea.blur();
+    }, true);
     textarea.addEventListener("compositionstart", () => { tab.composing = true; }, true);
     textarea.addEventListener("compositionupdate", () => { tab.composing = true; }, true);
     textarea.addEventListener("compositionend", () => {
@@ -1750,6 +2066,8 @@ if (document.fonts && document.fonts.load) {
 // Materialise the toolbar once and apply the persisted visibility. body's
 // grid template switches to the 5-row layout only when it is shown.
 buildToolbar();
+buildScreenKeyboard();
+applyKeyboardModeUi();
 keyToolbar.hidden = !state.showToolbar;
 document.body.classList.toggle("with-toolbar", state.showToolbar);
 
