@@ -1038,7 +1038,9 @@ function skMod(label, mod, code, vk, extra) {
   return { label, key: label, code, vk, mod, ...(extra || {}) };
 }
 function skLetters(letters) {
-  return [...letters].map((c) => sk(c, c.toLowerCase(), `Key${c}`, c.charCodeAt(0), c));
+  // Caps stay lowercase by default and switch to the upper-case variant while
+  // Shift is held, matching the on-screen keyboards people are used to.
+  return [...letters].map((c) => sk(c.toLowerCase(), c.toLowerCase(), `Key${c}`, c.charCodeAt(0), c));
 }
 const SK_DIGITS = "1234567890";
 const SK_SHIFTED_DIGITS = "!@#$%^&*()";
@@ -1136,8 +1138,16 @@ const SCREEN_ARROW_KEYS = [
 const screenHeldMods = new Set();
 const screenHeldDefs = new Map();
 const screenModButtons = new Map();
+// Keys with an upper-case / shifted variant. Their caps follow the held Shift
+// state instead of hard-coding one symbol: digits and punctuation show both
+// variants at once, letters swap between lower and upper case.
+const screenShiftLabels = [];
 
-function screenKeyEvent(type, def) {
+function isLetterShift(def) {
+  return !!def.shifted && def.shifted.toLowerCase() === def.key.toLowerCase();
+}
+
+function screenKeyEvent(type, def, charCode) {
   const event = new KeyboardEvent(type, {
     key: def.key,
     code: def.code,
@@ -1152,15 +1162,18 @@ function screenKeyEvent(type, def) {
   // Chrome's KeyboardEvent constructor does not accept keyCode/which. xterm
   // still reads them, so define them the same way the replay harness does.
   Object.defineProperty(event, "keyCode", { get: () => def.vk });
-  Object.defineProperty(event, "which", { get: () => def.vk });
+  Object.defineProperty(event, "which", { get: () => charCode ?? def.vk });
+  if (charCode !== undefined) {
+    Object.defineProperty(event, "charCode", { get: () => charCode });
+  }
   return event;
 }
 
-function dispatchScreenKey(type, def) {
+function dispatchScreenKey(type, def, charCode) {
   const tab = currentTab();
   const field = tab && textareaEl(tab);
   if (!field) return false;
-  field.dispatchEvent(screenKeyEvent(type, def));
+  field.dispatchEvent(screenKeyEvent(type, def, charCode));
   return true;
 }
 
@@ -1175,9 +1188,18 @@ function releaseAllScreenModifiers() {
   for (const [mod, def] of screenHeldDefs) dispatchScreenKey("keyup", def);
   screenHeldMods.clear();
   screenHeldDefs.clear();
-  for (const [mod, buttons] of screenModButtons) {
-    const held = screenHeldMods.has(mod);
-    for (const button of buttons) button.classList.toggle("sk-held", held);
+  refreshScreenModButtons();
+}
+
+function updateScreenShiftLabels() {
+  const shifted = screenHeldMods.has("shift");
+  for (const entry of screenShiftLabels) {
+    const { def, button } = entry;
+    const main = button.querySelector(".sk-key-main");
+    const secondary = button.querySelector(".sk-key-shift");
+    main.textContent = shifted ? def.shifted : def.label;
+    if (secondary) secondary.textContent = shifted ? def.label : def.shifted;
+    button.classList.toggle("sk-shifted", shifted);
   }
 }
 
@@ -1186,13 +1208,30 @@ function refreshScreenModButtons() {
     const held = screenHeldMods.has(mod);
     for (const button of buttons) button.classList.toggle("sk-held", held);
   }
+  updateScreenShiftLabels();
 }
 
 function screenKeyButton(def) {
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = def.label;
+  // Keep the base label available to the replay harness even while Shift has
+  // swapped the visible cap to its upper variant.
+  button.dataset.label = def.label;
+  button.dataset.key = def.key;
   button.title = def.title || (def.mod ? `${def.label}（按住）` : def.label);
+  if (def.shifted) {
+    const main = document.createElement("span");
+    main.className = "sk-key-main";
+    button.appendChild(main);
+    if (!isLetterShift(def)) {
+      const secondary = document.createElement("span");
+      secondary.className = "sk-key-shift";
+      button.appendChild(secondary);
+    }
+    screenShiftLabels.push({ def, button });
+  } else {
+    button.textContent = def.label;
+  }
   button.classList.add("sk-key");
   if (def.wide) button.classList.add("sk-wide");
   if (def.space) button.classList.add("sk-space");
@@ -1246,6 +1285,13 @@ function screenKeyButton(def) {
       refreshScreenModButtons();
     }
     dispatchScreenKey("keydown", activeDef);
+    // xterm deliberately ignores a bare keydown whose key is an upper-case
+    // letter: it waits for the browser's keypress(charCode) that normally
+    // follows. A synthetic event has no such default action, so supply it.
+    // Lower-case letters and symbols are already emitted by the keydown.
+    if (/^[A-Z]$/.test(activeDef.key)) {
+      dispatchScreenKey("keypress", activeDef, activeDef.key.charCodeAt(0));
+    }
     if (def.repeat) {
       // A real key repeats by sending another keydown; xterm turns each one
       // into bytes. Pairing it with a keyup is what the probe verified.
@@ -1271,6 +1317,7 @@ function buildScreenKeyboard() {
   // nodes that would still be reachable through screenModButtons.
   releaseAllScreenModifiers();
   screenModButtons.clear();
+  screenShiftLabels.length = 0;
   const layout = document.createElement("div");
   layout.className = "sk-layout";
   const main = document.createElement("div");
@@ -1298,6 +1345,7 @@ function buildScreenKeyboard() {
   }
   layout.appendChild(side);
   skLayoutHolder.replaceChildren(layout);
+  updateScreenShiftLabels();
   const mac = state.screenLayout === "mac";
   skLayoutToggle.textContent = mac ? "Win 样式" : "Mac 样式";
   skLayoutToggle.title = mac

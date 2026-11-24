@@ -225,6 +225,10 @@ body.with-toolbar.with-screen-keyboard {
   gap: 3px;
 }
 .screen-keyboard .sk-key {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-width: 35px;
   height: 31px;
   padding: 0 5px;
@@ -234,6 +238,19 @@ body.with-toolbar.with-screen-keyboard {
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
+/* The small upper-right glyph is the Shift variant. While Shift is held the
+   two swap places, so the same 42 px cap can show both symbols. */
+.screen-keyboard .sk-key-shift {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--muted);
+  pointer-events: none;
+}
+.screen-keyboard .sk-key.sk-shifted .sk-key-main { color: #fff; }
+.screen-keyboard .sk-key.sk-shifted .sk-key-shift { color: #6aa6ff; }
 .screen-keyboard .sk-key.sk-wide { min-width: 58px; }
 .screen-keyboard .sk-key.sk-space { min-width: 170px; }
 .screen-keyboard .sk-key.sk-down {

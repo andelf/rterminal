@@ -5,7 +5,7 @@
 //   node tools/replay-web-input.js [scenario...]     (default: all)
 //
 // Scenarios: spaces, keys, typing, dictation, rewrite, mixed, commit, mods, ime,
-// screen, screen-mac
+// screen, screen-mac, screen-shift
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -143,9 +143,9 @@ const SCENARIOS = {
     steps: [
       { mode: "screen", delay: 300 },
       { screenDown: "Ctrl" },
-      { screenTap: "A", delay: 90 },
+      { screenTap: "a", delay: 90 },
       { screenUp: "Ctrl" },
-      { screenTap: "A", delay: 90 },
+      { screenTap: "a", delay: 90 },
       { screenDown: "Shift" },
       { screenTap: "←", delay: 90 },
       { screenUp: "Shift" },
@@ -163,14 +163,32 @@ const SCENARIOS = {
       { mode: "screen", delay: 300 },
       { screenLayout: "mac", delay: 200 },
       { screenDown: "⌥" },
-      { screenTap: "A", delay: 90 },
+      { screenTap: "a", delay: 90 },
       { screenUp: "⌥" },
       { screenDown: "⌘" },
-      { screenTap: "A", delay: 90 },
+      { screenTap: "a", delay: 90 },
       { screenUp: "⌘" },
       { screenTap: "return", delay: 90 },
       { screenLayout: "win", delay: 200 },
-      { screenTap: "A", delay: 90 },
+      { screenTap: "a", delay: 90 },
+      { mode: "system", delay: 300 }
+    ]
+  },
+  // Shift caps follow the held state: letters are lower case by default,
+  // digit/symbol caps also advertise their shifted glyph. The byte check
+  // makes sure the visible cap and the key actually sent agree.
+  "screen-shift": {
+    steps: [
+      { mode: "screen", delay: 300 },
+      { screenCap: "1|!|a|;|:", delay: 60 },
+      { screenTap: "1", delay: 90 },
+      { screenDown: "Shift", delay: 60 },
+      { screenCap: "!|1|A|:|;", delay: 60 },
+      { screenTap: "1", delay: 90 },
+      { screenTap: "a", delay: 90 },
+      { screenUp: "Shift", delay: 60 },
+      { screenCap: "1|!|a|;|:", delay: 60 },
+      { screenTap: "a", delay: 90 },
       { mode: "system", delay: 300 }
     ]
   },
@@ -201,6 +219,10 @@ const PAGE_SCRIPT = (steps) => `(async () => {
   const field = (pane || document).querySelector(".xterm-helper-textarea");
   if (!field) return "no hidden textarea";
   field.focus();
+  // Caps change with held Shift; the base label lives on the button so the
+  // harness can still find a key after its visible cap has swapped.
+  const skButton = (label) => [...document.querySelectorAll("#sk-layout .sk-key")]
+    .find((x) => x.dataset.label === label || x.textContent === label);
   const steps = ${JSON.stringify(steps)};
   for (const step of steps) {
     if (step.mode) {
@@ -212,10 +234,16 @@ const PAGE_SCRIPT = (steps) => `(async () => {
         return "wrong screen layout: " + state.screenLayout;
       }
     }
+    if (step.screenCap) {
+      const one = skButton("1"), a = skButton("a"), semi = skButton(";");
+      const main = (b) => b && (b.querySelector(".sk-key-main")?.textContent ?? b.textContent);
+      const upper = (b) => b && b.querySelector(".sk-key-shift")?.textContent;
+      const caps = [main(one), upper(one), main(a), main(semi), upper(semi)].join("|");
+      if (caps !== step.screenCap) return "bad caps: " + caps;
+    }
     if (step.screenDown || step.screenTap || step.screenUp) {
       const label = step.screenDown || step.screenTap || step.screenUp;
-      const b = [...document.querySelectorAll("#screen-keyboard button")]
-        .find((x) => x.textContent === label);
+      const b = skButton(label);
       if (!b) return "no screen key " + label;
       // The held modifier keeps its own pointer id until screenUp.
       const id = step.screenDown ? 5 : 6;
