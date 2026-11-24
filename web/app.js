@@ -46,9 +46,10 @@ const state = {
   refreshing: false,
   sizeMode: savedSizeMode(),
   showToolbar: savedToolbar(),
-  // Sticky modifiers latched by the toolbar. They modify both toolbar keys
-  // and text typed on the soft keyboard, then stay on until toggled off.
-  mods: { shift: false, ctrl: false, alt: false, meta: false },
+  // Toolbar modifiers have three states, matching a hardware keyboard and
+  // the platform on-screen keyboards: off / one-shot (applies to the next
+  // input only) / locked (double tap, applies until explicitly released).
+  mods: { shift: "off", ctrl: "off", alt: "off", meta: "off" },
   webConnected: false,
   clientBlocked: false
 };
@@ -487,6 +488,11 @@ function sendInput(tab, data, source = "key") {
   // A queued retraction must reach the PTY before anything typed after it.
   if (source !== "reconcile") flushHold(tab);
   dbg("send", tab, { src: source, text: clip(data), hex: hexOf(data), len: data.length });
+  // Every byte leaves through this one function, after the caller has encoded
+  // it. That makes it the safe place to spend a one-shot modifier: the key
+  // that had to be modified has already been built, and the next key will be
+  // plain. Locked modifiers are untouched.
+  consumeOneShotModifiers(source);
   tab.inputChain = tab.inputChain
     .then(() =>
       api(`/tabs/${tab.id}/input`, {
@@ -681,17 +687,23 @@ function flushHold(tab) {
   if (latest !== null && latest !== undefined) reconcileTo(tab, latest, true);
 }
 
+function modOn(id) {
+  return state.mods[id] !== "off";
+}
+
 // Same modifier numbering as the native keyboard encoder: 1 + shift + 2*alt
 // + 4*ctrl (plus 8*meta for the platform key, which native reserves for app
 // shortcuts). CSI 1;n{key} is how terminals encode modified navigation keys.
 function modifierCode() {
-  const m = state.mods;
-  return 1 + (m.shift ? 1 : 0) + (m.alt ? 2 : 0) + (m.ctrl ? 4 : 0) + (m.meta ? 8 : 0);
+  return 1
+    + (modOn("shift") ? 1 : 0)
+    + (modOn("alt") ? 2 : 0)
+    + (modOn("ctrl") ? 4 : 0)
+    + (modOn("meta") ? 8 : 0);
 }
 
 function anyModifier() {
-  const m = state.mods;
-  return m.shift || m.ctrl || m.alt || m.meta;
+  return MODIFIER_KEYS.some((key) => modOn(key.id));
 }
 
 // Alt/Meta prefix printable and control bytes with ESC. Ctrl on a plain letter
@@ -702,45 +714,104 @@ function encodeTyped(text) {
   const ch = text[0];
   const code = ch.charCodeAt(0);
   if (code < 0x20 || code > 0x7e) return text;
-  const m = state.mods;
   let out = ch;
-  if (m.ctrl) out = String.fromCharCode(ch.toLowerCase().charCodeAt(0) & 0x1f);
-  else if (m.shift) out = ch.toUpperCase();
-  if (m.alt || m.meta) out = "\x1b" + out;
+  if (modOn("ctrl")) out = String.fromCharCode(ch.toLowerCase().charCodeAt(0) & 0x1f);
+  else if (modOn("shift")) out = ch.toUpperCase();
+  if (modOn("alt") || modOn("meta")) out = "\x1b" + out;
   return out;
 }
 
 // A toolbar key is a semantic key, so latched modifiers turn a plain arrow
 // into Ctrl+Arrow etc. instead of appending to a pre-baked byte string.
 function encodeToolbarKey(key) {
-  const m = state.mods;
   if (!anyModifier()) return key.data;
   // Backspace must match the native encoder: plain DEL, Ctrl-BS, ESC prefix
   // for Alt/Meta. Treating it as a generic control byte would swallow Ctrl.
   if (key.special === "backspace") {
-    const data = m.ctrl ? "\x08" : key.data;
-    return m.alt || m.meta ? "\x1b" + data : data;
+    const data = modOn("ctrl") ? "\x08" : key.data;
+    return modOn("alt") || modOn("meta") ? "\x1b" + data : data;
   }
   if (key.special === "tab") {
-    if (m.shift && !m.ctrl && !m.alt && !m.meta) return "\x1b[Z";
+    if (modOn("shift") && !modOn("ctrl") && !modOn("alt") && !modOn("meta")) {
+      return "\x1b[Z";
+    }
     return `\x1b[1;${modifierCode()}I`;
   }
   if (key.csiFinal) return `\x1b[1;${modifierCode()}${key.csiFinal}`;
   // Control / Esc bytes: Alt or Meta adds an ESC prefix; Shift alone leaves
   // the control byte unchanged (there is no shifted form of ^C).
-  return (m.alt || m.meta ? "\x1b" : "") + key.data;
+  return (modOn("alt") || modOn("meta") ? "\x1b" : "") + key.data;
 }
 
 const MODIFIER_KEYS = [
-  { id: "shift", label: "Shift", title: "Shift (sticky)" },
-  { id: "ctrl", label: "Ctrl", title: "Ctrl (sticky)" },
-  { id: "alt", label: "Alt", title: "Alt (sticky)" },
+  { id: "shift", label: "Shift" },
+  { id: "ctrl", label: "Ctrl" },
+  { id: "alt", label: "Alt" },
   {
     id: "meta",
-    label: /Mac|iPhone|iPad|iPod/i.test(navigator.platform || "") ? "Cmd" : "Win",
-    title: "Windows / Command (sticky)"
+    label: /Mac|iPhone|iPad|iPod/i.test(navigator.platform || "") ? "Cmd" : "Win"
   }
 ];
+
+// Modifier buttons behave like the modifiers on a real keyboard and on the
+// platform on-screen keyboards: one tap arms the NEXT key, a quick double tap
+// locks it on, and one more tap releases it. The locked state is visually
+// different, because an invisible difference would make every shortcut a gamble.
+const DOUBLE_TAP_MS = 320;
+const modifierButtons = new Map();
+const lastModifierTap = new Map();
+
+function modifierTitle(key) {
+  const mode = state.mods[key.id];
+  const stateText = mode === "locked" ? "已锁定" : mode === "once" ? "下一个按键生效" : "关闭";
+  return `${key.label} · ${stateText} ｜ 单击=仅作用于下一个按键；快速双击=持续锁定；再单击=关闭`;
+}
+
+function applyModifierUi() {
+  for (const key of MODIFIER_KEYS) {
+    const button = modifierButtons.get(key.id);
+    if (!button) continue;
+    const mode = state.mods[key.id];
+    button.classList.toggle("active", mode !== "off");
+    button.classList.toggle("locked", mode === "locked");
+    button.setAttribute("aria-pressed", String(mode !== "off"));
+    button.title = modifierTitle(key);
+  }
+}
+
+function setModifier(id, mode) {
+  if (state.mods[id] === mode) return;
+  state.mods[id] = mode;
+  applyModifierUi();
+  dbg("mod", null, { key: id, mode });
+}
+
+function tapModifier(key) {
+  const now = Date.now();
+  const mode = state.mods[key.id];
+  const quick = mode === "once" && now - (lastModifierTap.get(key.id) || 0) <= DOUBLE_TAP_MS;
+  // Tapping an armed modifier again before the double-tap window closes means
+  // "lock it"; after the window it means "cancel". A locked modifier always
+  // releases on the next tap, so there is no way to get stuck in a chord.
+  const next = mode === "locked" ? "off" : quick ? "locked" : mode === "once" ? "off" : "once";
+  lastModifierTap.set(key.id, now);
+  setModifier(key.id, next);
+}
+
+// Called from sendInput after the caller has encoded its bytes: one-shot
+// modifiers are spent by the transmission they were armed for, locked ones
+// survive so a modifier can be held across several keys.
+function consumeOneShotModifiers(source) {
+  const spent = [];
+  for (const key of MODIFIER_KEYS) {
+    if (state.mods[key.id] !== "once") continue;
+    state.mods[key.id] = "off";
+    spent.push(key.id);
+  }
+  if (!spent.length) return;
+  applyModifierUi();
+  dbg("mod", null, { spent, src: source });
+}
 
 // Far left: the two keys with no printable soft-keyboard equivalent.
 const LEADING_KEYS = [
@@ -870,15 +941,13 @@ function buildToolbar() {
   }
   appendToolbarSeparator();
   for (const key of MODIFIER_KEYS) {
-    const button = makeKeyButton(key, () => {
-      state.mods[key.id] = !state.mods[key.id];
-      button.classList.toggle("active", state.mods[key.id]);
-      button.setAttribute("aria-pressed", String(state.mods[key.id]));
-    });
+    const button = makeKeyButton(key, () => tapModifier(key));
     button.classList.add("key-toggle");
     button.setAttribute("aria-pressed", "false");
+    modifierButtons.set(key.id, button);
     keyScroll.appendChild(button);
   }
+  applyModifierUi();
   appendToolbarSeparator();
   for (const key of EDIT_KEYS) {
     keyScroll.appendChild(makeKeyButton(key, sendKey(key)));
@@ -889,13 +958,8 @@ function buildToolbar() {
 }
 
 function clearModifiers() {
-  for (const key of MODIFIER_KEYS) {
-    state.mods[key.id] = false;
-  }
-  for (const button of keyScroll.querySelectorAll(".key-toggle")) {
-    button.classList.remove("active");
-    button.setAttribute("aria-pressed", "false");
-  }
+  for (const key of MODIFIER_KEYS) state.mods[key.id] = "off";
+  applyModifierUi();
 }
 
 function setToolbar(visible) {

@@ -4,7 +4,7 @@
 //
 //   node tools/replay-web-input.js [scenario...]     (default: all)
 //
-// Scenarios: spaces, dictation, ime
+// Scenarios: spaces, keys, typing, dictation, rewrite, mixed, commit, mods, ime
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -114,6 +114,26 @@ const SCENARIOS = {
       { value: "再见", data: "再见", inputType: "insertText", delay: 900 }
     ]
   },
+  // Toolbar modifiers. One tap applies only to the next key (Ctrl+a = 0x01,
+  // then plain a = 0x61); a quick double tap locks (two 0x01), and one more
+  // tap releases. The last pair checks that a locked Shift still encodes a
+  // modified CSI arrow. No browser input pipeline is involved here: these are
+  // our own button handlers, so synthesised pointer events are sufficient.
+  mods: {
+    steps: [
+      { tool: "Ctrl" },
+      { key: { key: "a", keyCode: 65 }, delay: 80 },
+      { key: { key: "a", keyCode: 65 }, delay: 80 },
+      { tool: "Ctrl" }, { tool: "Ctrl" },
+      { key: { key: "a", keyCode: 65 }, delay: 80 },
+      { key: { key: "a", keyCode: 65 }, delay: 80 },
+      { tool: "Ctrl" },
+      { key: { key: "a", keyCode: 65 }, delay: 80 },
+      { tool: "Shift" }, { tool: "Shift" },
+      { tool: "↑" },
+      { tool: "Shift" }
+    ]
+  },
   // IME commit: pre-edit is gated, the commit must go out exactly once even
   // though xterm raises onData from compositionend after the input event.
   ime: {
@@ -143,6 +163,20 @@ const PAGE_SCRIPT = (steps) => `(async () => {
   field.focus();
   const steps = ${JSON.stringify(steps)};
   for (const step of steps) {
+    if (step.tool) {
+      const b = [...document.querySelectorAll(".key-toolbar button")]
+        .find((x) => x.textContent === step.tool);
+      if (!b) return "no toolbar button " + step.tool;
+      b.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true, cancelable: true, pointerId: 1
+      }));
+      // Repeatable keys start a hold timer on pointerdown. Without the
+      // matching pointerup an arrow would keep firing long after the scenario
+      // and pollute the byte trace with a stream of unrelated 0x1b[A.
+      b.dispatchEvent(new PointerEvent("pointerup", {
+        bubbles: true, cancelable: true, pointerId: 1
+      }));
+    }
     if (step.key) {
       const down = new KeyboardEvent("keydown", {
         key: step.key.key, bubbles: true, cancelable: true, composed: true
