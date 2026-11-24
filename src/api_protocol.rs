@@ -28,10 +28,14 @@ pub(crate) struct ScrollRequest {
 }
 
 /// Wire shape of `POST /tabs/:id/resize`. Bounds-enforced in `api_server`.
+/// `sync_window` means the browser is authoritative ("浏览器尺寸" mode): the
+/// native window is resized to fit this grid too, so neither side scrolls.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ResizeRequest {
     pub(crate) cols: u16,
     pub(crate) rows: u16,
+    #[serde(default)]
+    pub(crate) sync_window: bool,
 }
 
 /// Wire shape of `POST /web/client`. The built-in page sends this on load,
@@ -44,8 +48,8 @@ pub(crate) struct WebClientRequest {
     pub(crate) cols: u16,
     #[serde(default)]
     pub(crate) rows: u16,
-    #[serde(default)]
-    pub(crate) web_fit: bool,
+    #[serde(default, alias = "web_fit")]
+    pub(crate) browser_size: bool,
 }
 
 #[derive(Debug)]
@@ -61,13 +65,22 @@ pub(crate) enum ApiCommand {
     GetScreenAnsi { id: TabSelector, reply: Sender<ApiReply> },
     GetScrollback { id: TabSelector, lines: Option<usize>, reply: Sender<ApiReply> },
     ScrollDisplay { id: TabSelector, action: ScrollAction, reply: Sender<ApiReply> },
-    ResizeTab { id: TabSelector, cols: u16, rows: u16, reply: Sender<ApiReply> },
+    ResizeTab {
+        id: TabSelector,
+        cols: u16,
+        rows: u16,
+        sync_window: bool,
+        reply: Sender<ApiReply>,
+    },
+    /// `browser_size` is true in "浏览器尺寸" mode: the browser viewport is
+    /// authoritative and the native window follows it. False is "PC 尺寸"
+    /// mode, where the native window is authoritative.
     WebClient {
         id: String,
         connected: bool,
         cols: u16,
         rows: u16,
-        web_fit: bool,
+        browser_size: bool,
         reply: Sender<ApiReply>,
     },
     WriteInput { id: TabSelector, bytes: Vec<u8>, reply: Sender<ApiReply> },

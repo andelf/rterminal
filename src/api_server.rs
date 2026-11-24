@@ -44,7 +44,9 @@ pub(crate) fn parse_request(
         ("POST", ["tabs", sel, "resize"]) => {
             let req: ResizeRequest = serde_json::from_slice(&body).map_err(|err| RouteError {
                 status: 400,
-                message: format!("invalid resize body (expected JSON {{cols, rows}}): {err}"),
+                message: format!(
+                    "invalid resize body (expected JSON {{cols, rows, sync_window?}}): {err}"
+                ),
             })?;
             if !(20..=300).contains(&req.cols) || !(5..=200).contains(&req.rows) {
                 return Err(RouteError {
@@ -59,6 +61,7 @@ pub(crate) fn parse_request(
                 id: parse_selector(sel)?,
                 cols: req.cols,
                 rows: req.rows,
+                sync_window: req.sync_window,
                 reply: tx,
             }
         }
@@ -91,7 +94,7 @@ pub(crate) fn parse_request(
                 connected: req.connected,
                 cols: req.cols,
                 rows: req.rows,
-                web_fit: req.web_fit,
+                browser_size: req.browser_size,
                 reply: tx,
             }
         }
@@ -103,6 +106,25 @@ pub(crate) fn parse_request(
             })?,
             reply: tx,
         },
+
+        // Web-client debug transport. The browser streams its raw input events
+        // here; we only append to a local file, so this needs neither the GUI
+        // thread nor any reply.
+        ("POST", ["web", "debug"]) => {
+            crate::web_debug::append_client(&String::from_utf8_lossy(&body));
+            return Ok(RouteOutcome::Immediate {
+                status: 204,
+                content_type: "text/plain; charset=utf-8",
+                body: String::new(),
+            });
+        }
+        ("GET", ["web", "debug"]) | ("GET", ["web", "debug", "log"]) => {
+            return Ok(RouteOutcome::Immediate {
+                status: 200,
+                content_type: "text/plain; charset=utf-8",
+                body: crate::web_debug::tail(parse_lines_query(query)?.unwrap_or(400)),
+            });
+        }
 
         // legacy /debug aliases
         ("GET", ["debug"]) => {
@@ -210,13 +232,15 @@ fn legacy_help_text() -> String {
         "  GET    /tabs/:id/screen",
         "  GET    /tabs/:id/screen.ansi     (ANSI repaint for the built-in web UI)",
         "  GET    /tabs/:id/scrollback    (?lines=N, default all up to 10000)",
-        "  POST   /tabs/:id/resize        (JSON: {cols, rows})",
+        "  POST   /tabs/:id/resize        (JSON: {cols, rows, sync_window?})",
         "  POST   /tabs/:id/scroll        (JSON: {action,lines?})",
         "  POST   /tabs/:id/input         (raw body)",
         "  POST   /tabs/:id/keys          (tmux key tokens)",
         "web UI:",
         "  GET    /web/                   (xterm.js client with mirrored tabs)",
         "  POST   /web/client             (connect/heartbeat/disconnect, one client at a time)",
+        "  POST   /web/debug              (browser input event stream, appended to a log file)",
+        "  GET    /web/debug/log          (?lines=N, default 400)",
         "legacy:",
         "  GET    /debug                  (this page)",
         "  GET    /debug/state            -> /tabs/active",
@@ -246,6 +270,7 @@ pub(crate) fn start_api_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> std::i
 fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
     eprintln!("agent api listening on http://{addr}");
     eprintln!("web ui available at http://{addr}/web/");
+    eprintln!("web debug log: {}", crate::web_debug::path_display());
     for mut request in server.incoming_requests() {
         let method = method_str(request.method()).to_string();
         let url = request.url();
@@ -256,6 +281,13 @@ fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
         if let Err(err) = request.as_reader().read_to_end(&mut body) {
             let _ = request.respond(error_response(400, &format!("read body: {err}")));
             continue;
+        }
+        // Opt-in byte trace: the browser sets this header while its debug
+        // recorder is on, so we can see exactly what reached the PTY.
+        if crate::web_debug::wants_input_trace(request.headers())
+            && path.contains("/input")
+        {
+            crate::web_debug::append_input(&path, &body);
         }
         let response = match parse_request(&method, &path, &query, body) {
             Ok(RouteOutcome::Immediate { status, content_type, body }) => {

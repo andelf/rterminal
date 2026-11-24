@@ -10,19 +10,24 @@ const statusEl = document.getElementById("status");
 const statusBar = document.querySelector(".statusbar");
 const scrollbackView = document.getElementById("scrollback-view");
 const emptyState = document.getElementById("empty-state");
-const webFitToggle = document.getElementById("web-fit");
+const sizeModeButton = document.getElementById("size-mode");
+const sizeModeLabel = document.getElementById("size-mode-label");
 const toolbarToggle = document.getElementById("toggle-toolbar");
 const keyToolbar = document.getElementById("key-toolbar");
 const keyScroll = document.getElementById("key-scroll");
 const keyNav = document.getElementById("key-nav");
+const debugButton = document.getElementById("debug");
 
-function savedWebFit() {
-  // The web view always sizes itself to its own window. The checkbox only
-  // decides whether that size is also pushed to the native PC grid.
+function savedSizeMode() {
+  // "pc" (default): the native window decides the grid; this view mirrors it
+  // and pads/scrolls around it. "browser": this viewport decides the grid and
+  // the native window is resized to match, so neither side scrolls.
   try {
-    return localStorage.getItem("rterminal.webFit") === "1";
+    return localStorage.getItem("rterminal.sizeMode") === "browser"
+      ? "browser"
+      : "pc";
   } catch {
-    return false;
+    return "pc";
   }
 }
 
@@ -39,7 +44,7 @@ const state = {
   tabs: new Map(),
   active: null,
   refreshing: false,
-  webFit: savedWebFit(),
+  sizeMode: savedSizeMode(),
   showToolbar: savedToolbar(),
   // Sticky modifiers latched by the toolbar. They modify both toolbar keys
   // and text typed on the soft keyboard, then stay on until toggled off.
@@ -47,8 +52,12 @@ const state = {
   webConnected: false,
   clientBlocked: false
 };
-webFitToggle.checked = state.webFit;
-panes.classList.toggle("host-size", !state.webFit);
+function applySizeModeUi() {
+  const browser = state.sizeMode === "browser";
+  sizeModeLabel.textContent = browser ? "浏览器尺寸" : "PC 尺寸";
+  sizeModeButton.setAttribute("aria-pressed", String(browser));
+}
+applySizeModeUi();
 toolbarToggle.setAttribute("aria-pressed", String(state.showToolbar));
 
 // Phones keep a stable layout viewport while the on-screen keyboard shrinks
@@ -56,8 +65,6 @@ toolbarToggle.setAttribute("aria-pressed", String(state.showToolbar));
 // resize: the PTY grid and the native window stay put, and the live bottom is
 // scrolled into the visible strip instead.
 const visualViewport = window.visualViewport;
-const coarsePointer =
-  window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
 let normalViewportHeight = visualViewport
   ? visualViewport.height || window.innerHeight
   : window.innerHeight;
@@ -87,7 +94,7 @@ async function notifyClient(connected) {
     connected,
     cols: tab ? tab.term.cols : 80,
     rows: tab ? tab.term.rows : 24,
-    web_fit: state.webFit
+    browser_size: state.sizeMode === "browser"
   });
   try {
     const response = await fetch("/web/client", {
@@ -114,7 +121,11 @@ async function notifyClient(connected) {
 }
 
 window.addEventListener("beforeunload", () => {
-  const body = JSON.stringify({ id: clientId, connected: false, web_fit: state.webFit });
+  const body = JSON.stringify({
+    id: clientId,
+    connected: false,
+    browser_size: state.sizeMode === "browser"
+  });
   navigator.sendBeacon("/web/client", new Blob([body], { type: "application/json" }));
 });
 
@@ -128,6 +139,259 @@ function report(error) {
 function clearError() {
   statusBar.classList.remove("error");
 }
+
+// ---------------------------------------------------------------------------
+// Input debug recorder
+// ---------------------------------------------------------------------------
+// IME and dictation problems only reproduce on a real phone, where there is no
+// devtools console. While this recorder is on, every relevant DOM event and
+// every byte we hand to the PTY stream to `POST /web/debug`, which appends it
+// to `~/.rterminal/web-debug/web-debug.log` (also readable through
+// `GET /web/debug/log`). Nothing is summarised locally: the log is the ground
+// truth for what the browser actually reported.
+const textEncoder = new TextEncoder();
+
+const debug = {
+  on: false,
+  announced: false,
+  seq: 0,
+  queue: [],
+  timer: null,
+  session: newDebugSession()
+};
+
+try {
+  // On by default while the client is under active development: a forgotten
+  // tap would mean redoing the whole phone test. The button turns red so it is
+  // never a secret, and one tap stops it for the session and beyond.
+  debug.on = localStorage.getItem("rterminal.debug") !== "0";
+} catch {
+  // Private mode: recording still works, it just is not remembered.
+  debug.on = true;
+}
+
+function newDebugSession() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+// Clipping counts code points so a CJK / emoji log line is never cut in half.
+function clip(value, max = 160) {
+  if (typeof value !== "string") {
+    return value === undefined || value === null ? null : String(value);
+  }
+  const chars = Array.from(value);
+  if (chars.length <= max) return value;
+  return `${chars.slice(0, max).join("")}…(${chars.length})`;
+}
+
+function hexOf(text) {
+  if (typeof text !== "string") return "";
+  return Array.from(textEncoder.encode(text), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join(" ");
+}
+
+function modString(event) {
+  let out = "";
+  if (event.shiftKey) out += "S";
+  if (event.ctrlKey) out += "C";
+  if (event.altKey) out += "A";
+  if (event.metaKey) out += "M";
+  return out;
+}
+
+function dbg(kind, tab, fields) {
+  if (!debug.on) return;
+  const entry = {
+    s: debug.session,
+    n: ++debug.seq,
+    k: kind,
+    t: Date.now(),
+    up: Math.round(performance.now())
+  };
+  if (tab) entry.tab = tab.id;
+  if (fields) {
+    for (const key of Object.keys(fields)) entry[key] = fields[key];
+  }
+  let line;
+  try {
+    line = JSON.stringify(entry);
+  } catch {
+    line = JSON.stringify({ s: debug.session, n: entry.n, k: kind, err: "unserialisable" });
+  }
+  debug.queue.push(line);
+  if (debug.queue.length >= 32) flushDebug(false);
+  else if (debug.timer === null) debug.timer = setTimeout(() => flushDebug(false), 400);
+}
+
+function flushDebug(beacon) {
+  if (debug.timer !== null) {
+    clearTimeout(debug.timer);
+    debug.timer = null;
+  }
+  if (debug.queue.length === 0) return;
+  const body = `${debug.queue.join("\n")}\n`;
+  debug.queue = [];
+  if (beacon) {
+    // sendBeacon survives the page going away, which is exactly when a
+    // dictation bug tends to happen (keyboard dismissal, tab switch).
+    navigator.sendBeacon("/web/debug", new Blob([body], { type: "application/x-ndjson" }));
+    return;
+  }
+  fetch("/web/debug", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-ndjson" },
+    body,
+    keepalive: body.length < 60000
+  }).catch(() => {
+    debug.queue.push(...body.trimEnd().split("\n"));
+  });
+}
+
+function debugHeaders() {
+  return debug.on ? { "X-Rterminal-Debug": "1" } : undefined;
+}
+
+function sessionFacts(tab) {
+  const viewport = window.visualViewport;
+  return {
+    ua: navigator.userAgent,
+    plt: navigator.platform || "",
+    touch: navigator.maxTouchPoints || 0,
+    coarse: window.matchMedia ? window.matchMedia("(pointer: coarse)").matches : null,
+    iw: window.innerWidth,
+    ih: window.innerHeight,
+    dpr: window.devicePixelRatio,
+    vw: viewport ? Math.round(viewport.width) : null,
+    vh: viewport ? Math.round(viewport.height) : null,
+    scale: viewport ? viewport.scale : null,
+    kb: keyboardInset,
+    mode: state.sizeMode,
+    cols: tab ? tab.term.cols : null,
+    rows: tab ? tab.term.rows : null
+  };
+}
+
+function announceDebug() {
+  if (!debug.on || debug.announced) return;
+  debug.announced = true;
+  dbg("session", currentTab(), sessionFacts(currentTab()));
+  flushDebug(false);
+}
+
+// Text the hidden textarea currently holds. On iOS dictation this keeps the
+// whole accumulated sentence, which is why the same prefix can be committed
+// again; recording it next to each input event makes that visible.
+function textareaEl(tab) {
+  if (!tab.term.element) return null;
+  return tab.term.element.querySelector(".xterm-helper-textarea");
+}
+
+function textareaText(tab) {
+  const el = textareaEl(tab);
+  return el ? el.value : null;
+}
+
+function textareaValue(tab) {
+  const text = textareaText(tab);
+  return text === null ? null : clip(text, 200);
+}
+
+function cursorLine(tab) {
+  try {
+    const buffer = tab.term.buffer.active;
+    const line = buffer.getLine(buffer.baseY + buffer.cursorY);
+    return line ? clip(line.translateToString(true), 120) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Independent capture listeners: the recorder observes the platform, it does
+// not participate in gating, so it can never change what the app does.
+function bindDebug(tab, textarea) {
+  const target = textarea || tab.wrapper;
+  target.addEventListener("keydown", (event) => {
+    dbg("keydown", tab, {
+      key: event.key,
+      code: event.code,
+      kc: event.keyCode,
+      rep: event.repeat,
+      ime: event.isComposing,
+      loc: event.location,
+      mod: modString(event)
+    });
+  }, true);
+  target.addEventListener("keypress", (event) => {
+    dbg("keypress", tab, { key: event.key, kc: event.keyCode, ime: event.isComposing });
+  }, true);
+  target.addEventListener("compositionstart", (event) => {
+    dbg("comp", tab, { p: "start", data: clip(event.data), value: textareaValue(tab) });
+  }, true);
+  target.addEventListener("compositionupdate", (event) => {
+    dbg("comp", tab, { p: "update", data: clip(event.data), value: textareaValue(tab) });
+  }, true);
+  target.addEventListener("compositionend", (event) => {
+    dbg("comp", tab, { p: "end", data: clip(event.data), value: textareaValue(tab) });
+  }, true);
+  target.addEventListener("beforeinput", (event) => {
+    dbg("beforeinput", tab, {
+      it: event.inputType || "",
+      data: clip(event.data),
+      ime: !!event.isComposing,
+      value: textareaValue(tab)
+    });
+  }, true);
+  target.addEventListener("input", (event) => {
+    dbg("input", tab, {
+      it: event.inputType || "",
+      data: clip(event.data),
+      ime: !!event.isComposing,
+      hex: hexOf(event.data),
+      value: textareaValue(tab)
+    });
+  }, true);
+  target.addEventListener("paste", (event) => {
+    const text = event.clipboardData ? event.clipboardData.getData("text") : "";
+    dbg("paste", tab, { text: clip(text), hex: hexOf(text) });
+  }, true);
+  target.addEventListener("focus", () => dbg("focus", tab, { value: textareaValue(tab) }), true);
+  target.addEventListener("blur", () => dbg("blur", tab, { value: textareaValue(tab) }), true);
+}
+
+function applyDebugUi() {
+  debugButton.setAttribute("aria-pressed", String(debug.on));
+  debugButton.classList.toggle("on", debug.on);
+  if (debug.on) {
+    announceDebug();
+    statusEl.textContent = "调试记录已开启（回传服务端日志）";
+  }
+}
+
+debugButton.addEventListener("click", () => {
+  debug.on = !debug.on;
+  try {
+    localStorage.setItem("rterminal.debug", debug.on ? "1" : "0");
+  } catch {
+    // Nothing to persist to; the session still records.
+  }
+  if (debug.on) {
+    // New session per enable so one test run is one contiguous block in the log.
+    debug.session = newDebugSession();
+    debug.seq = 0;
+    debug.announced = false;
+    announceDebug();
+  } else {
+    flushDebug(true);
+    debug.announced = false;
+    statusEl.textContent = "调试记录已停止";
+  }
+  applyDebugUi();
+});
+
+applyDebugUi();
+
+window.addEventListener("pagehide", () => flushDebug(true));
 
 function keyboardInsetPx() {
   if (!visualViewport) return 0;
@@ -162,10 +426,12 @@ function scrollToCursor(tab) {
   const term = tab.term;
   if (typeof term.scrollToBottom === "function") term.scrollToBottom();
 
+  const metrics = cellMetrics(tab);
+  if (!metrics) return;
   const active = term.buffer && term.buffer.active;
   const col = active ? active.cursorX : 0;
   const row = active ? active.cursorY : Math.max(0, term.rows - 1);
-  const { cw, ch } = cellMetrics(tab);
+  const { cw, ch } = metrics;
   const x = 4 + col * cw;
   const y = 4 + row * ch;
   const viewW = tab.wrapper.clientWidth;
@@ -209,12 +475,204 @@ function currentTab() {
 
 // Inject keystrokes through the same serialised chain as xterm's onData, so a
 // toolbar Enter cannot overtake characters still queued from the soft keyboard.
-function sendInput(tab, data) {
+function sendInput(tab, data, source = "key") {
   if (!tab || !data) return;
   followCursor(tab);
+  // A queued retraction must reach the PTY before anything typed after it.
+  if (source !== "reconcile") flushHold(tab);
+  dbg("send", tab, { src: source, text: clip(data), hex: hexOf(data), len: data.length });
   tab.inputChain = tab.inputChain
-    .then(() => api(`/tabs/${tab.id}/input`, { method: "POST", body: data }))
+    .then(() =>
+      api(`/tabs/${tab.id}/input`, {
+        method: "POST",
+        body: data,
+        headers: debugHeaders()
+      })
+    )
     .catch(report);
+}
+
+// Input synchronisation.
+//
+// One invariant keeps this stable: the hidden textarea's `value` is the only
+// document, and the PTY is maintained as an exact projection of it. Every route
+// that can carry text — xterm's onData, the raw input event, compositionend —
+// calls the same idempotent reconciler with that same value, so listener order
+// cannot change the outcome and no route can double-send.
+//
+// `data` is not trustworthy. A captured iPad session shows both shapes:
+// `data="测试一下"` (the whole sentence, re-inserted after select-all) and
+// `data="内容"` (only the new fragment), while `value` was always the
+// post-insert text. xterm forwards `data` verbatim and never reads or clears
+// `value` (verified in the vendored 5.5.0 source), so anything that trusts
+// `data` either duplicates text or loses it.
+//
+// Ordering is now known and in our favour: xterm registers its `input` listener
+// inside term.open() and ours are added later. On the same target element
+// capture does NOT win — listeners run in registration order — so onData always
+// fires first, i.e. after the browser has already written `value`. That is why
+// onData can reconcile from `value` too, and why the earlier "beforeinput flag
+// tells onData to stand down" handshake swallowed every single keystroke.
+//
+// Append (a typed character, dictation extending the sentence) is sent at once
+// so input stays live. A retraction or rewrite is held for RECONCILE_HOLD_MS and
+// re-evaluated against the newest value on every event, because a recognition
+// pass usually catches back up. The hold must always track the latest value:
+// freezing it is exactly what deleted characters the user had re-dictated.
+const RECONCILE_HOLD_MS = 600;
+// How close a keydown/paste must be to count as the origin of an input event.
+// A key's DOM update lands within a frame; dictation never comes anywhere near
+// this window after the last physical key.
+const KEY_WINDOW_MS = 200;
+// DEL is what the toolbar's Backspace sends and what PSReadLine expects.
+const BACKSPACE = "\x7f";
+
+// A payload the browser wrote into the textarea: text that must be reconciled
+// from `value`. CR, DEL, ESC sequences and Ctrl chords never enter the document,
+// they belong to the PTY alone.
+function isPrintable(data) {
+  if (!data) return false;
+  for (const ch of data) {
+    const cp = ch.codePointAt(0);
+    if (cp < 0x20 || cp === 0x7f) return false;
+  }
+  return true;
+}
+
+function isCompositionInput(tab) {
+  return tab.composing || tab.lastInputIsComposing ||
+    tab.lastInputType === "insertCompositionText";
+}
+
+function codePoints(text) {
+  return Array.from(typeof text === "string" ? text : "");
+}
+
+// Did a key or a paste produce the event currently being handled? The marker is
+// written by a CAPTURE listener on the pane, i.e. before anything on the
+// textarea — including xterm's own keydown handler, which forwards some keys
+// straight into onData. Recording it on the textarea was too late: those
+// keystrokes looked like dictation and were routed to the wrong path.
+function keyDriven(tab) {
+  if (tab.composing || tab.lastInputIsComposing) return true;
+  const now = Date.now();
+  return now - (tab.lastKeyDownAt || 0) <= KEY_WINDOW_MS ||
+    now - (tab.lastPasteAt || 0) <= KEY_WINDOW_MS;
+}
+
+function commonPrefix(a, b) {
+  const limit = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < limit && a[i] === b[i]) i++;
+  return i;
+}
+
+// WebKit hands spaces back as NO-BREAK SPACE (U+00A0) in some paths, and a
+// NO-BREAK SPACE is not a word separator in a shell, so every command typed
+// with one silently fails. Fold the invisible variants back to a plain space.
+function normalizeField(text) {
+  return typeof text === "string" ? text.replace(/[\u00a0\u202f]/g, " ") : "";
+}
+
+function cancelHold(tab) {
+  tab.pendingText = null;
+  if (tab.reconcileTimer !== null) {
+    clearTimeout(tab.reconcileTimer);
+    tab.reconcileTimer = null;
+  }
+}
+
+// Make the PTY match `target` for the current utterance.
+//
+// Idempotent by construction: it compares `target` against `sent` (what the PTY
+// already has for this utterance), so calling it twice with the same value — as
+// onData and the input event do — sends nothing the second time. `force` is for
+// the settle timer, which must emit a retraction instead of re-holding it.
+function reconcileTo(tab, target, force) {
+  const next = codePoints(target);
+  const sent = tab.sent || [];
+  const prefix = commonPrefix(sent, next);
+  const deletes = sent.length - prefix;
+  const insert = next.slice(prefix).join("");
+
+  if (deletes === 0) {
+    if (!insert) {
+      // Already in sync — but a hold may be pending from an earlier retraction
+      // and this newer value proves recognition caught back up. Drop it.
+      cancelHold(tab);
+      return;
+    }
+    tab.sent = next;
+    cancelHold(tab);
+    dbg("reconcile", tab, { del: 0, ins: clip(insert), held: 0 });
+    sendInput(tab, insert, "reconcile");
+    return;
+  }
+
+  if (!force) {
+    // Shorter than what the PTY holds: retraction or re-recognition. Hold it,
+    // always against the latest value.
+    tab.pendingText = target;
+    dbg("reconcile", tab, { del: deletes, ins: clip(insert), held: 1 });
+    if (tab.reconcileTimer !== null) clearTimeout(tab.reconcileTimer);
+    tab.reconcileTimer = setTimeout(() => {
+      tab.reconcileTimer = null;
+      const latest = tab.pendingText;
+      tab.pendingText = null;
+      if (latest !== null && latest !== undefined) reconcileTo(tab, latest, true);
+    }, RECONCILE_HOLD_MS);
+    return;
+  }
+
+  tab.pendingText = null;
+  tab.sent = next;
+  dbg("reconcile", tab, { del: deletes, ins: clip(insert), held: 0 });
+  sendInput(tab, BACKSPACE.repeat(deletes) + insert, "reconcile");
+}
+
+// Reconcile against the textarea's current value. This is the only entry point
+// that reads the document, so every event ends up in the same computation.
+function syncField(tab) {
+  if (isCompositionInput(tab)) {
+    dbg("gate", tab, { why: "composing", text: clip(textareaText(tab)) });
+    return;
+  }
+  const raw = textareaText(tab);
+  if (raw === null) return;
+  const text = normalizeField(raw);
+  // An empty field is a buffer reset, not a retraction. Platforms clear the
+  // textarea after committing (and xterm does it around compositionend), so
+  // treating "" as "delete everything that was sent" is what silently ate text
+  // the user had already produced. Deleting the line itself comes through
+  // Backspace/Ctrl-U on the control path, which ends the utterance explicitly.
+  if (text === "") {
+    cancelHold(tab);
+    tab.sent = [];
+    return;
+  }
+  if (text !== raw) dbg("nbsp", tab, { hex: hexOf(raw) });
+  reconcileTo(tab, text, false);
+}
+
+// The utterance ends: Enter submitted it, a cursor-moving key invalidated it, or
+// the field is being abandoned. Forget both the mirror and the document so the
+// platform cannot replay the old text into the next one.
+function endUtterance(tab) {
+  cancelHold(tab);
+  tab.sent = [];
+  const el = textareaEl(tab);
+  if (el && el.value) {
+    el.value = "";
+    dbg("field-clear", tab, {});
+  }
+}
+
+// Settle a held retraction now (blur, tab switch).
+function flushHold(tab) {
+  if (!tab) return;
+  const latest = tab.pendingText;
+  cancelHold(tab);
+  if (latest !== null && latest !== undefined) reconcileTo(tab, latest, true);
 }
 
 // Same modifier numbering as the native keyboard encoder: 1 + shift + 2*alt
@@ -251,6 +709,12 @@ function encodeTyped(text) {
 function encodeToolbarKey(key) {
   const m = state.mods;
   if (!anyModifier()) return key.data;
+  // Backspace must match the native encoder: plain DEL, Ctrl-BS, ESC prefix
+  // for Alt/Meta. Treating it as a generic control byte would swallow Ctrl.
+  if (key.special === "backspace") {
+    const data = m.ctrl ? "\x08" : key.data;
+    return m.alt || m.meta ? "\x1b" + data : data;
+  }
   if (key.special === "tab") {
     if (m.shift && !m.ctrl && !m.alt && !m.meta) return "\x1b[Z";
     return `\x1b[1;${modifierCode()}I`;
@@ -272,11 +736,22 @@ const MODIFIER_KEYS = [
   }
 ];
 
-// One-shot keys scroll horizontally. Arrows live in the separate pinned pad.
-const ACTION_KEYS = [
+// Far left: the two keys with no printable soft-keyboard equivalent.
+const LEADING_KEYS = [
   { label: "Esc", data: "\x1b", special: "escape" },
-  { label: "Tab", data: "\t", special: "tab" },
-  { separator: true },
+  { label: "Tab", data: "\t", special: "tab" }
+];
+
+// Editing/control bytes. Backspace repeats because deleting one character at
+// a time by tapping is unusable on a phone; ^C and friends stay one-shot.
+const EDIT_KEYS = [
+  {
+    label: "⌫",
+    data: "\x7f",
+    special: "backspace",
+    title: "Backspace (hold to repeat)",
+    repeat: true
+  },
   { label: "^C", data: "\x03", title: "interrupt" },
   { label: "^D", data: "\x04", title: "EOF / exit" },
   { label: "^Z", data: "\x1a", title: "suspend" },
@@ -288,12 +763,70 @@ const ACTION_KEYS = [
   { label: "^R", data: "\x12", title: "reverse search" }
 ];
 
+// Arrows are pinned in their own pad on the right and repeat while held.
 const NAV_KEYS = [
-  { label: "↑", data: "\x1b[A", csiFinal: "A", title: "up" },
-  { label: "↓", data: "\x1b[B", csiFinal: "B", title: "down" },
-  { label: "←", data: "\x1b[D", csiFinal: "D", title: "left" },
-  { label: "→", data: "\x1b[C", csiFinal: "C", title: "right" }
+  { label: "↑", data: "\x1b[A", csiFinal: "A", title: "up (hold to repeat)", repeat: true },
+  { label: "↓", data: "\x1b[B", csiFinal: "B", title: "down (hold to repeat)", repeat: true },
+  { label: "←", data: "\x1b[D", csiFinal: "D", title: "left (hold to repeat)", repeat: true },
+  { label: "→", data: "\x1b[C", csiFinal: "C", title: "right (hold to repeat)", repeat: true }
 ];
+
+// xterm only serialises input into bytes: auto-repeat comes from the OS for
+// physical keyboards, but a button tap never repeats and mobile soft
+// keyboards usually do not either. Emulate it here for the few keys where
+// holding is meaningful. The initial delay keeps a normal tap at one stroke.
+const REPEAT_DELAY_MS = 400;
+const REPEAT_INTERVAL_MS = 45;
+const repeatStops = new Set();
+
+function stopAllRepeats() {
+  for (const stop of [...repeatStops]) stop();
+}
+
+function bindHoldRepeat(button, press) {
+  let delayTimer = null;
+  let repeatTimer = null;
+  let pointer = null;
+
+  const stop = () => {
+    if (delayTimer !== null) clearTimeout(delayTimer);
+    if (repeatTimer !== null) clearInterval(repeatTimer);
+    delayTimer = null;
+    repeatTimer = null;
+    if (pointer !== null && button.hasPointerCapture?.(pointer)) {
+      try {
+        button.releasePointerCapture(pointer);
+      } catch {
+        // Pointer may already be gone (e.g. lostpointercapture fired first).
+      }
+    }
+    pointer = null;
+    button.classList.remove("repeating");
+    repeatStops.delete(stop);
+  };
+
+  button.addEventListener("pointerdown", (event) => {
+    // A second finger on the same key must not leak the first key's timers.
+    stop();
+    event.preventDefault();
+    button.blur();
+    pointer = event.pointerId;
+    // Keep receiving pointerup when the finger drifts off the small button.
+    button.setPointerCapture?.(event.pointerId);
+    repeatStops.add(stop);
+    button.classList.add("repeating");
+    press();
+    delayTimer = setTimeout(() => {
+      delayTimer = null;
+      repeatTimer = setInterval(press, REPEAT_INTERVAL_MS);
+    }, REPEAT_DELAY_MS);
+  });
+  button.addEventListener("pointerup", stop);
+  button.addEventListener("pointercancel", stop);
+  button.addEventListener("lostpointercapture", stop);
+  // iOS otherwise pops a selection/zoom menu on a long press.
+  button.addEventListener("contextmenu", (event) => event.preventDefault());
+}
 
 function makeKeyButton(key, onPress) {
   const button = document.createElement("button");
@@ -301,17 +834,35 @@ function makeKeyButton(key, onPress) {
   button.textContent = key.label;
   button.title = key.title || key.label;
   if (key.mod) button.classList.add("key-mod");
+  const press = () => onPress();
+  if (key.repeat) {
+    bindHoldRepeat(button, press);
+    return button;
+  }
   // preventDefault on pointerdown keeps xterm's hidden textarea focused, so
   // the soft keyboard stays open; blur() drops the transient pressed state.
   button.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     button.blur();
-    onPress();
+    press();
   });
   return button;
 }
 
+function appendToolbarSeparator() {
+  const sep = document.createElement("span");
+  sep.className = "key-sep";
+  keyScroll.appendChild(sep);
+}
+
 function buildToolbar() {
+  const sendKey = (key) => () => sendInput(currentTab(), encodeToolbarKey(key));
+  // Esc/Tab first, then the sticky modifiers: both stay ahead of the control
+  // bytes so the keys with no soft-keyboard equivalent need the least scroll.
+  for (const key of LEADING_KEYS) {
+    keyScroll.appendChild(makeKeyButton(key, sendKey(key)));
+  }
+  appendToolbarSeparator();
   for (const key of MODIFIER_KEYS) {
     const button = makeKeyButton(key, () => {
       state.mods[key.id] = !state.mods[key.id];
@@ -322,21 +873,12 @@ function buildToolbar() {
     button.setAttribute("aria-pressed", "false");
     keyScroll.appendChild(button);
   }
-  for (const key of ACTION_KEYS) {
-    if (key.separator) {
-      const sep = document.createElement("span");
-      sep.className = "key-sep";
-      keyScroll.appendChild(sep);
-      continue;
-    }
-    keyScroll.appendChild(
-      makeKeyButton(key, () => sendInput(currentTab(), encodeToolbarKey(key)))
-    );
+  appendToolbarSeparator();
+  for (const key of EDIT_KEYS) {
+    keyScroll.appendChild(makeKeyButton(key, sendKey(key)));
   }
   for (const key of NAV_KEYS) {
-    keyNav.appendChild(
-      makeKeyButton(key, () => sendInput(currentTab(), encodeToolbarKey(key)))
-    );
+    keyNav.appendChild(makeKeyButton(key, sendKey(key)));
   }
 }
 
@@ -355,8 +897,12 @@ function setToolbar(visible) {
   keyToolbar.hidden = !visible;
   document.body.classList.toggle("with-toolbar", visible);
   toolbarToggle.setAttribute("aria-pressed", String(visible));
-  // A latched Ctrl/Alt must never survive into plain typing after hiding.
-  if (!visible) clearModifiers();
+  // A latched Ctrl/Alt must never survive into plain typing after hiding,
+  // and a held key must not keep sending input into a hidden toolbar.
+  if (!visible) {
+    stopAllRepeats();
+    clearModifiers();
+  }
   try {
     localStorage.setItem("rterminal.toolbar", visible ? "1" : "0");
   } catch {
@@ -401,6 +947,10 @@ function makeTerm(cols, rows) {
   });
 }
 
+// Return null when the cell size cannot be measured. FitAddon does the same:
+// guessing from font metrics produces NaN/Infinity downstream (a bogus resize
+// sent to the PTY, or an unbounded dot pad), which is worse than skipping one
+// layout pass. The caller simply waits for the next refresh.
 function cellMetrics(tab) {
   const element = tab.term.element;
   // The rendered screen is the ground truth for cell size. Deriving it from
@@ -409,17 +959,25 @@ function cellMetrics(tab) {
   const screen = element && element.querySelector(".xterm-screen");
   const box = screen ? screen.getBoundingClientRect() : null;
   if (box && box.width > 0 && box.height > 0 && tab.term.cols && tab.term.rows) {
-    return { cw: box.width / tab.term.cols, ch: box.height / tab.term.rows };
+    const cw = box.width / tab.term.cols;
+    const ch = box.height / tab.term.rows;
+    if (Number.isFinite(cw) && Number.isFinite(ch) && cw > 0 && ch > 0) {
+      return { cw, ch };
+    }
   }
 
   const measure = element && element.querySelector(".xterm-char-measure-element");
-  const style = element ? getComputedStyle(element) : null;
-  const fontPx = parseFloat((style && style.fontSize) || "14") || 14;
-  const rawLine = style && style.lineHeight;
-  const linePx = rawLine && rawLine !== "normal" ? parseFloat(rawLine) : fontPx * 1.2;
   const sample = measure ? (measure.textContent || "").length : 0;
-  const width = measure ? measure.getBoundingClientRect().width / Math.max(1, sample) : 0;
-  return { cw: width || fontPx * 0.6, ch: linePx || fontPx * 1.2 };
+  if (sample > 0) {
+    const width = measure.getBoundingClientRect().width / sample;
+    const style = element ? getComputedStyle(element) : null;
+    const rawLine = style && style.lineHeight;
+    const ch = rawLine && rawLine !== "normal" ? parseFloat(rawLine) : NaN;
+    if (Number.isFinite(width) && width > 0 && Number.isFinite(ch) && ch > 0) {
+      return { cw: width, ch };
+    }
+  }
+  return null;
 }
 
 // The dot pads are text, so their advance width is not necessarily the same
@@ -438,7 +996,9 @@ function measureDotWidth(tab, style) {
   document.body.appendChild(probe);
   const width = probe.getBoundingClientRect().width / 32;
   probe.remove();
-  return width > 0 ? width : cellMetrics(tab).cw;
+  if (width > 0) return width;
+  const metrics = cellMetrics(tab);
+  return metrics ? metrics.cw : 0;
 }
 
 function applyPadding(tab) {
@@ -450,8 +1010,14 @@ function applyPadding(tab) {
     return;
   }
 
+  const metrics = cellMetrics(tab);
+  if (!metrics) {
+    padRight.hidden = true;
+    padBottom.hidden = true;
+    return;
+  }
+  const { cw, ch } = metrics;
   const rect = panes.getBoundingClientRect();
-  const { cw, ch } = cellMetrics(tab);
   const visibleCols = Math.max(0, Math.floor((rect.width - 8) / cw));
   const visibleRows = Math.max(0, Math.floor((rect.height - 8) / ch));
   const extraCols = visibleCols - tab.term.cols;
@@ -466,6 +1032,13 @@ function applyPadding(tab) {
   const fontPx = parseFloat(termStyle.fontSize) || 14;
   const style = padStyle(tab, fontPx, ch);
   const dotWidth = measureDotWidth(tab, style);
+  // Both measurements failed this pass. Skip rather than generating an
+  // unbounded run of dots (dotWidth === 0 -> Infinity columns).
+  if (!(dotWidth > 0)) {
+    padRight.hidden = true;
+    padBottom.hidden = true;
+    return;
+  }
   if (extraCols > 0) {
     const rightWidth = extraCols * cw;
     const rightCols = Math.max(1, Math.ceil(rightWidth / dotWidth));
@@ -499,7 +1072,7 @@ function applyPadding(tab) {
   }
 }
 
-function fitTab(tab) {
+function fitTab(tab, forceSync = false) {
   // The web grid is ALWAYS the native PTY grid. The screen.ansi repaint is
   // rendered for exactly dto.cols x dto.rows, so mirroring that grid 1:1 keeps
   // the cursor and every cell aligned. Letting the browser pick its own grid
@@ -517,27 +1090,37 @@ function fitTab(tab) {
     if (typeof tab.term.scrollToBottom === "function") tab.term.scrollToBottom();
   }
 
-  // "窗口同步 PC" only decides whether this window's size is pushed to the
-  // native PTY. The web view itself still follows whatever grid the PTY has;
-  // a size change reaches it through dto on the next refresh. Extra space is
-  // handled by dot padding / scrolling, never by term.resize.
+  // Two explicit modes, decided by who is authoritative for the grid:
   //
-  // The soft keyboard only changes what is visible; resizing the PTY then
-  // would redraw running programs on every keystroke. On touch viewports the
-  // native column count is also authoritative, so only height may follow the
-  // browser when the user explicitly enabled syncing.
-  if (state.webFit && keyboardInset === 0 && keyboardTimer === null) {
+  //   "pc"      (default): the native window is authoritative. We only mirror
+  //             its grid; if this viewport is smaller we scroll, if larger we
+  //             pad with dots. Never resize the PTY.
+  //   "browser": this viewport is authoritative. We compute the grid it can
+  //             show and ask the native side to adopt it AND resize the PC
+  //             window to match (sync_window), so neither side scrolls.
+  //
+  // The soft keyboard only changes what is visible; resizing the PTY or the PC
+  // window then would redraw running programs on every keystroke, so both
+  // modes stay frozen while it is up.
+  if (state.sizeMode === "browser" && keyboardInset === 0 && keyboardTimer === null) {
     const rect = panes.getBoundingClientRect();
-    if (rect.width && rect.height) {
-      const { cw, ch } = cellMetrics(tab);
-      const wantCols = coarsePointer
-        ? cols
-        : Math.max(20, Math.min(300, Math.floor((rect.width - 8) / cw)));
+    const metrics = cellMetrics(tab);
+    if (rect.width && rect.height && metrics) {
+      const { cw, ch } = metrics;
+      // Browser is authoritative on both axes, touch devices included.
+      const wantCols = Math.max(20, Math.min(300, Math.floor((rect.width - 8) / cw)));
       const wantRows = Math.max(5, Math.min(200, Math.floor((rect.height - 8) / ch)));
-      if (wantCols !== cols || wantRows !== rows) {
+      if (
+        Number.isFinite(wantCols) && Number.isFinite(wantRows) &&
+        (forceSync || wantCols !== cols || wantRows !== rows)
+      ) {
         api(`/tabs/${tab.id}/resize`, {
           method: "POST",
-          body: JSON.stringify({ cols: wantCols, rows: wantRows })
+          body: JSON.stringify({
+            cols: wantCols,
+            rows: wantRows,
+            sync_window: true
+          })
         }).catch(report);
       }
     }
@@ -552,6 +1135,43 @@ function stopPolling(tab) {
   }
 }
 
+function textOf(data) {
+  return typeof data === "string" ? data : String(data || "");
+}
+
+// A full ANSI repaint moves xterm's composition view and its hidden textarea
+// out from under an active IME, which shows up as a half-composed CJK glyph
+// being cut off. While composing, keep only the newest snapshot and paint it
+// once compositionend fires.
+function paintSnapshot(tab, alt, ansi) {
+  if (tab.alt !== alt) {
+    tab.term.write(alt ? "\x1b[?1049h" : "\x1b[?1049l");
+    tab.alt = alt;
+  }
+  // Arm the guard before write: xterm may scroll its own viewport while
+  // repainting, and that must not look like a user scroll. Only re-centre
+  // on the cursor while we are still following it.
+  if (tab.followCursor) scrollToCursor(tab);
+  tab.term.write(ansi);
+  if (tab.followCursor) scrollToCursor(tab);
+  if (debug.on) {
+    // Only log a repaint when the cursor line actually changed; otherwise a
+    // 10 Hz poll would bury the keystrokes in noise.
+    const line = cursorLine(tab);
+    if (line !== tab.debugPaintLine || (alt ? 1 : 0) !== tab.debugPaintAlt) {
+      tab.debugPaintLine = line;
+      tab.debugPaintAlt = alt ? 1 : 0;
+      dbg("paint", tab, { alt: alt ? 1 : 0, len: ansi.length, line });
+    }
+  }
+}
+
+function flushPendingPaint(tab) {
+  const pending = tab.pendingPaint;
+  tab.pendingPaint = null;
+  if (pending) paintSnapshot(tab, pending.alt, pending.ansi);
+}
+
 async function poll(tab) {
   if (state.clientBlocked || state.active !== tab.id) return;
   try {
@@ -559,18 +1179,14 @@ async function poll(tab) {
     if (state.active !== tab.id || !raw) return;
     const alt = raw[0] === "1";
     const ansi = raw.slice(1);
-    if (tab.alt !== alt) {
-      tab.term.write(alt ? "\x1b[?1049h" : "\x1b[?1049l");
-      tab.alt = alt;
+    if (isCompositionInput(tab)) {
+      // Defer, do not drop: the PTY keeps running while the user composes.
+      tab.pendingPaint = { alt, ansi };
+    } else {
+      paintSnapshot(tab, alt, ansi);
+      clearError();
+      statusEl.textContent = `tab ${tab.id} · ${tab.term.cols}×${tab.term.rows}`;
     }
-    // Arm the guard before write: xterm may scroll its own viewport while
-    // repainting, and that must not look like a user scroll. Only re-centre
-    // on the cursor while we are still following it.
-    if (tab.followCursor) scrollToCursor(tab);
-    tab.term.write(ansi);
-    if (tab.followCursor) scrollToCursor(tab);
-    clearError();
-    statusEl.textContent = `tab ${tab.id} · ${tab.term.cols}×${tab.term.rows}`;
   } catch (error) {
     report(error);
   }
@@ -588,8 +1204,19 @@ function updateTabButtons() {
 
 function activate(id, fromUser) {
   if (state.active === id) return;
+  // A key held while switching tabs must not keep deleting in the new tab.
+  stopAllRepeats();
   const previous = currentTab();
-  if (previous) stopPolling(previous);
+  if (previous) {
+    stopPolling(previous);
+    // A tab switched away mid-IME may never receive compositionend. Clear the
+    // stale gate so it cannot swallow input when it becomes active again.
+    previous.composing = false;
+    previous.lastInputIsComposing = false;
+    // A held retraction would otherwise be lost when the tab is reactivated.
+    flushHold(previous);
+    flushPendingPaint(previous);
+  }
 
   state.active = id;
   for (const [tabId, tab] of state.tabs) {
@@ -613,6 +1240,13 @@ function activate(id, fromUser) {
 
 function destroyTab(tab) {
   stopPolling(tab);
+  // Drop any queued retraction: sending it would hit a tab that no longer
+  // exists.
+  tab.pendingText = null;
+  if (tab.reconcileTimer !== null) {
+    clearTimeout(tab.reconcileTimer);
+    tab.reconcileTimer = null;
+  }
   tab.button.remove();
   tab.wrapper.remove();
   state.tabs.delete(tab.id);
@@ -672,9 +1306,98 @@ function createTab(dto) {
     inputChain: Promise.resolve(),
     followCursor: true,
     scrollGuard: false,
-    scrollGuardTimer: null
+    scrollGuardTimer: null,
+    // IME / dictation state, driven by real DOM flags (see gating helpers).
+    composing: false,
+    lastInputType: "",
+    lastInputIsComposing: false,
+    lastKeyDownAt: 0,
+    lastPasteAt: 0,
+    lastCompositionEndAt: 0,
+    // Utterance synchronisation state (see reconcileTo).
+    sent: [],
+    pendingText: null,
+    reconcileTimer: null,
+    keySentAt: 0,
+    keySentText: "",
+    pendingPaint: null,
+    debugPaintLine: null,
+    debugPaintAlt: null
   };
   state.tabs.set(id, tab);
+
+  // The hidden textarea is the only place the browser reports IME state.
+  // composition* is authoritative for pre-edit text; beforeinput supplies
+  // inputType/isComposing so we can also guard platforms where those events are
+  // unreliable. These listeners run AFTER xterm's own — same target, later
+  // registration — but that no longer matters: every one of them feeds the same
+  // idempotent reconciler, so an extra or missing call cannot duplicate text.
+  const textarea = term.element && term.element.querySelector(".xterm-helper-textarea");
+  if (textarea) {
+    textarea.addEventListener("compositionstart", () => { tab.composing = true; }, true);
+    textarea.addEventListener("compositionupdate", () => { tab.composing = true; }, true);
+    textarea.addEventListener("compositionend", () => {
+      tab.composing = false;
+      tab.lastInputIsComposing = false;
+      tab.lastInputType = "";
+      tab.lastCompositionEndAt = Date.now();
+      flushPendingPaint(tab);
+      // The committed text is already in `value`. Reconcile from there instead
+      // of from `event.data`: a commit that xterm also forwarded is then
+      // impossible to send twice, and a commit xterm dropped is still sent.
+      syncField(tab);
+    }, true);
+    textarea.addEventListener("beforeinput", (event) => {
+      tab.lastInputType = event.inputType || "";
+      tab.lastInputIsComposing = !!event.isComposing;
+    }, true);
+    textarea.addEventListener("input", () => {
+      // xterm already transmitted this key from its own handler; this input
+      // event is just the browser's DOM insertion of the same text. Drop the
+      // field contents and stay out of the way. Matching the text (not just the
+      // time) keeps a genuinely new character typed in quick succession, and
+      // dictation that follows a keystroke, out of this branch.
+      const raw = textareaText(tab);
+      if (
+        raw !== null &&
+        Date.now() - (tab.keySentAt || 0) <= KEY_WINDOW_MS &&
+        normalizeField(raw) === (tab.keySentText || "")
+      ) {
+        endUtterance(tab);
+        return;
+      }
+      // Every other source ends up here with `value` already updated: typing
+      // that xterm forwarded via input, dictation, paste, IME. Reconciling is
+      // idempotent, so a second call for the same event sends nothing extra.
+      syncField(tab);
+    }, true);
+    // A genuine key — not an IME placeholder (keyCode 229 / isComposing) —
+    // proves no composition is in flight. Without this the flags below can
+    // latch forever when compositionend never arrives (switching IME off,
+    // losing focus mid-composition), and then every later character is treated
+    // as pre-edit text and silently dropped. The key marker itself is recorded
+    // on the pane's capture listener (see below); this one only clears flags.
+    textarea.addEventListener("keydown", (event) => {
+      if (!event.isComposing && event.keyCode !== 229) {
+        tab.composing = false;
+        tab.lastInputIsComposing = false;
+        tab.lastInputType = "";
+      }
+    }, true);
+    // Dismissing the keyboard ends the utterance: settle any held retraction
+    // right away instead of waiting for the timer.
+    textarea.addEventListener("blur", () => flushHold(tab), true);
+  }
+
+  // Capture on the pane, so the marker exists before ANY textarea listener —
+  // including xterm's own keydown handler, which forwards some keys into onData
+  // synchronously.
+  wrapper.addEventListener("keydown", () => {
+    tab.lastKeyDownAt = Date.now();
+  }, true);
+  wrapper.addEventListener("paste", () => {
+    tab.lastPasteAt = Date.now();
+  }, true);
 
   wrapper.addEventListener("scroll", () => {
     if (tab.scrollGuard) return;
@@ -686,7 +1409,68 @@ function createTab(dto) {
       tab.followCursor = false;
     });
   }
-  term.onData((data) => sendInput(tab, encodeTyped(data)));
+  term.onData((data) => {
+    const text = textOf(data);
+    // Snapshot the decision inputs at the moment xterm handed us the bytes.
+    dbg("ondata", tab, {
+      text: clip(text),
+      hex: hexOf(text),
+      len: text.length,
+      it: tab.lastInputType,
+      ime: tab.lastInputIsComposing,
+      composing: tab.composing,
+      printable: isPrintable(text),
+      kdMs: tab.lastKeyDownAt ? Date.now() - tab.lastKeyDownAt : null,
+      ceMs: tab.lastCompositionEndAt ? Date.now() - tab.lastCompositionEndAt : null
+    });
+    // Pre-edit / half-formed characters must never reach the PTY.
+    if (isCompositionInput(tab)) {
+      dbg("gate", tab, { text: clip(text), why: "composing" });
+      return;
+    }
+    if (!isPrintable(text)) {
+      // Control key: CR, DEL, an arrow/Home/End sequence, a Ctrl chord. These
+      // never enter the textarea, so there is nothing to reconcile and the
+      // mirror can no longer describe the line — send and end the utterance.
+      sendInput(tab, text, "key");
+      endUtterance(tab);
+      return;
+    }
+    if (keyDriven(tab)) {
+      // xterm encoded this key correctly, so `data` IS the transmission. The
+      // field merely mirrors it (and WebKit may have inserted a copy anyway);
+      // clearing it keeps an accumulating field from replaying old characters.
+      sendInput(tab, encodeTyped(text), "key");
+      // The browser has usually queued its own DOM insertion for this same key,
+      // so an input event is still coming. Remember which text was sent, so that
+      // event can be recognised as a duplicate instead of being sent twice (the
+      // space key used to arrive as two spaces for exactly this reason).
+      tab.keySentAt = Date.now();
+      tab.keySentText = text;
+      endUtterance(tab);
+      return;
+    }
+    // No key and no paste: dictation. Its `data` may be the whole re-recognised
+    // sentence, so only `value` is trusted; the input event that carries this
+    // same text reconciles it as well, which is harmless because reconciling is
+    // idempotent.
+    if (textareaText(tab) === null) {
+      // No field to consult (should not happen): fall back to the event data.
+      sendInput(tab, encodeTyped(text), "key");
+      return;
+    }
+    syncField(tab);
+  });
+  bindDebug(tab, textarea);
+  if (debug.on) {
+    dbg("bind", tab, {
+      cols: term.cols,
+      rows: term.rows,
+      dtoCols: dto.cols,
+      dtoRows: dto.rows,
+      textarea: !!textarea
+    });
+  }
   return tab;
 }
 
@@ -745,17 +1529,20 @@ document.getElementById("refresh").addEventListener("click", () => refresh());
 
 toolbarToggle.addEventListener("click", () => setToolbar(!state.showToolbar));
 
-webFitToggle.addEventListener("change", () => {
-  state.webFit = webFitToggle.checked;
-  panes.classList.toggle("host-size", !state.webFit);
+sizeModeButton.addEventListener("click", () => {
+  state.sizeMode = state.sizeMode === "pc" ? "browser" : "pc";
+  applySizeModeUi();
   try {
-    localStorage.setItem("rterminal.webFit", state.webFit ? "1" : "0");
+    localStorage.setItem("rterminal.sizeMode", state.sizeMode);
   } catch {
     // Storage may be disabled; the toggle still works for this session.
   }
+  // Tell the native side which side is authoritative. In browser mode force
+  // one resize so the PC window aligns even if the grid number did not change.
+  notifyClient(true);
   const tab = currentTab();
   if (tab) {
-    fitTab(tab);
+    fitTab(tab, state.sizeMode === "browser");
     applyPadding(tab);
   }
 });

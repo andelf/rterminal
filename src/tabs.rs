@@ -96,6 +96,9 @@ pub(crate) struct TerminalTabs {
     pending_create_requests: Vec<async_channel::Sender<crate::api_protocol::ApiReply>>,
     web_client: Option<WebClientInfo>,
     pending_sync_to_window: bool,
+    /// "浏览器尺寸" mode: resize the native window to fit this grid. Consumed
+    /// in render(), the only place with a `&mut Window`.
+    pending_window_resize: Option<crate::terminal::GridSize>,
     _api_drain: Task<()>,
 }
 
@@ -122,6 +125,7 @@ impl TerminalTabs {
             pending_create_requests: Vec::new(),
             web_client: None,
             pending_sync_to_window: false,
+            pending_window_resize: None,
             _api_drain: api_drain,
         };
 
@@ -450,7 +454,7 @@ impl TerminalTabs {
                 });
             }
 
-            ApiCommand::ResizeTab { id, cols, rows, reply } => {
+            ApiCommand::ResizeTab { id, cols, rows, sync_window, reply } => {
                 let Some((_, tab)) = self.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -460,9 +464,15 @@ impl TerminalTabs {
                         return reply_err(&reply, 409, "cannot resize a snapshot tab");
                     }
                 };
+                let grid = GridSize { cols, rows };
                 terminal.update(cx, |term, _| {
-                    term.set_web_grid_override(GridSize { cols, rows });
+                    term.set_web_grid_override(grid);
                 });
+                if sync_window {
+                    // Browser is authoritative: make the native window match
+                    // the grid so PC shows the same cells without scrolling.
+                    self.pending_window_resize = Some(grid);
+                }
                 cx.notify();
                 let _ = reply.send_blocking(ApiReply::Ok {
                     status: 200,
@@ -475,7 +485,7 @@ impl TerminalTabs {
                 connected,
                 cols: _cols,
                 rows: _rows,
-                web_fit,
+                browser_size,
                 reply,
             } => {
                 let now = Instant::now();
@@ -499,14 +509,18 @@ impl TerminalTabs {
                         return reply_err(&reply, 409, &message);
                     }
                     self.web_client = Some(WebClientInfo { id, last_seen: now });
-                    if !web_fit {
-                        // PC is authoritative: drop any web-driven grid override.
+                    if !browser_size {
+                        // "PC 尺寸": the native window is authoritative again.
+                        // Drop any browser-driven grid override and let the
+                        // grid follow the window. The window keeps its current
+                        // size (that IS the PC authority now).
                         for tab in &self.tabs {
                             if let TerminalTabKind::Terminal { terminal, .. } = &tab.kind {
                                 terminal.update(cx, |term, _| term.clear_web_grid_override());
                             }
                         }
                         self.pending_sync_to_window = true;
+                        self.pending_window_resize = None;
                     }
                 } else if self.web_client.as_ref().is_some_and(|client| client.id == id) {
                     self.web_client = None;
@@ -741,6 +755,25 @@ impl Render for TerminalTabs {
         if self.pending_focus_sync {
             self.pending_focus_sync = false;
             self.request_focus_active_tab(window, cx);
+        }
+
+        // "浏览器尺寸" mode: a resize command arrived on the API thread, which
+        // has no Window handle. Apply it here where we do. Resizing the window
+        // fires observe_window_bounds -> sync_grid_to_window, but the grid
+        // override is still set, so the browser-driven grid survives.
+        if let Some(grid) = self.pending_window_resize.take() {
+            if let Some((_, tab)) = self.resolve_tab(crate::api_protocol::TabSelector::Active)
+                && let TerminalTabKind::Terminal { terminal, .. } = &tab.kind
+            {
+                let cell_width = crate::render::measure_cell_width(
+                    window,
+                    &terminal.read(cx).font_family,
+                    terminal.read(cx).font_fallbacks.as_ref(),
+                    terminal.read(cx).font_size,
+                );
+                let target = terminal.read(cx).window_size_for_grid(grid, cell_width);
+                window.resize(target);
+            }
         }
 
         if self

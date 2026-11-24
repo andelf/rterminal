@@ -15,7 +15,7 @@ use alacritty_terminal::vte::ansi::{
 use anyhow::{Context as _, Result, ensure};
 use gpui::{
     Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, FontFallbacks, Pixels, Subscription,
-    Task, Window, px,
+    Task, Window, px, size,
 };
 use parking_lot::Mutex;
 use portable_pty::{Child, MasterPty, PtySize};
@@ -703,10 +703,33 @@ impl AgentTerminal {
         self.apply_grid_size(grid);
     }
 
+    /// Content size this window needs so `compute_grid_size` yields `grid`.
+    /// Exact inverse of `compute_grid_size`; "浏览器尺寸" mode uses it to make
+    /// the native window match the browser-driven grid so neither side scrolls.
+    pub(crate) fn window_size_for_grid(
+        &self,
+        grid: GridSize,
+        cell_width: Pixels,
+    ) -> gpui::Size<Pixels> {
+        let status_height = if self.show_status_bar {
+            STATUS_BAR_HEIGHT
+        } else {
+            px(0.0)
+        };
+        let width = grid.cols as f32 * f32::from(cell_width)
+            + f32::from(TEXT_PADDING_X) * 2.0;
+        let height = grid.rows as f32 * f32::from(self.line_height())
+            + f32::from(CUSTOM_TITLE_BAR_HEIGHT)
+            + f32::from(status_height)
+            + f32::from(TEXT_PADDING_Y) * 2.0;
+        size(px(width), px(height))
+    }
+
     pub(crate) fn set_web_grid_override(&mut self, grid: GridSize) {
         self.web_grid_override = Some(grid);
         self.view_offset_cols = 0;
         self.view_offset_rows = 0;
+        self.follow_view = true;
         self.apply_grid_size(grid);
     }
 

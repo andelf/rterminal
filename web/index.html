@@ -15,10 +15,10 @@
       <button id="scrollback" class="icon-btn" title="Scrollback">↕</button>
       <button id="refresh" class="icon-btn" title="Refresh tabs">↻</button>
       <button id="toggle-toolbar" class="icon-btn" title="Toggle key toolbar" aria-pressed="false">⌨</button>
-      <label class="mode-toggle" title="Unchecked (default): the native PC grid is authoritative; this view mirrors it and scrolls or pads with dots. Checked: this window's size is also pushed to the native PC grid.">
-        <input type="checkbox" id="web-fit">
-        <span>窗口同步 PC</span>
-      </label>
+      <button id="debug" class="icon-btn" title="采集输入事件用于调试：开启后浏览器把 keydown / composition / beforeinput / input / 实际发送的字节流回传到服务端日志，可用 GET /web/debug/log 取回。" aria-pressed="false">◎</button>
+      <button id="size-mode" class="mode-toggle" aria-pressed="false" title="切换尺寸权威方。PC 尺寸（默认）：以 PC 窗口为准，浏览器镜像网格并滚动/补点。浏览器尺寸：以浏览器视口为准，PC 窗口自动调整到相同网格，两端都不滚动。">
+        <span id="size-mode-label">PC 尺寸</span>
+      </button>
     </div>
   </header>
 

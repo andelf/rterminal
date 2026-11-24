@@ -19,6 +19,7 @@ mod tabs;
 mod terminal;
 mod text_utils;
 mod web_ansi;
+mod web_debug;
 mod web_ui;
 
 use gpui::{

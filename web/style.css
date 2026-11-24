@@ -106,6 +106,12 @@ body.with-toolbar {
   border-color: var(--line);
 }
 
+/* A held key keeps a tint for as long as auto-repeat is running. */
+.key-toolbar button.repeating {
+  background: var(--panel-2);
+  border-color: var(--accent);
+}
+
 .key-toolbar .key-mod { color: #e7c547; }
 
 /* Sticky modifier toggles stay highlighted until latched off again. */
@@ -153,6 +159,14 @@ body.with-toolbar {
   text-align: center;
 }
 
+/* Recording indicator: a lit button is the only hint that input is being
+   captured, so make it unmistakable. */
+#debug.on {
+  color: #fff;
+  background: #b3261e;
+  border-color: #ff6b5e;
+}
+
 button {
   background: var(--panel-2);
   color: var(--fg);
@@ -173,12 +187,14 @@ button:active { background: #343c4e; }
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
-  cursor: pointer;
-  user-select: none;
   white-space: nowrap;
 }
 
-.mode-toggle input { accent-color: var(--accent); }
+button.mode-toggle[aria-pressed="true"] {
+  color: #fff;
+  border-color: #6aa6ff;
+  background: #2f6fd0;
+}
 
 /* The web grid mirrors the native PTY grid exactly. When this window is
    smaller than that grid, scroll the whole xterm surface; xterm's own viewport
