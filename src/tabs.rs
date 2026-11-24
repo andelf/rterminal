@@ -347,10 +347,12 @@ impl TerminalTabs {
             | ApiCommand::WriteInput { id, .. }
             | ApiCommand::SendKeys { id, .. }
             | ApiCommand::SetNote { id, .. }
-            | ApiCommand::ReplaceLine { id, .. } => Some(*id),
+            | ApiCommand::ReplaceLine { id, .. }
+            | ApiCommand::WebStreamAttach { id, .. } => Some(*id),
             ApiCommand::ListTabs { .. }
             | ApiCommand::CreateTab { .. }
-            | ApiCommand::WebClient { .. } => Some(TabSelector::Active),
+            | ApiCommand::WebClient { .. }
+            | ApiCommand::WebStreamDetach { .. } => Some(TabSelector::Active),
         };
         if let Some(sel) = selector
             && let Some((_, tab)) = self.resolve_tab(sel)
@@ -613,6 +615,71 @@ impl TerminalTabs {
             ApiCommand::ReplaceLine { id, bytes, reply } => {
                 self.with_terminal_write(id, &reply, cx, move |term| {
                     term.replace_line_injected(&bytes)
+                });
+            }
+
+            ApiCommand::WebStreamAttach { id, client, reply, stream } => {
+                let Some((_, tab)) = self.resolve_tab(id) else {
+                    return reply_err(&reply, 404, "unknown tab");
+                };
+                let terminal = match &tab.kind {
+                    TerminalTabKind::Terminal { terminal, .. } => terminal.clone(),
+                    TerminalTabKind::Snapshot { .. } => {
+                        return reply_err(&reply, 409, "cannot stream a snapshot tab");
+                    }
+                };
+
+                // Reuse the heartbeat registry so the WebSocket data plane and
+                // the HTTP control plane agree on who owns the browser side.
+                let now = Instant::now();
+                let stale = self
+                    .web_client
+                    .as_ref()
+                    .is_some_and(|c| now.duration_since(c.last_seen) > WEB_CLIENT_TIMEOUT);
+                if stale {
+                    self.web_client = None;
+                }
+                if let Some(existing) = &self.web_client
+                    && existing.id != client
+                {
+                    return reply_err(&reply, 409, "another web client is already connected");
+                }
+                self.web_client = Some(WebClientInfo { id: client.clone(), last_seen: now });
+
+                // Register the reader and capture the snapshot in the same UI
+                // turn: PTY batches are also applied on this thread, so no
+                // output can slip between the seed and the live stream.
+                let (rx, alt, ansi, cols, rows) = terminal.update(cx, |term, _| {
+                    let rx = term.attach_web_stream(client);
+                    let encoded = encode_screen(&term.snapshot, term.term.mode().clone());
+                    let alt = encoded.starts_with('1');
+                    (rx, alt, encoded[1..].to_string(), term.grid_size.cols, term.grid_size.rows)
+                });
+                let _ = stream.send_blocking(rx);
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({
+                        "alt": alt,
+                        "ansi": ansi,
+                        "cols": cols,
+                        "rows": rows
+                    })),
+                });
+            }
+
+            ApiCommand::WebStreamDetach { client, reply } => {
+                for tab in &self.tabs {
+                    if let TerminalTabKind::Terminal { terminal, .. } = &tab.kind {
+                        terminal.update(cx, |term, _| term.detach_web_stream(&client));
+                    }
+                }
+                if self.web_client.as_ref().is_some_and(|c| c.id == client) {
+                    self.web_client = None;
+                    self.pending_sync_to_window = true;
+                }
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({ "detached": true })),
                 });
             }
         }

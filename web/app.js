@@ -82,7 +82,10 @@ const state = {
   // input only) / locked (double tap, applies until explicitly released).
   mods: { shift: "off", ctrl: "off", alt: "off", meta: "off" },
   webConnected: false,
-  clientBlocked: false
+  clientBlocked: false,
+  // WebSocket data plane. HTTP remains the control plane.
+  wsPort: 7879,
+  wsFailures: 0
 };
 function applySizeModeUi() {
   const browser = state.sizeMode === "browser";
@@ -425,6 +428,9 @@ debugButton.addEventListener("click", () => {
     statusEl.textContent = "调试记录已停止";
   }
   applyDebugUi();
+  // The byte trace flag is part of the WebSocket URL, so reconnect to apply it.
+  const active = currentTab();
+  if (active && active.socket) startStream(active);
 });
 
 applyDebugUi();
@@ -525,13 +531,27 @@ function sendInput(tab, data, source = "key") {
   // plain. Locked modifiers are untouched.
   consumeOneShotModifiers(source);
   tab.inputChain = tab.inputChain
-    .then(() =>
-      api(`/tabs/${tab.id}/input`, {
+    .then(() => {
+      const socket = tab.socket;
+      if (socket && socket.readyState === WebSocket.OPEN && !state.clientBlocked) {
+        if (source === "binary") {
+          // onBinary strings are byte buckets (one char per PTY byte), not UTF-8.
+          const bytes = new Uint8Array(data.length);
+          for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 0xff;
+          socket.send(bytes);
+        } else {
+          socket.send(new TextEncoder().encode(data));
+        }
+        return;
+      }
+      // Fallback: keep the HTTP input endpoint alive for old servers and for
+      // the short window while the WebSocket is reconnecting.
+      return api(`/tabs/${tab.id}/input`, {
         method: "POST",
         body: data,
         headers: debugHeaders()
-      })
-    )
+      });
+    })
     .catch(report);
 }
 
@@ -1681,10 +1701,105 @@ function fitTab(tab, forceSync = false) {
 }
 
 function stopPolling(tab) {
+  // Invalidate callbacks from the previous connection before closing it.
+  tab.streamGen = (tab.streamGen || 0) + 1;
   if (tab.timer !== null) {
     clearTimeout(tab.timer);
     tab.timer = null;
   }
+  if (tab.reconnectTimer !== null) {
+    clearTimeout(tab.reconnectTimer);
+    tab.reconnectTimer = null;
+  }
+  if (tab.socket) {
+    const socket = tab.socket;
+    tab.socket = null;
+    try {
+      socket.close();
+    } catch {
+      // Already closing.
+    }
+  }
+}
+
+function streamUrl(tab) {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const host = location.hostname || "127.0.0.1";
+  const port = state.wsPort || Number(location.port) + 1 || 7879;
+  const debugFlag = debug.on ? "&debug=1" : "";
+  return `${scheme}://${host}:${port}/ws/tabs/${tab.id}?client=${encodeURIComponent(clientId)}${debugFlag}`;
+}
+
+// Live PTY stream. The server sends one ANSI snapshot on attach, followed by
+// raw output bytes. HTTP polling stays as a fallback for connection failures.
+function startStream(tab) {
+  stopPolling(tab);
+  if (state.clientBlocked || state.active !== tab.id) return;
+  // Snapshot tabs have no PTY, so they cannot be streamed. Their static
+  // screen is served by the snapshot branch of /screen.ansi instead.
+  if (tab.dto && tab.dto.kind === "snapshot") {
+    poll(tab);
+    return;
+  }
+  const gen = tab.streamGen;
+  let socket;
+  try {
+    socket = new WebSocket(streamUrl(tab));
+  } catch (error) {
+    report(error);
+    poll(tab);
+    return;
+  }
+  socket.binaryType = "arraybuffer";
+  tab.socket = socket;
+
+  socket.addEventListener("open", () => {
+    if (gen !== tab.streamGen) return;
+    state.wsFailures = 0;
+    clearError();
+  });
+
+  socket.addEventListener("message", (event) => {
+    if (gen !== tab.streamGen || state.active !== tab.id) return;
+    if (event.data instanceof ArrayBuffer) {
+      const bytes = new Uint8Array(event.data);
+      tab.term.write(bytes);
+      if (tab.followCursor) scrollToCursor(tab);
+      dbg("wsout", tab, { len: bytes.length });
+      return;
+    }
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (message.type === "snapshot") {
+      const alt = message.alt === true;
+      const ansi = typeof message.ansi === "string" ? message.ansi : "";
+      if (isCompositionInput(tab)) {
+        tab.pendingPaint = { alt, ansi };
+      } else {
+        paintSnapshot(tab, alt, ansi);
+      }
+      statusEl.textContent = `tab ${tab.id} · ${tab.term.cols}×${tab.term.rows}`;
+      clearError();
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    if (gen !== tab.streamGen) return;
+    tab.socket = null;
+    if (state.active !== tab.id || state.clientBlocked) return;
+    state.wsFailures += 1;
+    // A couple of quick retries cover a server restart. After that, fall back
+    // to snapshots so the view is never permanently frozen.
+    if (state.wsFailures >= 3) {
+      poll(tab);
+      return;
+    }
+    tab.reconnectTimer = setTimeout(() => startStream(tab), 300 * state.wsFailures);
+  });
 }
 
 function textOf(data) {
@@ -1742,7 +1857,7 @@ async function poll(tab) {
   } catch (error) {
     report(error);
   }
-  if (state.active === tab.id) {
+  if (state.active === tab.id && !tab.socket && tab.reconnectTimer === null) {
     tab.timer = setTimeout(() => poll(tab), 100);
   }
 }
@@ -1781,7 +1896,7 @@ function activate(id, fromUser) {
     fitTab(next);
     applyPadding(next);
     if (next.followCursor) scrollToCursor(next);
-    poll(next);
+    startStream(next);
   }
   if (fromUser) {
     api(`/tabs/${id}/activate`, { method: "POST" })
@@ -1854,6 +1969,9 @@ function createTab(dto) {
     padRight,
     padBottom,
     timer: null,
+    socket: null,
+    reconnectTimer: null,
+    streamGen: 0,
     alt: null,
     inputChain: Promise.resolve(),
     followCursor: true,
@@ -2258,5 +2376,12 @@ applyKeyboardModeUi();
 keyToolbar.hidden = !state.showToolbar;
 document.body.classList.toggle("with-toolbar", state.showToolbar);
 
-refresh();
+// The data-plane port comes from the server so a LAN client (iPad) uses the
+// right port even when the CLI overrides the default.
+api("/web/config")
+  .then((config) => {
+    if (config && config.ws_port) state.wsPort = Number(config.ws_port);
+  })
+  .catch(() => {})
+  .finally(refresh);
 setInterval(refresh, 1000);

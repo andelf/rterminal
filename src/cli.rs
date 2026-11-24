@@ -61,6 +61,12 @@ pub(crate) struct CliOptions {
         help = "Address to bind the agent control HTTP API on (host:port)"
     )]
     pub(crate) api_addr: String,
+    #[arg(
+        long,
+        default_value = "127.0.0.1:7879",
+        help = "Address to bind the browser WebSocket data stream on (host:port)"
+    )]
+    pub(crate) ws_addr: String,
 }
 
 #[cfg(test)]
@@ -230,5 +236,11 @@ mod tests {
             "127.0.0.1:9000".to_string(),
         ]);
         assert_eq!(cli.api_addr, "127.0.0.1:9000");
+    }
+
+    #[test]
+    fn ws_addr_defaults_to_loopback() {
+        let cli = parse_cli_options_from(Vec::<String>::new());
+        assert_eq!(cli.ws_addr, "127.0.0.1:7879");
     }
 }

@@ -252,6 +252,10 @@ pub(crate) struct AgentTerminal {
     pub(crate) paste_guard_prompt_open: bool,
     pub(crate) shell_exited: bool,
     pub(crate) debug: TabRuntimeState,
+    /// Web clients attached over WebSocket. Only the UI thread touches this,
+    /// so no lock is needed; a full channel means the reader cannot keep up
+    /// and is dropped so it can reconnect from a fresh screen snapshot.
+    web_streams: Vec<(String, async_channel::Sender<Vec<u8>>)>,
     pending_term_events: Arc<Mutex<Vec<PendingTerminalEvent>>>,
     pub(crate) _window_bounds_sub: Option<Subscription>,
     pub(crate) _focus_in_sub: Option<Subscription>,
@@ -439,6 +443,7 @@ impl AgentTerminal {
             paste_guard_prompt_open: false,
             shell_exited: false,
             debug,
+            web_streams: Vec::new(),
             pending_term_events,
             _window_bounds_sub: None,
             _focus_in_sub: None,
@@ -505,6 +510,28 @@ impl AgentTerminal {
         this
     }
 
+    /// Register a WebSocket reader. The returned channel receives the exact
+    /// PTY bytes from this moment on; the caller must load a screen snapshot
+    /// first so the browser has a consistent starting state.
+    pub(crate) fn attach_web_stream(
+        &mut self,
+        client: String,
+    ) -> async_channel::Receiver<Vec<u8>> {
+        let (tx, rx) = async_channel::bounded(4096);
+        self.web_streams.retain(|(id, _)| id != &client);
+        self.web_streams.push((client, tx));
+        rx
+    }
+
+    pub(crate) fn detach_web_stream(&mut self, client: &str) {
+        self.web_streams.retain(|(id, _)| id != client);
+    }
+
+    fn broadcast_web_streams(&mut self, bytes: &[u8]) {
+        self.web_streams
+            .retain(|(_, tx)| tx.try_send(bytes.to_vec()).is_ok());
+    }
+
     pub(crate) fn ingest_batch(&mut self, cx: &mut Context<Self>, chunks: &[Vec<u8>]) {
         if chunks.is_empty() {
             return;
@@ -517,6 +544,7 @@ impl AgentTerminal {
             if let Some(logger) = &self.history_logger {
                 logger.record_pty_output(chunk);
             }
+            self.broadcast_web_streams(chunk);
             self.processor.advance(&mut self.term, chunk);
             self.debug.record_bytes_from_pty(chunk.len());
             self.record_pty_ingest_diagnostics(chunk.len());

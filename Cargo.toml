@@ -16,6 +16,7 @@ raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tiny_http = "0.12"
+tungstenite = "0.26"
 
 # The Objective-C bridge in src/macos_ax.rs is the only consumer of these.
 # Keeping them unconditional used to pull core-foundation/core-graphics into

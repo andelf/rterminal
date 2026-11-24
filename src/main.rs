@@ -20,6 +20,7 @@ mod terminal;
 mod text_utils;
 mod web_ansi;
 mod web_debug;
+mod web_socket;
 mod web_ui;
 
 use gpui::{
@@ -158,9 +159,20 @@ fn main() {
     };
 
     let (api_tx, api_rx) = async_channel::unbounded::<crate::api_protocol::ApiCommand>();
-    if let Err(err) = crate::api_server::start_api_server(&cli.api_addr, api_tx) {
+    let ws_port = cli
+        .ws_addr
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse::<u16>().ok())
+        .unwrap_or(7879);
+    crate::api_server::set_ws_port(ws_port);
+    if let Err(err) = crate::api_server::start_api_server(&cli.api_addr, api_tx.clone()) {
         eprintln!("failed to start api server on {}: {err:#}", cli.api_addr);
         eprintln!("another instance may already be using this address; exiting.");
+        std::process::exit(1);
+    }
+    if let Err(err) = crate::web_socket::start_ws_server(&cli.ws_addr, api_tx) {
+        eprintln!("failed to start web data stream on {}: {err:#}", cli.ws_addr);
         std::process::exit(1);
     }
 

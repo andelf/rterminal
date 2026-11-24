@@ -4,8 +4,17 @@ use crate::api_protocol::{
 };
 use async_channel::Sender;
 use std::io::Cursor;
+use std::sync::OnceLock;
 use std::thread;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
+
+static WS_PORT: OnceLock<u16> = OnceLock::new();
+
+/// The browser builds its WebSocket URL from its own host plus this port, so
+/// an iPad reaching the PC by LAN address still connects to the right place.
+pub(crate) fn set_ws_port(port: u16) {
+    let _ = WS_PORT.set(port);
+}
 
 #[derive(Debug)]
 pub(crate) struct RouteError {
@@ -21,6 +30,17 @@ pub(crate) fn parse_request(
 ) -> Result<RouteOutcome, RouteError> {
     if let Some(outcome) = crate::web_ui::static_response(path) {
         return Ok(outcome);
+    }
+
+    if path == "/web/config" {
+        return Ok(RouteOutcome::Immediate {
+            status: 200,
+            content_type: "application/json; charset=utf-8",
+            body: format!(
+                "{{\"ws_port\":{}}}",
+                WS_PORT.get().copied().unwrap_or(7879)
+            ),
+        });
     }
 
     let (tx, rx) = oneshot();
@@ -238,6 +258,7 @@ fn legacy_help_text() -> String {
         "  POST   /tabs/:id/keys          (tmux key tokens)",
         "web UI:",
         "  GET    /web/                   (xterm.js client with mirrored tabs)",
+        "  GET    /web/config             (port of the WebSocket data stream)",
         "  POST   /web/client             (connect/heartbeat/disconnect, one client at a time)",
         "  POST   /web/debug              (browser input event stream, appended to a log file)",
         "  GET    /web/debug/log          (?lines=N, default 400)",

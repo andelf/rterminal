@@ -87,6 +87,18 @@ pub(crate) enum ApiCommand {
     SendKeys { id: TabSelector, body: String, reply: Sender<ApiReply> },
     SetNote { id: TabSelector, note: Option<String>, reply: Sender<ApiReply> },
     ReplaceLine { id: TabSelector, bytes: Vec<u8>, reply: Sender<ApiReply> },
+    /// Attach a WebSocket data stream to a tab. The reply carries the current
+    /// screen as an ANSI repaint so the browser can seed xterm before any
+    /// incremental PTY bytes arrive (no gap, no double-apply).
+    WebStreamAttach {
+        id: TabSelector,
+        client: String,
+        reply: Sender<ApiReply>,
+        /// Private channel used to hand the PTY receiver to the socket thread.
+        stream: Sender<async_channel::Receiver<Vec<u8>>>,
+    },
+    /// Drop the stream when its WebSocket closes.
+    WebStreamDetach { client: String, reply: Sender<ApiReply> },
 }
 
 #[derive(Debug)]
