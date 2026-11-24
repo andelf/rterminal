@@ -2,6 +2,7 @@ use gpui::{
     Context, Entity, MouseButton, Render, Subscription, Task, Window, WindowControlArea, div,
     prelude::*, px, rgb,
 };
+use std::time::{Duration, Instant};
 
 use crate::cli::CliOptions;
 use crate::render::CUSTOM_TITLE_BAR_HEIGHT;
@@ -26,6 +27,13 @@ struct TerminalTab {
     id: usize,
     kind: TerminalTabKind,
 }
+
+struct WebClientInfo {
+    id: String,
+    last_seen: Instant,
+}
+
+const WEB_CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl TerminalTab {
     fn api_id(&self) -> u64 {
@@ -86,6 +94,8 @@ pub(crate) struct TerminalTabs {
     next_snapshot_id: usize,
     pending_focus_sync: bool,
     pending_create_requests: Vec<async_channel::Sender<crate::api_protocol::ApiReply>>,
+    web_client: Option<WebClientInfo>,
+    pending_sync_to_window: bool,
     _api_drain: Task<()>,
 }
 
@@ -110,6 +120,8 @@ impl TerminalTabs {
             next_snapshot_id: 1,
             pending_focus_sync: false,
             pending_create_requests: Vec::new(),
+            web_client: None,
+            pending_sync_to_window: false,
             _api_drain: api_drain,
         };
 
@@ -169,12 +181,13 @@ impl TerminalTabs {
 
     fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
-            cx.quit();
+            cx.notify();
             return;
         }
 
         self.close_tab_at_index(self.active_tab, cx);
         if self.tabs.is_empty() {
+            cx.notify();
             return;
         }
 
@@ -202,7 +215,10 @@ impl TerminalTabs {
         self.tabs.remove(index);
 
         if self.tabs.is_empty() {
-            cx.quit();
+            // Keep the window (and therefore the HTTP/web service) alive with
+            // an empty terminal surface; a later "+" or POST /tabs recreates it.
+            self.active_tab = 0;
+            cx.notify();
             return;
         }
 
@@ -328,9 +344,9 @@ impl TerminalTabs {
             | ApiCommand::SendKeys { id, .. }
             | ApiCommand::SetNote { id, .. }
             | ApiCommand::ReplaceLine { id, .. } => Some(*id),
-            ApiCommand::ListTabs { .. } | ApiCommand::CreateTab { .. } => {
-                Some(TabSelector::Active)
-            }
+            ApiCommand::ListTabs { .. }
+            | ApiCommand::CreateTab { .. }
+            | ApiCommand::WebClient { .. } => Some(TabSelector::Active),
         };
         if let Some(sel) = selector
             && let Some((_, tab)) = self.resolve_tab(sel)
@@ -445,12 +461,65 @@ impl TerminalTabs {
                     }
                 };
                 terminal.update(cx, |term, _| {
-                    term.apply_grid_size(GridSize { cols, rows });
+                    term.set_web_grid_override(GridSize { cols, rows });
                 });
                 cx.notify();
                 let _ = reply.send_blocking(ApiReply::Ok {
                     status: 200,
                     body: ReplyBody::Json(serde_json::json!({ "cols": cols, "rows": rows })),
+                });
+            }
+
+            ApiCommand::WebClient {
+                id,
+                connected,
+                cols: _cols,
+                rows: _rows,
+                web_fit,
+                reply,
+            } => {
+                let now = Instant::now();
+                let stale = self
+                    .web_client
+                    .as_ref()
+                    .is_some_and(|client| now.duration_since(client.last_seen) > WEB_CLIENT_TIMEOUT);
+                if stale {
+                    self.web_client = None;
+                    self.pending_sync_to_window = true;
+                }
+
+                if connected {
+                    if let Some(client) = &self.web_client
+                        && client.id != id
+                    {
+                        let message = format!(
+                            "another web client is already connected: {}",
+                            client.id
+                        );
+                        return reply_err(&reply, 409, &message);
+                    }
+                    self.web_client = Some(WebClientInfo { id, last_seen: now });
+                    if !web_fit {
+                        // PC is authoritative: drop any web-driven grid override.
+                        for tab in &self.tabs {
+                            if let TerminalTabKind::Terminal { terminal, .. } = &tab.kind {
+                                terminal.update(cx, |term, _| term.clear_web_grid_override());
+                            }
+                        }
+                        self.pending_sync_to_window = true;
+                    }
+                } else if self.web_client.as_ref().is_some_and(|client| client.id == id) {
+                    self.web_client = None;
+                    self.pending_sync_to_window = true;
+                }
+
+                let connected_now = self.web_client.is_some();
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({
+                        "connected": connected_now,
+                        "clients": if connected_now { 1 } else { 0 }
+                    })),
                 });
             }
 
@@ -674,6 +743,28 @@ impl Render for TerminalTabs {
             self.request_focus_active_tab(window, cx);
         }
 
+        if self
+            .web_client
+            .as_ref()
+            .is_some_and(|client| client.last_seen.elapsed() > WEB_CLIENT_TIMEOUT)
+        {
+            self.web_client = None;
+            self.pending_sync_to_window = true;
+        }
+
+        let web_connected = self.web_client.is_some();
+        for tab in &self.tabs {
+            if let TerminalTabKind::Terminal { terminal, .. } = &tab.kind {
+                terminal.update(cx, |term, _| {
+                    term.set_padding_dots(web_connected);
+                    if self.pending_sync_to_window {
+                        term.request_sync_to_window();
+                    }
+                });
+            }
+        }
+        self.pending_sync_to_window = false;
+
         let this = cx.entity();
         let tabs_data: Vec<(usize, String, bool)> = self
             .tabs
@@ -721,6 +812,16 @@ impl Render for TerminalTabs {
         );
 
         let this = this.clone();
+        let tabs_row = if web_connected {
+            tabs_row.child(
+                div()
+                    .px_2()
+                    .text_color(rgb(0x7ee2b8))
+                    .child("● web 已连接"),
+            )
+        } else {
+            tabs_row
+        };
         let tabs_row = tabs_row
             .child(
                 div()

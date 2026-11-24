@@ -34,6 +34,20 @@ pub(crate) struct ResizeRequest {
     pub(crate) rows: u16,
 }
 
+/// Wire shape of `POST /web/client`. The built-in page sends this on load,
+/// once a second as a heartbeat, and on unload with `connected: false`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebClientRequest {
+    pub(crate) id: String,
+    pub(crate) connected: bool,
+    #[serde(default)]
+    pub(crate) cols: u16,
+    #[serde(default)]
+    pub(crate) rows: u16,
+    #[serde(default)]
+    pub(crate) web_fit: bool,
+}
+
 #[derive(Debug)]
 pub(crate) enum ApiCommand {
     ListTabs { reply: Sender<ApiReply> },
@@ -48,6 +62,14 @@ pub(crate) enum ApiCommand {
     GetScrollback { id: TabSelector, lines: Option<usize>, reply: Sender<ApiReply> },
     ScrollDisplay { id: TabSelector, action: ScrollAction, reply: Sender<ApiReply> },
     ResizeTab { id: TabSelector, cols: u16, rows: u16, reply: Sender<ApiReply> },
+    WebClient {
+        id: String,
+        connected: bool,
+        cols: u16,
+        rows: u16,
+        web_fit: bool,
+        reply: Sender<ApiReply>,
+    },
     WriteInput { id: TabSelector, bytes: Vec<u8>, reply: Sender<ApiReply> },
     SendKeys { id: TabSelector, body: String, reply: Sender<ApiReply> },
     SetNote { id: TabSelector, note: Option<String>, reply: Sender<ApiReply> },

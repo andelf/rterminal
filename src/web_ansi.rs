@@ -49,6 +49,13 @@ pub(crate) fn encode_screen(snapshot: &ScreenSnapshot) -> String {
         "{ESC}[?25{}",
         if snapshot.cursor_visible { 'h' } else { 'l' }
     ));
+    // Clear the screen AND the scrollback (ED 3). `term.resize()` on a grid
+    // change pushes the old rows into xterm's scrollback, and ED 2 does not
+    // remove them. If the viewport is scrolled up, the incremental repaint
+    // then shows stale history above the freshly drawn rows, so the web view
+    // diverges from the native screen. ED 3 drops that history and returns
+    // the viewport to the bottom on every full repaint.
+    out.push_str(&format!("{ESC}[3J"));
 
     for (row_index, row) in snapshot.cells.iter().enumerate() {
         // Reset SGR before the erase so `EL 2` paints with the terminal's
@@ -105,6 +112,7 @@ mod tests {
         ]));
         assert!(out.starts_with('0'));
         assert!(out.contains("\x1b[?25h"));
+        assert!(out.contains("\x1b[3J"));
         assert!(out.contains("\x1b[1;1H\x1b[0m\x1b[2K"));
         assert!(out.contains("\x1b[2;1H\x1b[0m\x1b[2K"));
         assert!(out.ends_with("\x1b[2;3H"));

@@ -455,6 +455,42 @@ impl AgentTerminal {
             return;
         }
 
+        // When a web client drives a grid larger than this window, scroll the
+        // oversized view instead of the terminal scrollback.
+        if self.padding_dots {
+            if let (Some(bounds), Some(cell_width)) = (
+                *self.canvas_bounds.lock(),
+                Some(measure_cell_width(
+                    window,
+                    &self.font_family,
+                    self.font_fallbacks.as_ref(),
+                    self.font_size,
+                )),
+            ) {
+                let dynamic_padding_y =
+                    terminal_content_padding_y(bounds.size.height, self.line_height(), self.grid_size.rows as usize);
+                let visible_cols =
+                    ((bounds.size.width - TEXT_PADDING_X * 2.0) / cell_width).floor() as usize;
+                let visible_rows =
+                    ((bounds.size.height - dynamic_padding_y * 2.0) / self.line_height()).floor()
+                        as usize;
+                let max_cols = self.grid_size.cols as usize;
+                let max_rows = self.grid_size.rows as usize;
+                if max_cols > visible_cols || max_rows > visible_rows {
+                    self.follow_view = false;
+                    self.view_offset_cols = (self.view_offset_cols as isize + x_steps as isize)
+                        .clamp(0, max_cols.saturating_sub(visible_cols) as isize)
+                        as usize;
+                    self.view_offset_rows = (self.view_offset_rows as isize + y_steps as isize)
+                        .clamp(0, max_rows.saturating_sub(visible_rows) as isize)
+                        as usize;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
         let mut handled = false;
         if mode.intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift {
             let (row, col) = self.mouse_grid_point(event.position, window);

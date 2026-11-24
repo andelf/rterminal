@@ -31,8 +31,8 @@ use crate::input_log::InputLogger;
 use crate::keyboard::encode_keystroke;
 use crate::pty::{PtySession, SharedPtyWriter, write_to_pty};
 use crate::render::{
-    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y, line_height_for,
-    measure_cell_width,
+    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
+    line_height_for, measure_cell_width, terminal_content_padding_y,
 };
 use crate::snapshot_tab::SnapshotTabData;
 use crate::text_utils::summarize_text_for_trace;
@@ -194,6 +194,15 @@ pub(crate) struct AgentTerminal {
     pub(crate) term: Term<TitleTrackingListener>,
     pub(crate) processor: Processor<StdSyncHandler>,
     pub(crate) grid_size: GridSize,
+    pub(crate) pc_grid: GridSize,
+    pub(crate) web_grid_override: Option<GridSize>,
+    pub(crate) padding_dots: bool,
+    pub(crate) view_offset_cols: usize,
+    pub(crate) view_offset_rows: usize,
+    /// Whether the oversized grid view should stay pinned to the live cursor.
+    /// Manual wheel scrolling clears it; fresh input restores it.
+    pub(crate) follow_view: bool,
+    pub(crate) pending_sync_to_window: bool,
     pub(crate) snapshot: ScreenSnapshot,
     pub(crate) cursor_shape: CursorShape,
     pub(crate) force_vertical_cursor: bool,
@@ -374,6 +383,13 @@ impl AgentTerminal {
             term,
             processor,
             grid_size,
+            pc_grid: grid_size,
+            web_grid_override: None,
+            padding_dots: false,
+            view_offset_cols: 0,
+            view_offset_rows: 0,
+            follow_view: true,
+            pending_sync_to_window: false,
             snapshot: ScreenSnapshot::default(),
             cursor_shape: CursorShape::Block,
             force_vertical_cursor: cli.force_vertical_cursor,
@@ -507,6 +523,11 @@ impl AgentTerminal {
         }
         self.process_pending_terminal_events(cx);
         self.refresh_snapshot();
+        if self.follow_view {
+            // Keep the live bottom of an oversized grid in view. If the user
+            // wheel-scrolled away, follow_view is false and we leave it alone.
+            self.view_offset_rows = self.max_view_offset_rows();
+        }
         if let Some(old) = &old_snapshot {
             self.log_snapshot_transition("pty", old, old_grid, chunks.len());
         }
@@ -671,17 +692,67 @@ impl AgentTerminal {
             self.font_size,
         );
         let viewport = window.viewport_size();
-        let new_grid = compute_grid_size(
+        let pc_grid = compute_grid_size(
             viewport,
             cell_width,
             self.line_height(),
             self.show_status_bar,
         );
-        self.apply_grid_size(new_grid);
+        self.pc_grid = pc_grid;
+        let grid = self.web_grid_override.unwrap_or(pc_grid);
+        self.apply_grid_size(grid);
+    }
+
+    pub(crate) fn set_web_grid_override(&mut self, grid: GridSize) {
+        self.web_grid_override = Some(grid);
+        self.view_offset_cols = 0;
+        self.view_offset_rows = 0;
+        self.apply_grid_size(grid);
+    }
+
+    pub(crate) fn clear_web_grid_override(&mut self) {
+        self.web_grid_override = None;
+        self.view_offset_cols = 0;
+        self.view_offset_rows = 0;
+        let pc_grid = self.pc_grid;
+        self.apply_grid_size(pc_grid);
+    }
+
+    pub(crate) fn request_sync_to_window(&mut self) {
+        self.pending_sync_to_window = true;
+    }
+
+    pub(crate) fn set_padding_dots(&mut self, enabled: bool) {
+        if self.padding_dots != enabled {
+            self.padding_dots = enabled;
+            if !enabled {
+                self.view_offset_cols = 0;
+                self.view_offset_rows = 0;
+            }
+        }
     }
 
     pub(crate) fn line_height(&self) -> Pixels {
         line_height_for(self.font_size)
+    }
+
+    /// Largest vertical scroll offset that still keeps visible rows painted.
+    /// `canvas_bounds` is refreshed by the canvas paint closure, so this does
+    /// not need a Window handle from the PTY pump task.
+    fn max_view_offset_rows(&self) -> usize {
+        let Some(bounds) = *self.canvas_bounds.lock() else {
+            return 0;
+        };
+        let line_height = self.line_height();
+        let padding = terminal_content_padding_y(
+            bounds.size.height,
+            line_height,
+            self.grid_size.rows as usize,
+        );
+        let visible_rows = ((bounds.size.height - padding * 2.0) / line_height)
+            .floor()
+            .max(1.0) as usize;
+        (self.grid_size.rows as usize).saturating_sub(visible_rows)
     }
 
     pub(crate) fn adjust_font_size(&mut self, delta: Pixels, window: &mut Window) {
@@ -720,6 +791,8 @@ impl AgentTerminal {
     }
 
     pub(crate) fn write_bytes(&mut self, bytes: &[u8]) {
+        // Fresh input means the user wants the live cursor back.
+        self.follow_view = true;
         let Some(writer) = &self.writer else {
             self.debug
                 .set_error("write skipped because PTY writer is unavailable");

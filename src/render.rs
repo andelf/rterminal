@@ -116,6 +116,10 @@ impl Render for AgentTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.mark_enter_latency_first_paint();
         window.set_window_title(&self.window_title());
+        if self.pending_sync_to_window {
+            self.pending_sync_to_window = false;
+            self.sync_grid_to_window(window);
+        }
         let model_line = self.input_line.clone();
         let model_cursor_utf16 = self.input_cursor_utf16;
         let allow_ax_override = self.allow_ax_override();
@@ -154,6 +158,9 @@ impl Render for AgentTerminal {
         let shell = self.shell.clone();
         let font_size = self.font_size;
         let line_height = self.line_height();
+        let padding_dots = self.padding_dots;
+        let view_offset_cols = self.view_offset_cols;
+        let view_offset_rows = self.view_offset_rows;
         let selection = self.selection_bounds();
         let palette = palette_for(self.theme);
         let terminal_title = self
@@ -238,9 +245,19 @@ impl Render for AgentTerminal {
                             line_height,
                             snapshot.cells.len(),
                         );
-                        let origin = bounds.origin + point(TEXT_PADDING_X, dynamic_padding_y);
+                        let origin = bounds.origin
+                            + point(TEXT_PADDING_X, dynamic_padding_y)
+                            - point(
+                                view_offset_cols as f32 * cell_width,
+                                view_offset_rows as f32 * line_height,
+                            );
                         for (row_index, row) in snapshot.cells.iter().enumerate() {
                             let y = origin.y + row_index as f32 * line_height;
+                            if y + line_height < bounds.origin.y
+                                || y > bounds.origin.y + bounds.size.height
+                            {
+                                continue;
+                            }
                             let mut covered_until_col = 0usize;
                             let mut extra_visual_cols = 0f32;
 
@@ -293,6 +310,55 @@ impl Render for AgentTerminal {
                                         col_index.saturating_add(cell_advance_cols(cell));
                                     if cell.expands_layout && cell.width_cols > 1 {
                                         extra_visual_cols += f32::from(cell.width_cols - 1);
+                                    }
+                                }
+                            }
+                        }
+
+                        // tmux-style padding: when the web client owns a
+                        // smaller grid than this native window, fill the
+                        // unused cells with dots instead of empty background.
+                        if padding_dots && !snapshot.cells.is_empty() {
+                            let logical_rows = snapshot.cells.len();
+                            let logical_cols = snapshot.cells[0].len();
+                            let visible_cols =
+                                ((bounds.size.width - TEXT_PADDING_X * 2.0) / cell_width).floor()
+                                    as usize;
+                            let visible_rows =
+                                ((bounds.size.height - dynamic_padding_y * 2.0) / line_height)
+                                    .floor()
+                                    as usize;
+                            if visible_cols > logical_cols || visible_rows > logical_rows {
+                                let dot_run = gpui::TextRun {
+                                    len: 1,
+                                    color: rgba(0x3a4152).into(),
+                                    ..run_template.clone()
+                                };
+                                let dot_shape = window.text_system().shape_line(
+                                    ".".into(),
+                                    font_pixels,
+                                    &[dot_run],
+                                    Some(cell_width),
+                                );
+                                for row in 0..visible_rows {
+                                    for col in 0..visible_cols {
+                                        if row < logical_rows && col < logical_cols {
+                                            continue;
+                                        }
+                                        let dot_origin = bounds.origin
+                                            + point(TEXT_PADDING_X, dynamic_padding_y)
+                                            + point(
+                                                col as f32 * cell_width,
+                                                row as f32 * line_height,
+                                            );
+                                        let _ = dot_shape.paint(
+                                            dot_origin,
+                                            line_height,
+                                            gpui::TextAlign::Left,
+                                            None,
+                                            window,
+                                            cx,
+                                        );
                                     }
                                 }
                             }

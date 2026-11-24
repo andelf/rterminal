@@ -1,6 +1,6 @@
 use crate::api_protocol::{
     ApiCommand, ApiReply, ReplyBody, ResizeRequest, RouteOutcome, ScrollAction, ScrollRequest,
-    TabSelector, oneshot,
+    TabSelector, WebClientRequest, oneshot,
 };
 use async_channel::Sender;
 use std::io::Cursor;
@@ -74,6 +74,26 @@ pub(crate) fn parse_request(
         },
         ("POST", ["tabs", sel, "input"]) => {
             ApiCommand::WriteInput { id: parse_selector(sel)?, bytes: body, reply: tx }
+        }
+        ("POST", ["web", "client"]) => {
+            let req: WebClientRequest = serde_json::from_slice(&body).map_err(|err| RouteError {
+                status: 400,
+                message: format!("invalid web client body: {err}"),
+            })?;
+            if req.id.is_empty() || req.id.len() > 128 {
+                return Err(RouteError {
+                    status: 400,
+                    message: "web client id must be 1..128 characters".to_string(),
+                });
+            }
+            ApiCommand::WebClient {
+                id: req.id,
+                connected: req.connected,
+                cols: req.cols,
+                rows: req.rows,
+                web_fit: req.web_fit,
+                reply: tx,
+            }
         }
         ("POST", ["tabs", sel, "keys"]) => ApiCommand::SendKeys {
             id: parse_selector(sel)?,
@@ -196,6 +216,7 @@ fn legacy_help_text() -> String {
         "  POST   /tabs/:id/keys          (tmux key tokens)",
         "web UI:",
         "  GET    /web/                   (xterm.js client with mirrored tabs)",
+        "  POST   /web/client             (connect/heartbeat/disconnect, one client at a time)",
         "legacy:",
         "  GET    /debug                  (this page)",
         "  GET    /debug/state            -> /tabs/active",
