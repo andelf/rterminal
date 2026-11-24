@@ -4,7 +4,8 @@
 //
 //   node tools/replay-web-input.js [scenario...]     (default: all)
 //
-// Scenarios: spaces, keys, typing, dictation, rewrite, mixed, commit, mods, ime
+// Scenarios: spaces, keys, typing, dictation, rewrite, mixed, commit, mods, ime,
+// screen, screen-mac
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -153,6 +154,26 @@ const SCENARIOS = {
       { mode: "system", delay: 300 }
     ]
   },
+  // Same native dispatch, but with Apple key caps. ⌘ is metaKey and ⌥ is
+  // altKey (no translation layer), and "return" is the Mac label for Enter.
+  // This also exercises rebuilding the whole keyboard mid-session: the old
+  // modifier buttons must not survive with stale held state.
+  "screen-mac": {
+    steps: [
+      { mode: "screen", delay: 300 },
+      { screenLayout: "mac", delay: 200 },
+      { screenDown: "⌥" },
+      { screenTap: "A", delay: 90 },
+      { screenUp: "⌥" },
+      { screenDown: "⌘" },
+      { screenTap: "A", delay: 90 },
+      { screenUp: "⌘" },
+      { screenTap: "return", delay: 90 },
+      { screenLayout: "win", delay: 200 },
+      { screenTap: "A", delay: 90 },
+      { mode: "system", delay: 300 }
+    ]
+  },
   // IME commit: pre-edit is gated, the commit must go out exactly once even
   // though xterm raises onData from compositionend after the input event.
   ime: {
@@ -184,6 +205,12 @@ const PAGE_SCRIPT = (steps) => `(async () => {
   for (const step of steps) {
     if (step.mode) {
       document.getElementById("keyboard-mode").click();
+    }
+    if (step.screenLayout) {
+      document.getElementById("sk-layout-toggle").click();
+      if (state.screenLayout !== step.screenLayout) {
+        return "wrong screen layout: " + state.screenLayout;
+      }
     }
     if (step.screenDown || step.screenTap || step.screenUp) {
       const label = step.screenDown || step.screenTap || step.screenUp;

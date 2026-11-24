@@ -182,6 +182,28 @@ body.with-toolbar.with-screen-keyboard {
 .screen-keyboard::-webkit-scrollbar { display: none; }
 .screen-keyboard[hidden] { display: none; }
 
+/* A fixed strip above the scrollable key rows: the layout switch must stay
+   reachable even when a narrow viewport scrolls the keyboard sideways. */
+.sk-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  min-width: max-content;
+  font-size: 11px;
+  color: var(--muted);
+}
+.sk-layout-toggle {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.sk-layout-toggle[aria-pressed="true"] {
+  color: #fff;
+  border-color: #6aa6ff;
+  background: #2f6fd0;
+}
+
 .sk-layout {
   display: flex;
   align-items: flex-end;

@@ -15,6 +15,8 @@ const sizeModeLabel = document.getElementById("size-mode-label");
 const keyboardModeButton = document.getElementById("keyboard-mode");
 const keyboardModeLabel = document.getElementById("keyboard-mode-label");
 const screenKeyboard = document.getElementById("screen-keyboard");
+const skLayoutHolder = document.getElementById("sk-layout");
+const skLayoutToggle = document.getElementById("sk-layout-toggle");
 const toolbarToggle = document.getElementById("toggle-toolbar");
 const keyToolbar = document.getElementById("key-toolbar");
 const keyScroll = document.getElementById("key-scroll");
@@ -56,12 +58,24 @@ function savedKeyboardMode() {
   }
 }
 
+function savedScreenLayout() {
+  // The built-in keyboard can mimic either a PC or an Apple key cap layout.
+  // Start from the host platform, but remember an explicit choice forever.
+  try {
+    const saved = localStorage.getItem("rterminal.screenLayout");
+    if (saved === "win" || saved === "mac") return saved;
+  } catch {}
+  const platform = navigator.platform || "";
+  return /Mac|iPhone|iPad|iPod/i.test(platform) ? "mac" : "win";
+}
+
 const state = {
   tabs: new Map(),
   active: null,
   refreshing: false,
   sizeMode: savedSizeMode(),
   keyboardMode: savedKeyboardMode(),
+  screenLayout: savedScreenLayout(),
   showToolbar: savedToolbar(),
   // Toolbar modifiers have three states, matching a hardware keyboard and
   // the platform on-screen keyboards: off / one-shot (applies to the next
@@ -1018,8 +1032,10 @@ function setToolbar(visible) {
 function sk(label, key, code, vk, shifted, extra) {
   return { label, key, code, vk, shifted, ...(extra || {}) };
 }
-function skMod(label, mod, code, vk) {
-  return { label, key: label, code, vk, mod };
+function skMod(label, mod, code, vk, extra) {
+  // `key` must stay a real KeyboardEvent.key even when the cap shows a glyph
+  // (⌘/⌥/⌃), otherwise xterm would try to encode the glyph as text.
+  return { label, key: label, code, vk, mod, ...(extra || {}) };
 }
 function skLetters(letters) {
   return [...letters].map((c) => sk(c, c.toLowerCase(), `Key${c}`, c.charCodeAt(0), c));
@@ -1027,7 +1043,7 @@ function skLetters(letters) {
 const SK_DIGITS = "1234567890";
 const SK_SHIFTED_DIGITS = "!@#$%^&*()";
 
-const SCREEN_KEY_ROWS = [
+const SCREEN_KEY_ROWS_WIN = [
   [
     sk("Esc", "Escape", "Escape", 27),
     ...Array.from({ length: 12 }, (_, i) => sk(`F${i + 1}`, `F${i + 1}`, `F${i + 1}`, 112 + i))
@@ -1070,6 +1086,36 @@ const SCREEN_KEY_ROWS = [
     skMod("Ctrl", "ctrl", "ControlRight", 17)
   ]
 ];
+
+// Apple key caps: the modifier *order* changes (control/option/command, with
+// command next to the space bar), and the labels are glyphs. The underlying
+// event flags are unchanged: ⌘ is metaKey, ⌥ is altKey, ⌃ is ctrlKey. No
+// extra "Mac mode" translation layer — xterm still does all the encoding.
+const SCREEN_KEY_ROWS_MAC = [
+  SCREEN_KEY_ROWS_WIN[0],
+  SCREEN_KEY_ROWS_WIN[1],
+  SCREEN_KEY_ROWS_WIN[2],
+  [
+    sk("return", "Enter", "Enter", 13, null, { wide: true }),
+    ...skLetters("ASDFGHJKL"),
+    sk(";", ";", "Semicolon", 186, ":"),
+    sk("'", "'", "Quote", 222, '"')
+  ],
+  SCREEN_KEY_ROWS_WIN[4],
+  [
+    skMod("⌃", "ctrl", "ControlLeft", 17, { key: "Control", title: "Control（按住）" }),
+    skMod("⌥", "alt", "AltLeft", 18, { key: "Alt", title: "Option（按住）" }),
+    skMod("⌘", "meta", "MetaLeft", 91, { key: "Meta", title: "Command（按住）" }),
+    sk("Space", " ", "Space", 32, null, { space: true }),
+    skMod("⌘", "meta", "MetaRight", 92, { key: "Meta", title: "Command（按住）" }),
+    skMod("⌥", "alt", "AltRight", 18, { key: "Alt", title: "Option（按住）" }),
+    skMod("⌃", "ctrl", "ControlRight", 17, { key: "Control", title: "Control（按住）" })
+  ]
+];
+
+function screenKeyRows() {
+  return state.screenLayout === "mac" ? SCREEN_KEY_ROWS_MAC : SCREEN_KEY_ROWS_WIN;
+}
 
 const SCREEN_NAV_KEYS = [
   [sk("Ins", "Insert", "Insert", 45), sk("Home", "Home", "Home", 36), sk("PgUp", "PageUp", "PageUp", 33)],
@@ -1146,7 +1192,7 @@ function screenKeyButton(def) {
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = def.label;
-  button.title = def.mod ? `${def.label}（按住）` : def.label;
+  button.title = def.title || (def.mod ? `${def.label}（按住）` : def.label);
   button.classList.add("sk-key");
   if (def.wide) button.classList.add("sk-wide");
   if (def.space) button.classList.add("sk-space");
@@ -1220,11 +1266,16 @@ function screenKeyButton(def) {
 }
 
 function buildScreenKeyboard() {
+  // Rebuilding is only used by the Win/Mac layout switch. Drop the old button
+  // tree (and its modifiers) instead of leaving stale handlers on detached
+  // nodes that would still be reachable through screenModButtons.
+  releaseAllScreenModifiers();
+  screenModButtons.clear();
   const layout = document.createElement("div");
   layout.className = "sk-layout";
   const main = document.createElement("div");
   main.className = "sk-main";
-  for (const row of SCREEN_KEY_ROWS) {
+  for (const row of screenKeyRows()) {
     const el = document.createElement("div");
     el.className = "sk-row";
     for (const def of row) el.appendChild(screenKeyButton(def));
@@ -1246,8 +1297,28 @@ function buildScreenKeyboard() {
     side.appendChild(pad);
   }
   layout.appendChild(side);
-  screenKeyboard.appendChild(layout);
+  skLayoutHolder.replaceChildren(layout);
+  const mac = state.screenLayout === "mac";
+  skLayoutToggle.textContent = mac ? "Win 样式" : "Mac 样式";
+  skLayoutToggle.title = mac
+    ? "当前是 Mac 样式键盘（⌘/⌥/⌃）。点此切回 Win 样式（Win/Alt/Ctrl）。"
+    : "当前是 Win 样式键盘（Win/Alt/Ctrl）。点此切换为 Mac 样式（⌘/⌥/⌃）。";
+  skLayoutToggle.setAttribute("aria-pressed", String(mac));
 }
+
+function setScreenLayout(layout) {
+  if (state.screenLayout === layout) return;
+  state.screenLayout = layout;
+  buildScreenKeyboard();
+  try {
+    localStorage.setItem("rterminal.screenLayout", layout);
+  } catch {}
+  dbg("screen-layout", null, { layout });
+}
+
+skLayoutToggle.addEventListener("click", () => {
+  setScreenLayout(state.screenLayout === "mac" ? "win" : "mac");
+});
 
 function applyKeyboardModeUi() {
   const screen = state.keyboardMode === "screen";

@@ -40,7 +40,13 @@
     <div id="key-nav" class="key-nav"></div>
   </div>
 
-  <section id="screen-keyboard" class="screen-keyboard" aria-label="Built-in screen keyboard" hidden></section>
+  <section id="screen-keyboard" class="screen-keyboard" aria-label="Built-in screen keyboard" hidden>
+    <div class="sk-bar">
+      <span class="sk-bar-label">屏幕键盘</span>
+      <button id="sk-layout-toggle" class="sk-layout-toggle" type="button" aria-pressed="false">Mac 样式</button>
+    </div>
+    <div id="sk-layout" class="sk-layout"></div>
+  </section>
 
   <footer class="statusbar">
     <span id="status">connecting…</span>
