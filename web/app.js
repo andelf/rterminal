@@ -1353,9 +1353,16 @@ function screenKeyButton(def) {
     dispatchScreenKey("keydown", activeDef);
     // xterm deliberately ignores a bare keydown whose key is an upper-case
     // letter: it waits for the browser's keypress(charCode) that normally
-    // follows. A synthetic event has no such default action, so supply it.
-    // Lower-case letters and symbols are already emitted by the keydown.
-    if (/^[A-Z]$/.test(activeDef.key)) {
+    // follows. The same applies to Space: evaluateKeyboardEvent only encodes
+    // printable keys with keyCode >= 48 on keydown, so keyCode 32 falls through
+    // with no key at all. A synthetic event has no default action to supply
+    // that keypress, so do it here. Ctrl+Space is already encoded by keydown as
+    // a control byte and Alt/Meta+Space get their own escape, so never
+    // double-send.
+    const needsKeypress = /^[A-Z]$/.test(activeDef.key)
+      || (activeDef.key === " " && !screenHeldMods.has("ctrl")
+        && !screenHeldMods.has("alt") && !screenHeldMods.has("meta"));
+    if (needsKeypress) {
       dispatchScreenKey("keypress", activeDef, activeDef.key.charCodeAt(0));
     }
     if (def.repeat) {

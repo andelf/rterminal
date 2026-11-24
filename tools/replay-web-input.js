@@ -5,7 +5,7 @@
 //   node tools/replay-web-input.js [scenario...]     (default: all)
 //
 // Scenarios: spaces, keys, typing, dictation, rewrite, mixed, commit, mods, ime,
-// screen, screen-mac, screen-shift, screen-caps, screen-arrows, mouse
+// screen, screen-mac, screen-shift, screen-space, screen-caps, screen-arrows, mouse
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -151,6 +151,25 @@ const SCENARIOS = {
       { screenUp: "Shift" },
       { screenTap: "F1", delay: 90 },
       { screenTap: "Enter", delay: 90 },
+      { mode: "system", delay: 300 }
+    ]
+  },
+  // Space is the one printable key xterm will not encode on keydown: keyCode
+  // 32 is below its >= 48 cutoff, so a synthetic keydown produced no PTY byte
+  // at all (the iPhone session showed keydown with no onData). The screen key
+  // must supply the keypress a real keyboard would. Expect three 0x20 and one
+  // 0x00 for Ctrl+Space, which keydown already encodes and must not repeat.
+  "screen-space": {
+    steps: [
+      { mode: "screen", delay: 300 },
+      { screenTap: "Space", delay: 90 },
+      { screenTap: "Space", delay: 90 },
+      { screenDown: "Shift", delay: 60 },
+      { screenTap: "Space", delay: 90 },
+      { screenUp: "Shift", delay: 60 },
+      { screenDown: "Ctrl", delay: 60 },
+      { screenTap: "Space", delay: 90 },
+      { screenUp: "Ctrl", delay: 60 },
       { mode: "system", delay: 300 }
     ]
   },
