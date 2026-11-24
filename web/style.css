@@ -261,6 +261,13 @@ body.with-toolbar.with-screen-keyboard {
   color: #fff;
   box-shadow: inset 0 0 0 1px #ffe9a3;
 }
+/* Invisible cell used by the arrow pad's inverted-T layout. It must occupy
+   exactly one key so ↑ lands above ↓ rather than above ←. */
+.screen-keyboard .sk-spacer {
+  flex: 0 0 auto;
+  min-width: 35px;
+  height: 31px;
+}
 .screen-keyboard .sk-key.sk-wide { min-width: 58px; }
 .screen-keyboard .sk-key.sk-space { min-width: 170px; }
 .screen-keyboard .sk-key.sk-down {
@@ -279,6 +286,7 @@ body.with-toolbar.with-screen-keyboard {
    too small on a tablet. */
 @media (pointer: coarse) {
   .screen-keyboard .sk-key { height: 38px; min-width: 42px; }
+  .screen-keyboard .sk-spacer { height: 38px; min-width: 42px; }
   .screen-keyboard .sk-key.sk-wide { min-width: 66px; }
   .screen-keyboard .sk-key.sk-space { min-width: 190px; }
 }

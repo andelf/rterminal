@@ -1130,8 +1130,10 @@ const SCREEN_NAV_KEYS = [
   [sk("Ins", "Insert", "Insert", 45), sk("Home", "Home", "Home", 36), sk("PgUp", "PageUp", "PageUp", 33)],
   [sk("Del", "Delete", "Delete", 46), sk("End", "End", "End", 35), sk("PgDn", "PageDown", "PageDown", 34)]
 ];
+// Standard inverted-T: ↑ sits above ↓, not above ←. `null` cells keep the
+// three columns aligned without being focusable or matchable as keys.
 const SCREEN_ARROW_KEYS = [
-  [sk("↑", "ArrowUp", "ArrowUp", 38, null, { repeat: true })],
+  [null, sk("↑", "ArrowUp", "ArrowUp", 38, null, { repeat: true }), null],
   [
     sk("←", "ArrowLeft", "ArrowLeft", 37, null, { repeat: true }),
     sk("↓", "ArrowDown", "ArrowDown", 40, null, { repeat: true }),
@@ -1234,6 +1236,13 @@ function refreshScreenModButtons() {
     screenCapsButton.setAttribute("aria-pressed", String(screenCapsLock));
   }
   updateScreenShiftLabels();
+}
+
+function screenKeySpacer() {
+  const spacer = document.createElement("span");
+  spacer.className = "sk-spacer";
+  spacer.setAttribute("aria-hidden", "true");
+  return spacer;
 }
 
 function screenKeyButton(def) {
@@ -1377,7 +1386,9 @@ function buildScreenKeyboard() {
     for (const row of group) {
       const el = document.createElement("div");
       el.className = "sk-row";
-      for (const def of row) el.appendChild(screenKeyButton(def));
+      for (const def of row) {
+        el.appendChild(def ? screenKeyButton(def) : screenKeySpacer());
+      }
       pad.appendChild(el);
     }
     side.appendChild(pad);

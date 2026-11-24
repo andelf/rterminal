@@ -5,7 +5,7 @@
 //   node tools/replay-web-input.js [scenario...]     (default: all)
 //
 // Scenarios: spaces, keys, typing, dictation, rewrite, mixed, commit, mods, ime,
-// screen, screen-mac, screen-shift, screen-caps
+// screen, screen-mac, screen-shift, screen-caps, screen-arrows
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -192,6 +192,18 @@ const SCENARIOS = {
       { mode: "system", delay: 300 }
     ]
   },
+  // Arrow pad must be an inverted T: ↑ centred above ↓, then ← ↓ → in a row.
+  "screen-arrows": {
+    steps: [
+      { mode: "screen", delay: 300 },
+      { screenArrowCheck: true, delay: 60 },
+      { screenTap: "↑", delay: 90 },
+      { screenTap: "↓", delay: 90 },
+      { screenTap: "←", delay: 90 },
+      { screenTap: "→", delay: 90 },
+      { mode: "system", delay: 300 }
+    ]
+  },
   // Caps Lock is a lock, not a held modifier: it sends no byte itself, makes
   // letters upper case, and Shift inverts it for the next letter.
   "screen-caps": {
@@ -253,6 +265,18 @@ const PAGE_SCRIPT = (steps) => `(async () => {
       document.getElementById("sk-layout-toggle").click();
       if (state.screenLayout !== step.screenLayout) {
         return "wrong screen layout: " + state.screenLayout;
+      }
+    }
+    if (step.screenArrowCheck) {
+      const up = skButton("↑").getBoundingClientRect();
+      const down = skButton("↓").getBoundingClientRect();
+      const left = skButton("←").getBoundingClientRect();
+      const right = skButton("→").getBoundingClientRect();
+      const center = (r) => (r.left + r.right) / 2;
+      if (Math.abs(center(up) - center(down)) > 2) return "up is not above down";
+      if (up.bottom > down.top) return "up is not on its own row";
+      if (left.right > down.left + 2 || down.right > right.left + 2) {
+        return "left/down/right are out of order";
       }
     }
     if (step.screenLetter) {
