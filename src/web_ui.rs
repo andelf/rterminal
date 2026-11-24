@@ -1,29 +1,103 @@
 //! Static assets for the built-in xterm.js web client.
 //!
-//! Everything is embedded into the binary with `include_str!`, so the web UI
-//! needs no extra files next to the executable and works from any cwd.
+//! Debug builds read the files from `web/` at runtime, so editing JS/CSS only
+//! needs a browser refresh. Release builds keep the previous behaviour: the
+//! assets are embedded into the binary with `include_str!` and need no extra
+//! files next to the executable.
+
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use crate::api_protocol::RouteOutcome;
 
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const STYLE_CSS: &str = include_str!("../web/style.css");
-const APP_JS: &str = include_str!("../web/app.js");
-const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
-const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
+#[cfg(debug_assertions)]
+mod embedded {
+    pub(crate) const INDEX_HTML: &str = "";
+    pub(crate) const STYLE_CSS: &str = "";
+    pub(crate) const APP_JS: &str = "";
+    pub(crate) const XTERM_JS: &str = "";
+    pub(crate) const XTERM_CSS: &str = "";
+}
+
+#[cfg(not(debug_assertions))]
+mod embedded {
+    pub(crate) const INDEX_HTML: &str = include_str!("../web/index.html");
+    pub(crate) const STYLE_CSS: &str = include_str!("../web/style.css");
+    pub(crate) const APP_JS: &str = include_str!("../web/app.js");
+    pub(crate) const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
+    pub(crate) const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
+}
+
+/// Locate the source `web/` directory. The executable is usually in
+/// `target/debug/`, so walk up a few parents before falling back to cwd.
+fn find_web_dir() -> Option<PathBuf> {
+    if let Ok(dir) = env::var("RTERMINAL_WEB_DIR") {
+        let path = PathBuf::from(dir);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    if let Ok(exe) = env::current_exe() {
+        let mut base: Option<&Path> = exe.parent();
+        for _ in 0..4 {
+            let Some(dir) = base else { break };
+            let candidate = dir.join("web");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            base = dir.parent();
+        }
+    }
+
+    let from_cwd = PathBuf::from("web");
+    if from_cwd.is_dir() {
+        Some(from_cwd)
+    } else {
+        None
+    }
+}
+
+fn load(rel: &str, embedded: &str) -> String {
+    if let Some(dir) = find_web_dir() {
+        let path = dir.join(rel);
+        if let Ok(bytes) = fs::read(&path) {
+            return String::from_utf8_lossy(&bytes).into_owned();
+        }
+    }
+    embedded.to_string()
+}
 
 pub(crate) fn static_response(path: &str) -> Option<RouteOutcome> {
     let (content_type, body) = match path {
-        "/web" | "/web/" | "/web/index.html" => ("text/html; charset=utf-8", INDEX_HTML),
-        "/web/style.css" => ("text/css; charset=utf-8", STYLE_CSS),
-        "/web/app.js" => ("text/javascript; charset=utf-8", APP_JS),
-        "/web/vendor/xterm.min.js" => ("text/javascript; charset=utf-8", XTERM_JS),
-        "/web/vendor/xterm.min.css" => ("text/css; charset=utf-8", XTERM_CSS),
+        "/web" | "/web/" | "/web/index.html" => (
+            "text/html; charset=utf-8",
+            load("index.html", embedded::INDEX_HTML),
+        ),
+        "/web/style.css" => (
+            "text/css; charset=utf-8",
+            load("style.css", embedded::STYLE_CSS),
+        ),
+        "/web/app.js" => (
+            "text/javascript; charset=utf-8",
+            load("app.js", embedded::APP_JS),
+        ),
+        "/web/vendor/xterm.min.js" => (
+            "text/javascript; charset=utf-8",
+            load("vendor/xterm.min.js", embedded::XTERM_JS),
+        ),
+        "/web/vendor/xterm.min.css" => (
+            "text/css; charset=utf-8",
+            load("vendor/xterm.min.css", embedded::XTERM_CSS),
+        ),
         _ => return None,
     };
     Some(RouteOutcome::Immediate {
         status: 200,
         content_type,
-        body: body.to_string(),
+        body,
     })
 }
 
@@ -59,7 +133,10 @@ mod tests {
     }
 
     #[test]
-    fn embedded_xterm_umd_exports_terminal() {
-        assert!(XTERM_JS.contains("Terminal"));
+    fn xterm_umd_exports_terminal() {
+        match static_response("/web/vendor/xterm.min.js").expect("known path") {
+            RouteOutcome::Immediate { body, .. } => assert!(body.contains("Terminal")),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
     }
 }
