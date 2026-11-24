@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>rterminal · web</title>
   <link rel="stylesheet" href="/web/vendor/xterm.min.css">
   <link rel="stylesheet" href="/web/style.css">
@@ -11,21 +11,34 @@
   <header class="topbar">
     <span class="brand">rterminal<span class="brand-dim"> / web</span></span>
     <div class="actions">
-      <button id="new-tab" title="New tab (same as native Cmd/Ctrl+T)">+ New tab</button>
-      <button id="scrollback" title="Fetch native scrollback for this tab">Scrollback</button>
-      <button id="refresh" title="Refresh tab list">↻</button>
+      <button id="new-tab" class="icon-btn" title="New tab">+</button>
+      <button id="scrollback" class="icon-btn" title="Scrollback">↕</button>
+      <button id="refresh" class="icon-btn" title="Refresh tabs">↻</button>
+      <button id="toggle-toolbar" class="icon-btn" title="Toggle key toolbar" aria-pressed="false">⌨</button>
+      <label class="mode-toggle" title="Unchecked (default): the native PC grid is authoritative; this view mirrors it and scrolls or pads with dots. Checked: this window's size is also pushed to the native PC grid.">
+        <input type="checkbox" id="web-fit">
+        <span>窗口同步 PC</span>
+      </label>
     </div>
   </header>
 
   <nav id="tabs" class="tabstrip" aria-label="Terminal tabs"></nav>
 
-  <main id="panes" class="panes"></main>
+  <main id="panes" class="panes">
+    <div id="empty-state" class="empty-state" hidden>
+      <button id="empty-new-tab" class="empty-add" title="New tab">+</button>
+    </div>
+  </main>
 
   <pre id="scrollback-view" class="scrollback" hidden></pre>
 
+  <div id="key-toolbar" class="key-toolbar" aria-label="Shell key toolbar" hidden>
+    <div id="key-scroll" class="key-scroll"></div>
+    <div id="key-nav" class="key-nav"></div>
+  </div>
+
   <footer class="statusbar">
     <span id="status">connecting…</span>
-    <span class="hint">Tabs mirror the native window · input goes to the same PTY · loopback only by default</span>
   </footer>
 
   <script src="/web/vendor/xterm.min.js"></script>

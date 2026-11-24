@@ -135,13 +135,27 @@ A consumer-side skill lives in `.claude/skills/driving-rterminal/` with the full
 
 ### Browser Client (`xterm.js`)
 
-Open **http://127.0.0.1:7878/web/** while the app is running. The page is served by the same tiny_http server and has no external assets — xterm.js 5.5.0 (MIT, see `web/vendor/xterm-LICENSE`) is vendored and embedded in the binary.
+Open **http://127.0.0.1:7878/web/** while the app is running. The page is served by the same tiny_http server and has no external assets — xterm.js 5.5.0 (MIT, see `web/vendor/xterm-LICENSE`) is vendored.
+
+For development, debug builds read these assets from `web/` on every request, so editing JS/CSS only needs a browser refresh instead of a full rebuild. Set `RTERMINAL_WEB_DIR` to override the location; otherwise the app searches `web/` next to the executable, its parents, and finally the current directory. Release builds still embed the assets into the binary, so a single exe works from any cwd.
 
 - The tab strip mirrors the native window's tab list (stable ids, titles, active tab). `+` / `×` / click create, close and activate real tabs.
 - Each active tab polls `GET /tabs/:id/screen.ansi`, which rewrites every cell with its original ANSI foreground/background and positions the cursor. Alt-screen and cursor visibility are preserved.
 - Keyboard input goes to `POST /tabs/:id/input` on the same PTY the native window drives, so both views stay in sync.
-- Resizing the browser pane calls `POST /tabs/:id/resize`; this **also resizes the native terminal grid/PTY**.
+- A tiny embedded font supplies the four Powerline separators (`U+E0B0/E0B2/E0B4/E0B6`) used by `oh-my-posh`, so prompts render as solid triangles instead of boxes even on phones/clients without a Nerd Font installed.
+- On touch devices one-finger panning is kept (it is how you reach the wider/taller PC grid), while pinch/double-tap zoom and page overscroll are disabled. The terminal is a fixed character grid, so zoom would desynchronise cells, selection and the soft-keyboard detection. If a browser still zooms, the script ignores the zoomed `visualViewport` instead of treating it as a keyboard.
+- The view follows the live cursor on both axes after each keystroke. Once you pan/drag away it stops following until the next input, so history stays where you put it; programmatic repaints do not count as user scrolling.
+- The `⌨` toolbar toggle (top right, persisted in `localStorage`) reveals a row of keys phones cannot type. It sits between the terminal and the status bar, so with the soft keyboard open it floats right above it. Tapping a key goes through the same ordered input chain as typed characters; `pointerdown` uses `preventDefault()` so xterm's hidden textarea keeps focus and the keyboard stays open, and `blur()` drops the pressed state afterwards.
+  - The middle strip scrolls horizontally and holds `Esc`, `Tab` and Ctrl chords (`^C ^D ^Z ^A ^E ^U ^K ^L ^R`); the four arrow keys are pinned in a separate pad on the right.
+  - `Shift`, `Ctrl`, `Alt` and `Win`/`Cmd` are sticky toggles: tap to latch (button stays highlighted), tap again to release. They modify both toolbar keys and characters typed on the soft keyboard, so combinations like Ctrl+Arrow, Alt+letter, Shift+Tab and Ctrl+C work without a physical keyboard. Modifier numbering matches the native encoder (`1 + shift + 2·alt + 4·ctrl`, plus `8·meta`); hiding the toolbar clears any latch.
+- The web grid **always mirrors the native PTY grid exactly** (`dto.cols × dto.rows`), so the ANSI repaint and the cursor never land on a differently sized buffer. The browser only scrolls or pads around that grid; it never picks its own cols/rows from CSS.
+- The **"窗口同步 PC"** checkbox (top right, persisted in `localStorage`) decides whether this window also drives the native grid:
+  - Unchecked (default): the native PC grid is authoritative and the browser never resizes the host PTY. Extra space is handled with tmux-style `.` padding or outer-pane scrolling.
+  - Checked: `POST /tabs/:id/resize` pushes this window's size to the native PTY. On touch devices only the vertical height is considered (the native column count stays authoritative). While the on-screen keyboard is open no resize is sent at all: the live bottom is simply scrolled above the keyboard, and closing the keyboard restores the previous grid instead of replaying a transient resize.
+- The native title bar shows `● web 已连接` while a web client is attached. Heartbeats use `POST /web/client`; a stale client is dropped after 5 seconds. Only one external web client is supported, and a second one receives HTTP 409.
+- Closing the last tab leaves an empty native window instead of quitting, so the HTTP/web service stays up; the web page shows a single `+` to create a new tab.
 - "Scrollback" fetches `GET /tabs/:id/scrollback` into an overlay (xterm.js's own scrollback is only a local replay buffer).
+- Only one instance runs at a time (tracked by `~/.rterminal/instance.lock`). A second launch prints the running PID and exits; it cannot start a second HTTP server even with a different `--api-addr`.
 
 The server has no authentication. Keep the default loopback bind; exposing `--api-addr 0.0.0.0` exposes full terminal control to anyone who can reach the port.
 
