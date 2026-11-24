@@ -49,7 +49,7 @@ pub(crate) fn should_accept_ax_override(
     differs_from_model && !is_stale_last_publish
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(crate) fn should_publish_model_to_ax(
     ax_text: &str,
     ax_cursor_utf16: usize,

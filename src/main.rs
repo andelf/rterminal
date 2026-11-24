@@ -57,6 +57,86 @@ actions!(
     ]
 );
 
+const SINGLETON_LOCK: &str = "~/.rterminal/instance.lock";
+
+struct InstanceGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        if let Ok(contents) = std::fs::read_to_string(&self.path)
+            && contents.trim().parse::<u32>().ok() == Some(std::process::id())
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn acquire_instance_lock() -> Result<InstanceGuard, String> {
+    use std::io::Write;
+
+    let path = crate::platform::expand_home(SINGLETON_LOCK)
+        .map_err(|err| format!("resolve lock path: {err}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("create {}: {err}", parent.display()))?;
+    }
+
+    for _ in 0..2 {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                if let Ok(pid) = contents.trim().parse::<u32>()
+                    && pid != 0
+                    && process_is_alive(pid)
+                {
+                    return Err(format!("another instance is already running (pid {pid})"));
+                }
+                let _ = std::fs::remove_file(&path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("read {}: {err}", path.display())),
+        }
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                writeln!(file, "{}", std::process::id())
+                    .map_err(|err| format!("write {}: {err}", path.display()))?;
+                return Ok(InstanceGuard { path });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("create {}: {err}", path.display())),
+        }
+    }
+    Err("could not acquire the instance lock".to_string())
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    let filter = format!("PID eq {pid}");
+    match std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/NH"])
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(windows))]
+fn process_is_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn main() {
     let cli = parse_cli_options();
 
@@ -68,9 +148,18 @@ fn main() {
         return;
     }
 
+    let _instance = match acquire_instance_lock() {
+        Ok(guard) => guard,
+        Err(message) => {
+            eprintln!("{message}; only one rterminal instance is allowed");
+            std::process::exit(1);
+        }
+    };
+
     let (api_tx, api_rx) = async_channel::unbounded::<crate::api_protocol::ApiCommand>();
     if let Err(err) = crate::api_server::start_api_server(&cli.api_addr, api_tx) {
         eprintln!("failed to start api server on {}: {err:#}", cli.api_addr);
+        eprintln!("another instance may already be using this address; exiting.");
         std::process::exit(1);
     }
 
