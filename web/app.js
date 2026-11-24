@@ -1967,6 +1967,21 @@ function createTab(dto) {
       tab.followCursor = false;
     });
   }
+  // xterm routes mouse reports through onBinary when the host requested the
+  // legacy (X10/VT200/DRAG) encoding, and through onData for SGR. We forward
+  // both: otherwise clicking in a mouse-mode app only moves xterm's cursor.
+  if (typeof term.onBinary === "function") {
+    term.onBinary((data) => {
+      const text = textOf(data);
+      dbg("ondata", tab, {
+        text: clip(text), hex: hexOf(text), len: text.length,
+        it: tab.lastInputType, ime: tab.lastInputIsComposing,
+        composing: tab.composing, printable: false, binary: true
+      });
+      sendInput(tab, text, "key");
+      endUtterance(tab);
+    });
+  }
   term.onData((data) => {
     const text = textOf(data);
     // Snapshot the decision inputs at the moment xterm handed us the bytes.

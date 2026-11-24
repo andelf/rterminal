@@ -442,10 +442,14 @@ impl TerminalTabs {
                 };
                 let text = match &tab.kind {
                     TerminalTabKind::Terminal { terminal, .. } => {
-                        encode_screen(&terminal.read(cx).snapshot)
+                        let term = terminal.read(cx);
+                        encode_screen(&term.snapshot, term.term.mode().clone())
                     }
                     TerminalTabKind::Snapshot { .. } => {
-                        "0\u{1b}[2J\u{1b}[H[snapshot tab]\r\n".to_string()
+                        // A snapshot tab has no PTY modes; reset xterm's
+                        // mouse service so a previous tab's mouse mode cannot
+                        // swallow clicks here.
+                        "0\u{1b}[?1000l\u{1b}[?1002l\u{1b}[?1003l\u{1b}[?1006l\u{1b}[2J\u{1b}[H[snapshot tab]\r\n".to_string()
                     }
                 };
                 let _ = reply.send_blocking(ApiReply::Ok {

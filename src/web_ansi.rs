@@ -6,6 +6,8 @@
 //! keeps the alt-screen flag itself so switching buffers does not have to be
 //! re-sent on every poll.
 
+use alacritty_terminal::term::TermMode;
+
 use crate::terminal::{CellSnapshot, ScreenSnapshot};
 
 const ESC: char = '\u{1b}';
@@ -41,9 +43,31 @@ fn emit_cell_style(
     }
 }
 
-pub(crate) fn encode_screen(snapshot: &ScreenSnapshot) -> String {
-    let mut out = String::with_capacity(snapshot.cells.len() * 64 + 64);
+// The snapshot is a rendering of the screen, not a replay of the PTY stream,
+// so xterm.js never sees the DECSET/DECRST that enabled mouse reporting in the
+// native terminal. Mirror just those mode bits here, otherwise a mouse click
+// on the web canvas is only a DOM click: xterm's mouse service stays at NONE
+// and no report byte is ever produced.
+fn emit_mouse_mode(out: &mut String, mode: TermMode) {
+    out.push_str(&format!("{ESC}[?1000l{ESC}[?1002l{ESC}[?1003l"));
+    if mode.contains(TermMode::MOUSE_MOTION) {
+        out.push_str(&format!("{ESC}[?1003h"));
+    } else if mode.contains(TermMode::MOUSE_DRAG) {
+        out.push_str(&format!("{ESC}[?1002h"));
+    } else if mode.contains(TermMode::MOUSE_MODE) {
+        out.push_str(&format!("{ESC}[?1000h"));
+    }
+    if mode.contains(TermMode::SGR_MOUSE) {
+        out.push_str(&format!("{ESC}[?1006h"));
+    } else {
+        out.push_str(&format!("{ESC}[?1006l"));
+    }
+}
+
+pub(crate) fn encode_screen(snapshot: &ScreenSnapshot, mode: TermMode) -> String {
+    let mut out = String::with_capacity(snapshot.cells.len() * 64 + 80);
     out.push(if snapshot.alt_screen { '1' } else { '0' });
+    emit_mouse_mode(&mut out, mode);
 
     out.push_str(&format!(
         "{ESC}[?25{}",
@@ -106,10 +130,13 @@ mod tests {
 
     #[test]
     fn encodes_prefix_cursor_and_row_positioning() {
-        let out = encode_screen(&snapshot(vec![
-            vec![CellSnapshot::default()],
-            vec![CellSnapshot::default()],
-        ]));
+        let out = encode_screen(
+            &snapshot(vec![
+                vec![CellSnapshot::default()],
+                vec![CellSnapshot::default()],
+            ]),
+            TermMode::empty(),
+        );
         assert!(out.starts_with('0'));
         assert!(out.contains("\x1b[?25h"));
         assert!(out.contains("\x1b[3J"));
@@ -123,7 +150,7 @@ mod tests {
         let mut snap = snapshot(vec![vec![CellSnapshot::default()]]);
         snap.alt_screen = true;
         snap.cursor_visible = false;
-        let out = encode_screen(&snap);
+        let out = encode_screen(&snap, TermMode::empty());
         assert!(out.starts_with('1'));
         assert!(out.contains("\x1b[?25l"));
     }
@@ -136,9 +163,25 @@ mod tests {
             bg: Some(gpui::rgb(0x445566).into()),
             ..Default::default()
         };
-        let out = encode_screen(&snapshot(vec![vec![cell]]));
+        let out = encode_screen(&snapshot(vec![vec![cell]]), TermMode::empty());
         assert!(out.contains("\x1b[38;2;17;34;51m"), "output: {out:?}");
         assert!(out.contains("\x1b[48;2;68;85;102m"), "output: {out:?}");
+    }
+
+    #[test]
+    fn mirrors_mouse_reporting_mode() {
+        let snap = snapshot(vec![vec![CellSnapshot::default()]]);
+        let out = encode_screen(
+            &snap,
+            TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE,
+        );
+        assert!(out.contains("\x1b[?1002h"), "output: {out:?}");
+        assert!(out.contains("\x1b[?1006h"), "output: {out:?}");
+        assert!(!out.contains("\x1b[?1003h"), "output: {out:?}");
+
+        let off = encode_screen(&snap, TermMode::empty());
+        assert!(off.contains("\x1b[?1000l"), "output: {off:?}");
+        assert!(off.contains("\x1b[?1006l"), "output: {off:?}");
     }
 
     #[test]
@@ -149,7 +192,7 @@ mod tests {
             ..Default::default()
         };
         let spacer = CellSnapshot::default();
-        let out = encode_screen(&snapshot(vec![vec![wide, spacer]]));
+        let out = encode_screen(&snapshot(vec![vec![wide, spacer]]), TermMode::empty());
         assert!(out.contains('你'));
         // The spacer is skipped; only one glyph is written for the pair.
         assert_eq!(out.matches('你').count(), 1);

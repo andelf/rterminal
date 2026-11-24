@@ -5,7 +5,7 @@
 //   node tools/replay-web-input.js [scenario...]     (default: all)
 //
 // Scenarios: spaces, keys, typing, dictation, rewrite, mixed, commit, mods, ime,
-// screen, screen-mac, screen-shift, screen-caps, screen-arrows
+// screen, screen-mac, screen-shift, screen-caps, screen-arrows, mouse
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -204,6 +204,17 @@ const SCENARIOS = {
       { mode: "system", delay: 300 }
     ]
   },
+  // Mouse reporting. The native side mirrors its mouse-mode bits into every
+  // ANSI repaint here (otherwise xterm never sees DECSET at all); emulate that
+  // by rewriting the reset prefix, then click the terminal. Legacy encodings
+  // travel through onBinary, SGR through onData — both must reach the PTY.
+  mouse: {
+    steps: [
+      { mouseMode: "on", delay: 250 },
+      { mouseClick: true, delay: 150 },
+      { mouseMode: "off", delay: 100 }
+    ]
+  },
   // Caps Lock is a lock, not a held modifier: it sends no byte itself, makes
   // letters upper case, and Shift inverts it for the next letter.
   "screen-caps": {
@@ -265,6 +276,32 @@ const PAGE_SCRIPT = (steps) => `(async () => {
       document.getElementById("sk-layout-toggle").click();
       if (state.screenLayout !== step.screenLayout) {
         return "wrong screen layout: " + state.screenLayout;
+      }
+    }
+    if (step.mouseMode) {
+      const t = state.tabs.get(state.active).term;
+      if (step.mouseMode === "on") {
+        const orig = t.write.bind(t);
+        window.__origWrite = orig;
+        t.write = (data, cb) => orig(
+          String(data).replace("\\x1b[?1000l\\x1b[?1002l\\x1b[?1003l", "\\x1b[?1002h"), cb
+        );
+        t.write("\\x1b[?1002h");
+      } else if (window.__origWrite) {
+        t.write = window.__origWrite;
+        window.__origWrite = null;
+      }
+    }
+    if (step.mouseClick) {
+      const t = state.tabs.get(state.active).term;
+      const el = t.element;
+      const r = el.querySelector(".xterm-screen").getBoundingClientRect();
+      const x = r.left + 60, y = r.top + 60;
+      for (const type of ["mousedown", "mouseup"]) {
+        el.dispatchEvent(new MouseEvent(type, {
+          bubbles: true, cancelable: true, clientX: x, clientY: y,
+          button: 0, buttons: type === "mousedown" ? 1 : 0
+        }));
       }
     }
     if (step.screenArrowCheck) {
