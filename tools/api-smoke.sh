@@ -2,7 +2,7 @@
 # Manual smoke test for the tmux-style HTTP API.
 # Usage:
 #   1. Launch the binary in another terminal:  cargo run --release -- --api-addr 127.0.0.1:7878
-#   2. Run this script:                         bash docs/superpowers/specs/2026-05-29-api-smoke.sh
+#   2. Run this script:                         bash tools/api-smoke.sh
 #   3. (Override with API=127.0.0.1:7889 bash ... if 7878 is taken)
 set -euo pipefail
 API=${API:-127.0.0.1:7878}

@@ -135,7 +135,7 @@ A single global HTTP server (default `127.0.0.1:7878`, override with `--api-addr
 - **Size**: `POST /tabs/:id/resize` with JSON `{"cols":100,"rows":30,"sync_window":true}`. This always resizes the native PTY grid; `sync_window:true` additionally resizes the native window to fit that grid ("Browser size" mode), so neither side scrolls.
 - **Legacy aliases**: `/debug/state`, `/debug/screen`, `/debug/input`, `/debug/replace-line`, `/debug/note` all route to the active tab
 
-A consumer-side skill lives in `.claude/skills/driving-rterminal/` with the full grammar, error semantics, and common-workflow recipes.
+A consumer-side skill lives in `.claude/skills/driving-rterminal/` with the full grammar, error semantics, and common-workflow recipes. `tools/api-smoke.sh` provides a small create/write/read/close smoke test against a running instance.
 
 ### Browser Client (`xterm.js`)
 

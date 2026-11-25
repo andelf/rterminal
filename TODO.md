@@ -32,3 +32,8 @@
 - **位置**: `src/render.rs` `measure_cell_width()` 的调用方
 - **问题**: 字体和字号未变化时也会重复解析字体并测量字符宽度
 - **方案**: 缓存到 `AgentTerminal`，在字体、fallback 或字号变化时更新
+
+### 6. HTTP 服务安全加固（可选）
+- **现状**: HTTP API 和 Web UI 默认启用，默认绑定 loopback，但没有身份认证
+- **方案**: 评估 `--no-http` 或显式启用开关；非 loopback 绑定增加认证或启动警告
+- **范围**: `/tabs/:id/input`、WebSocket 输入和 `/debug/replace-line` 必须使用同一安全策略
