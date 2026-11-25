@@ -628,6 +628,40 @@ button.mode-toggle[aria-pressed="true"],
 
 .scrollback[hidden] { display: none; }
 
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.78);
+}
+.auth-overlay[hidden] { display: none; }
+.auth-card {
+  width: min(360px, 100%);
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.auth-card h2 { margin: 0 0 8px; font-size: 17px; }
+.auth-card p { margin: 0 0 12px; color: var(--muted); }
+.auth-card input {
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.2 inherit;
+}
+.auth-card button { width: 100%; }
+.auth-error { min-height: 18px; color: #ff7b72 !important; }
+
 .help-overlay {
   position: fixed;
   inset: 0;

@@ -85,10 +85,7 @@ pub(crate) fn encode_screen(snapshot: &ScreenSnapshot, mode: TermMode) -> String
         // Reset SGR before the erase so `EL 2` paints with the terminal's
         // default background, then rewrite the full row. Writing every cell
         // (including spaces) preserves explicit cell backgrounds.
-        out.push_str(&format!(
-            "{ESC}[{};1H{ESC}[0m{ESC}[2K",
-            row_index + 1
-        ));
+        out.push_str(&format!("{ESC}[{};1H{ESC}[0m{ESC}[2K", row_index + 1));
         let mut current_fg = None;
         let mut current_bg = None;
         let mut col = 0;
@@ -171,10 +168,7 @@ mod tests {
     #[test]
     fn mirrors_mouse_reporting_mode() {
         let snap = snapshot(vec![vec![CellSnapshot::default()]]);
-        let out = encode_screen(
-            &snap,
-            TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE,
-        );
+        let out = encode_screen(&snap, TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE);
         assert!(out.contains("\x1b[?1002h"), "output: {out:?}");
         assert!(out.contains("\x1b[?1006h"), "output: {out:?}");
         assert!(!out.contains("\x1b[?1003h"), "output: {out:?}");

@@ -80,6 +80,15 @@ fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), Str
     // Using a Cell keeps the closure FnOnce-friendly while retaining the data.
     let conn = Cell::new(None);
     let callback = |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+        let headers = request
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)));
+        if !crate::auth::authorized_by(headers) {
+            let mut err = ErrorResponse::new(Some("unauthorized".to_string()));
+            *err.status_mut() = http::StatusCode::UNAUTHORIZED;
+            return Err(err);
+        }
         let path = request.uri().path();
         let Some(tab) = path.strip_prefix("/ws/tabs/") else {
             return Err(not_found("expected /ws/tabs/<id>"));

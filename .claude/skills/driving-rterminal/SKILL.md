@@ -16,7 +16,7 @@ Use this skill whenever the work involves:
 
 ## Discovering the API endpoint
 
-The default address is `127.0.0.1:7878`. If rterminal was launched with `--api-addr`, use that. When unsure, ask the user or default to the documented port. The server binds to loopback by default and has no authentication; do not expose it on a non-loopback interface unless you understand the risk.
+The default address is `127.0.0.1:7878`. If rterminal was launched with `--api-addr`, use that. When unsure, ask the user or default to the documented port. The server binds to loopback by default. It requires the token launched via `RTERMINAL_WEB_TOKEN` or `--web-token`; send it as `X-Rterminal-Token: <TOKEN>` or `Authorization: Bearer <TOKEN>` on every API request.
 
 Quick liveness check:
 ```bash

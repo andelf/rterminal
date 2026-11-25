@@ -46,7 +46,11 @@ impl Sink {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let mut sink = Sink { path, file: None, announced: false };
+        let mut sink = Sink {
+            path,
+            file: None,
+            announced: false,
+        };
         sink.rotate_if_needed();
         sink
     }
@@ -69,17 +73,18 @@ impl Sink {
         if self.file.is_some() {
             return true;
         }
-        match fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+        match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             Ok(file) => {
                 self.file = Some(file);
                 true
             }
             Err(err) => {
                 if !self.announced {
-                    eprintln!(
-                        "web debug: cannot write {}: {err}",
-                        self.path.display()
-                    );
+                    eprintln!("web debug: cannot write {}: {err}", self.path.display());
                     self.announced = true;
                 }
                 false
@@ -196,7 +201,11 @@ fn escape(text: &str) -> String {
 /// True when the request explicitly asked for its bytes to be logged.
 pub(crate) fn wants_input_trace(headers: &[tiny_http::Header]) -> bool {
     headers.iter().any(|header| {
-        header.field.as_str().as_str().eq_ignore_ascii_case("x-rterminal-debug")
+        header
+            .field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("x-rterminal-debug")
             && header.value.as_str() == "1"
     })
 }

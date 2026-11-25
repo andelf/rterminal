@@ -3,6 +3,7 @@
 mod api_keys;
 mod api_protocol;
 mod api_server;
+mod auth;
 mod cli;
 mod color;
 mod history_log;
@@ -171,6 +172,24 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+
+    let web_token = cli
+        .web_token
+        .clone()
+        .filter(|token| !token.trim().is_empty())
+        .or_else(|| {
+            std::env::var("RTERMINAL_WEB_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty())
+        })
+        .unwrap_or_else(|| {
+            eprintln!("missing web token: set RTERMINAL_WEB_TOKEN or pass --web-token <TOKEN>");
+            std::process::exit(1);
+        });
+    if let Err(err) = crate::auth::configure(web_token) {
+        eprintln!("failed to configure web token: {err}");
+        std::process::exit(1);
     }
 
     if cli.cursor_trail && cli.no_cursor_slide {

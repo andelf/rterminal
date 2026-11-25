@@ -126,7 +126,7 @@ This is **not** intended to be a general-purpose terminal replacement. It is an 
 - Option key behavior: Meta/Alt (default) or native macOS character input (`--no-option-as-meta`)
 
 ### HTTP Control API
-A single global HTTP server (default `127.0.0.1:7878`, override with `--api-addr`) lets external agents drive any tab. Stable numeric tab ids, plus the alias `active` for the currently-focused tab. It has no authentication and binds to loopback by default; overriding that bind exposes terminal control to the reachable network.
+A single global HTTP server (default `127.0.0.1:7878`, override with `--api-addr`) lets external agents drive any tab. Stable numeric tab ids, plus the alias `active` for the currently-focused tab. Startup requires a shared token supplied with `--web-token <TOKEN>` or `RTERMINAL_WEB_TOKEN`. The browser has an unlock overlay that exchanges it for an HttpOnly session cookie; API clients may send `X-Rterminal-Token: <TOKEN>` or `Authorization: Bearer <TOKEN>`. Static web assets remain public; every data/control endpoint and the WebSocket handshake require authentication.
 
 - **Tab management**: `GET /tabs` (list + active), `POST /tabs` (create, returns id+title), `DELETE /tabs/:id`, `POST /tabs/:id/activate`. Creation runs directly in the API window-context callback rather than waiting for a repaint, so it also completes while the native window is not being redrawn (for example during screen lock).
 - **Observation**: `GET /tabs/:id` (DTO with title, kind, cols/rows, cursor, status, counters, note, uptime), `GET /tabs/:id/screen` (current viewport as plain text), `GET /tabs/:id/screen.ansi` (full ANSI repaint with colours/cursor for the web client), `GET /tabs/:id/scrollback?lines=N` (history + viewport, trailing padding stripped)
@@ -191,7 +191,7 @@ HTML and unversioned resources use `Cache-Control: no-store`. Versioned JS, CSS,
 - "Scrollback" fetches `GET /tabs/:id/scrollback` into an overlay (xterm.js's own scrollback is only a local replay buffer).
 - Only one instance runs at a time (tracked by `~/.rterminal/instance.lock`). A second launch prints the running PID and exits; it cannot start a second HTTP server even with a different `--api-addr`.
 
-The server has no authentication. Keep the default loopback bind; exposing `--api-addr 0.0.0.0` exposes full terminal control to anyone who can reach the port. The app prints a startup warning for non-loopback HTTP or WebSocket binds. `--no-history-log` disables persistent raw PTY transcripts when they are not needed.
+The token is supplied at launch and never stored in the repository. Keep the default loopback bind when possible; non-loopback binds still print a warning but remain reachable to anyone who knows the token. Prefer `RTERMINAL_WEB_TOKEN` over `--web-token` so the secret does not appear in process listings. `--no-history-log` disables persistent raw PTY transcripts when they are not needed.
 
 ### Logging & Tracing
 - Input event tracing: `AGENT_TUI_INPUT_TRACE=1`
@@ -241,6 +241,7 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 | `--show-status-bar` | off | Show debug status bar at bottom |
 | `--api-addr <host:port>` | `127.0.0.1:7878` | Bind address for the HTTP control API (use `:0` for an OS-assigned port; the actual port is logged on startup) |
 | `--ws-addr <host:port>` | `127.0.0.1:7879` | Bind address for the browser WebSocket data stream (`:0` is supported and reported through `/web/config`) |
+| `--web-token <token>` | — | Shared token for web/API access; prefer `RTERMINAL_WEB_TOKEN` |
 | `--input-log-file <path>` | — | Write structured input events to JSONL file |
 | `--input-log-raw` | off | Include base64-encoded raw PTY bytes; requires `--input-log-file` |
 | `--history-log-dir <dir>` | `~/.rterminal/history` | Write per-tab raw PTY output transcripts (`.ansi`) and metadata sidecars |

@@ -88,6 +88,8 @@ pub(crate) struct CliOptions {
         help = "Address to bind the browser WebSocket data stream on (host:port)"
     )]
     pub(crate) ws_addr: String,
+    #[arg(long, help = "Shared token required by the web/API endpoints")]
+    pub(crate) web_token: Option<String>,
 }
 
 #[cfg(test)]
@@ -274,6 +276,15 @@ mod tests {
     fn input_log_raw_requires_input_log_file() {
         let result = CliOptions::try_parse_from(["agent_terminal", "--input-log-raw"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn web_token_can_be_provided() {
+        let cli = parse_cli_options_from(vec![
+            "--web-token".to_string(),
+            "runtime-secret".to_string(),
+        ]);
+        assert_eq!(cli.web_token.as_deref(), Some("runtime-secret"));
     }
 
     #[test]

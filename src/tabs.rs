@@ -554,9 +554,7 @@ impl TerminalTabs {
                         // detach remains harmless because it uses a stream id.
                         for tab in &self.tabs {
                             if let TerminalTabKind::Terminal { terminal, .. } = &tab.kind {
-                                terminal.update(cx, |term, _| {
-                                    term.detach_other_web_streams(&id)
-                                });
+                                terminal.update(cx, |term, _| term.detach_other_web_streams(&id));
                             }
                         }
                     }

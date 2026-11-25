@@ -2,6 +2,8 @@
 
 Default bind: `127.0.0.1:7878`. Override with `--api-addr host:port` when launching the binary.
 
+All data/control endpoints require the token supplied at launch via `RTERMINAL_WEB_TOKEN` or `--web-token`. Send it on every request as `X-Rterminal-Token: <TOKEN>` or `Authorization: Bearer <TOKEN>`. Static web assets are public; the browser unlock form exchanges the token for an HttpOnly session cookie used by HTTP and WebSocket requests.
+
 ## Tab selectors
 
 In every URL where `:id` appears, the selector is either:

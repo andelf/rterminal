@@ -24,6 +24,10 @@ const keyToolbar = document.getElementById("key-toolbar");
 const keyScroll = document.getElementById("key-scroll");
 const keyNav = document.getElementById("key-nav");
 const debugButton = document.getElementById("debug");
+const authOverlay = document.getElementById("auth-overlay");
+const authForm = document.getElementById("auth-form");
+const authToken = document.getElementById("auth-token");
+const authError = document.getElementById("auth-error");
 const helpButton = document.getElementById("help-button");
 const helpOverlay = document.getElementById("help-overlay");
 const helpCloseButton = document.getElementById("help-close");
@@ -288,6 +292,14 @@ function clearError() {
 // truth for what the browser actually reported.
 const textEncoder = new TextEncoder();
 
+let webAuthorized = false;
+
+function showAuthOverlay(message = "") {
+  authError.textContent = message;
+  authOverlay.hidden = false;
+  authToken.focus({ preventScroll: true });
+}
+
 const debug = {
   on: false,
   announced: false,
@@ -366,7 +378,7 @@ function flushDebug(beacon) {
     clearTimeout(debug.timer);
     debug.timer = null;
   }
-  if (debug.queue.length === 0) return;
+  if (debug.queue.length === 0 || !webAuthorized) return;
   const body = `${debug.queue.join("\n")}\n`;
   debug.queue = [];
   if (beacon) {
@@ -620,6 +632,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, options);
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 300);
+    if (response.status === 401) showAuthOverlay("Session expired. Unlock again.");
     throw new Error(`${response.status} ${detail}`);
   }
   const contentType = response.headers.get("content-type") || "";
@@ -2843,24 +2856,56 @@ applyKeyboardModeUi();
 keyToolbar.hidden = !state.showToolbar;
 document.body.classList.toggle("with-toolbar", state.showToolbar);
 
-// Register immediately instead of waiting for config, tab construction and a
-// WebSocket attempt. A conflicting client must see Steal as soon as the server
-// answers; clientBlocked then prevents all later stream attempts in refresh().
-notifyClient(true);
+let appStarted = false;
+function startWebApp(config) {
+  if (appStarted) return;
+  appStarted = true;
+  webAuthorized = true;
+  authOverlay.hidden = true;
+  if (config && config.ws_port) state.wsPort = Number(config.ws_port);
+  flushDebug(false);
+  // Register immediately instead of waiting for tab construction and a
+  // WebSocket attempt. A conflicting client must see Steal as soon as the
+  // server answers; clientBlocked prevents later stream attempts in refresh().
+  notifyClient(true);
+  refresh();
+  setInterval(refresh, 1000);
+}
 
-// The data-plane port comes from the server so a LAN client (iPad) uses the
-// right port even when the CLI overrides the default.
-api("/web/config")
-  .then((config) => {
-    if (!config || !config.ws_port) return;
-    const port = Number(config.ws_port);
-    if (port === state.wsPort) return;
-    state.wsPort = port;
-    const active = currentTab();
-    if (active) startStream(active);
-  })
-  .catch(() => {});
-// Do not hold the first paint hostage to the config request. The default port
-// is used immediately and a custom port reconnects as soon as config arrives.
-refresh();
-setInterval(refresh, 1000);
+async function bootstrap() {
+  try {
+    const response = await fetch("/web/config");
+    if (response.status === 401) {
+      showAuthOverlay();
+      return;
+    }
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    startWebApp(await response.json());
+  } catch (error) {
+    report(error);
+  }
+}
+
+authForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  authError.textContent = "";
+  const submit = document.getElementById("auth-submit");
+  submit.disabled = true;
+  try {
+    const response = await fetch("/web/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: authToken.value })
+    });
+    if (!response.ok) {
+      showAuthOverlay(response.status === 401 ? "Invalid token" : `Unlock failed: ${response.status}`);
+      return;
+    }
+    authToken.value = "";
+    await bootstrap();
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+bootstrap();

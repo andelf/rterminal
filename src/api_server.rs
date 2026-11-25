@@ -329,6 +329,15 @@ pub(crate) fn start_api_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> std::i
     Ok(())
 }
 
+fn auth_response(status: u16, body: impl Into<Vec<u8>>) -> Response<Cursor<Vec<u8>>> {
+    let mut resp = text_response(status, "application/json; charset=utf-8", body);
+    if let Ok(header) = Header::from_bytes("Set-Cookie", crate::auth::auth_cookie_header().as_str())
+    {
+        resp = resp.with_header(header);
+    }
+    resp
+}
+
 fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
     eprintln!("agent api listening on http://{addr}");
     eprintln!("web ui available at http://{addr}/web/");
@@ -344,6 +353,35 @@ fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
             let _ = request.respond(error_response(400, &format!("read body: {err}")));
             continue;
         }
+        if method == "POST" && path == "/web/auth" {
+            let token = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("token")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_default();
+            let response = if crate::auth::token_matches(&token) {
+                auth_response(200, r#"{"ok":true}"#)
+            } else {
+                error_response(401, "invalid token")
+            };
+            let _ = request.respond(response);
+            continue;
+        }
+        if !crate::web_ui::is_public_path(&path)
+            && !crate::auth::authorized_by(
+                request
+                    .headers()
+                    .iter()
+                    .map(|h| (h.field.as_str().as_str(), h.value.as_str())),
+            )
+        {
+            let _ = request.respond(error_response(401, "unauthorized"));
+            continue;
+        }
         // Opt-in byte trace: the browser sets this header while its debug
         // recorder is on, so we can see exactly what reached the PTY.
         if crate::web_debug::wants_input_trace(request.headers()) && path.contains("/input") {
@@ -355,7 +393,8 @@ fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
                 .equiv("X-Rterminal-Client")
                 .then(|| header.value.as_str().to_string())
         });
-        let response = match parse_request_with_client(&method, &path, &query, body, browser_client) {
+        let response = match parse_request_with_client(&method, &path, &query, body, browser_client)
+        {
             Ok(RouteOutcome::Immediate {
                 status,
                 content_type,
@@ -595,7 +634,9 @@ mod tests {
         )
         .unwrap()
         {
-            ApiCommand::WebClient { id, force: true, .. } => assert_eq!(id, "browser-b"),
+            ApiCommand::WebClient {
+                id, force: true, ..
+            } => assert_eq!(id, "browser-b"),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -793,6 +834,7 @@ mod tests {
 
     #[test]
     fn server_round_trip_get_tabs_via_fake_handler() {
+        let _ = crate::auth::configure("test-token".to_string());
         let addr = reserve_local_addr();
         let (cmd_tx, cmd_rx) = async_channel::unbounded::<ApiCommand>();
 
@@ -816,7 +858,9 @@ mod tests {
 
         let response = send_http(
             &addr,
-            &format!("GET /tabs HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+            &format!(
+                "GET /tabs HTTP/1.1\r\nHost: {addr}\r\nX-Rterminal-Token: test-token\r\nConnection: close\r\n\r\n"
+            ),
         );
         assert!(response.contains("200 OK"), "response: {response}");
         assert!(response.contains("\"active\":1"), "response: {response}");
@@ -824,6 +868,7 @@ mod tests {
 
     #[test]
     fn server_returns_404_for_unknown_route() {
+        let _ = crate::auth::configure("test-token".to_string());
         let addr = reserve_local_addr();
         let (cmd_tx, _cmd_rx) = async_channel::unbounded::<ApiCommand>();
         start_api_server(&addr, cmd_tx).expect("server starts");
@@ -831,13 +876,16 @@ mod tests {
 
         let response = send_http(
             &addr,
-            &format!("GET /nope HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+            &format!(
+                "GET /nope HTTP/1.1\r\nHost: {addr}\r\nX-Rterminal-Token: test-token\r\nConnection: close\r\n\r\n"
+            ),
         );
         assert!(response.contains("404"), "response: {response}");
     }
 
     #[test]
-    fn server_serves_immediate_help_for_debug_root() {
+    fn server_rejects_unauthenticated_api_requests() {
+        let _ = crate::auth::configure("test-token".to_string());
         let addr = reserve_local_addr();
         let (cmd_tx, _cmd_rx) = async_channel::unbounded::<ApiCommand>();
         start_api_server(&addr, cmd_tx).expect("server starts");
@@ -845,7 +893,27 @@ mod tests {
 
         let response = send_http(
             &addr,
-            &format!("GET /debug HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+            &format!("GET /tabs HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(
+            response.contains("401 Unauthorized"),
+            "response: {response}"
+        );
+    }
+
+    #[test]
+    fn server_serves_immediate_help_for_debug_root() {
+        let _ = crate::auth::configure("test-token".to_string());
+        let addr = reserve_local_addr();
+        let (cmd_tx, _cmd_rx) = async_channel::unbounded::<ApiCommand>();
+        start_api_server(&addr, cmd_tx).expect("server starts");
+        wait_for_server(&addr);
+
+        let response = send_http(
+            &addr,
+            &format!(
+                "GET /debug HTTP/1.1\r\nHost: {addr}\r\nX-Rterminal-Token: test-token\r\nConnection: close\r\n\r\n"
+            ),
         );
         assert!(response.contains("200 OK"), "response: {response}");
         assert!(response.contains("/tabs"), "response: {response}");

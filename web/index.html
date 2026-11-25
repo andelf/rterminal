@@ -11,7 +11,7 @@
   <link rel="apple-touch-icon" sizes="180x180" href="/web/icons/apple-touch-icon.png?v=1">
   <link rel="manifest" href="/web/manifest.webmanifest">
   <link rel="stylesheet" href="/web/vendor/xterm.min.css?v=5.5.0">
-  <link rel="stylesheet" href="/web/style.css?v=20261125-5">
+  <link rel="stylesheet" href="/web/style.css?v=20261125-6">
 </head>
 <body>
   <!-- Lucide Icons (ISC): web/vendor/lucide-LICENSE -->
@@ -75,6 +75,16 @@
     </form>
   </footer>
 
+  <div id="auth-overlay" class="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <form id="auth-form" class="auth-card">
+      <h2 id="auth-title">Unlock rterminal</h2>
+      <p>Enter the temporary access token.</p>
+      <input id="auth-token" type="password" inputmode="numeric" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Access token" placeholder="Access token">
+      <button id="auth-submit" type="submit">Unlock</button>
+      <p id="auth-error" class="auth-error" role="alert"></p>
+    </form>
+  </div>
+
   <div id="help-overlay" class="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title" hidden>
     <section class="help-card">
       <header class="help-header">
@@ -92,6 +102,6 @@
   </div>
 
   <script src="/web/vendor/xterm.min.js?v=5.5.0"></script>
-  <script src="/web/app.js?v=20261125-9"></script>
+  <script src="/web/app.js?v=20261125-10"></script>
 </body>
 </html>

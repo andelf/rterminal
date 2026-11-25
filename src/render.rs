@@ -1,8 +1,8 @@
+use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
     Bounds, Context, Font, FontFallbacks, Hsla, MouseButton, Pixels, Render, Window,
     WindowControlArea, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
 };
-use alacritty_terminal::vte::ansi::CursorShape;
 
 use crate::cli::Theme;
 use crate::input::selection_contains_cell;
@@ -219,8 +219,10 @@ impl Render for AgentTerminal {
                         );
                         window.paint_quad(fill(bounds, palette.terminal_bg));
 
-                        let mono =
-                            build_terminal_font(&canvas_font_family, canvas_font_fallbacks.as_ref());
+                        let mono = build_terminal_font(
+                            &canvas_font_family,
+                            canvas_font_fallbacks.as_ref(),
+                        );
                         let run_template = gpui::TextRun {
                             len: 0,
                             font: mono.clone(),
@@ -245,8 +247,7 @@ impl Render for AgentTerminal {
                             line_height,
                             snapshot.cells.len(),
                         );
-                        let origin = bounds.origin
-                            + point(TEXT_PADDING_X, dynamic_padding_y)
+                        let origin = bounds.origin + point(TEXT_PADDING_X, dynamic_padding_y)
                             - point(
                                 view_offset_cols as f32 * cell_width,
                                 view_offset_rows as f32 * line_height,
@@ -263,7 +264,8 @@ impl Render for AgentTerminal {
 
                             for (col_index, cell) in row.iter().enumerate() {
                                 let is_spacer_col = col_index < covered_until_col;
-                                let x = origin.x + (col_index as f32 + extra_visual_cols) * cell_width;
+                                let x =
+                                    origin.x + (col_index as f32 + extra_visual_cols) * cell_width;
                                 let cell_origin = point(x, y);
                                 let cell_width_px =
                                     cell_width.max(px(2.0)) * cell.width_cols as f32;
@@ -274,9 +276,11 @@ impl Render for AgentTerminal {
                                         bg,
                                     ));
                                 }
-                                if !is_spacer_col && selection.is_some_and(|(start, end)| {
-                                    selection_contains_cell(start, end, row_index, col_index)
-                                }) {
+                                if !is_spacer_col
+                                    && selection.is_some_and(|(start, end)| {
+                                        selection_contains_cell(start, end, row_index, col_index)
+                                    })
+                                {
                                     window.paint_quad(fill(
                                         Bounds::new(cell_origin, size(cell_width_px, line_height)),
                                         palette.selection_bg,
@@ -321,13 +325,12 @@ impl Render for AgentTerminal {
                         if padding_dots && !snapshot.cells.is_empty() {
                             let logical_rows = snapshot.cells.len();
                             let logical_cols = snapshot.cells[0].len();
-                            let visible_cols =
-                                ((bounds.size.width - TEXT_PADDING_X * 2.0) / cell_width).floor()
-                                    as usize;
-                            let visible_rows =
-                                ((bounds.size.height - dynamic_padding_y * 2.0) / line_height)
-                                    .floor()
-                                    as usize;
+                            let visible_cols = ((bounds.size.width - TEXT_PADDING_X * 2.0)
+                                / cell_width)
+                                .floor() as usize;
+                            let visible_rows = ((bounds.size.height - dynamic_padding_y * 2.0)
+                                / line_height)
+                                .floor() as usize;
                             if visible_cols > logical_cols || visible_rows > logical_rows {
                                 let dot_run = gpui::TextRun {
                                     len: 1,
@@ -409,7 +412,8 @@ impl Render for AgentTerminal {
                         }
 
                         if focused && snapshot.cursor_visible && ime_marked_text.is_none() {
-                            let cursor_logical_col_floor = cursor_visual_col.max(0.0).floor() as usize;
+                            let cursor_logical_col_floor =
+                                cursor_visual_col.max(0.0).floor() as usize;
                             let cursor_extra_cols = snapshot
                                 .cells
                                 .get(cursor_visual_row)
@@ -431,11 +435,12 @@ impl Render for AgentTerminal {
                                                 CURSOR_TRAIL_MAX_LEN_CELLS,
                                             );
                                             let primary_trail_width = cell_width_px * trail_cells;
-                                            let primary_trail_origin_x = if delta_cols.is_sign_positive() {
-                                                cursor_origin.x - primary_trail_width
-                                            } else {
-                                                cursor_origin.x + beam_width
-                                            };
+                                            let primary_trail_origin_x =
+                                                if delta_cols.is_sign_positive() {
+                                                    cursor_origin.x - primary_trail_width
+                                                } else {
+                                                    cursor_origin.x + beam_width
+                                                };
                                             let mut primary_trail_color = palette.cursor_bg;
                                             primary_trail_color.a = (primary_trail_color.a
                                                 * CURSOR_TRAIL_PRIMARY_ALPHA_SCALE)
@@ -448,21 +453,28 @@ impl Render for AgentTerminal {
                                                 primary_trail_color,
                                             ));
 
-                                            let secondary_trail_width =
-                                                (primary_trail_width * CURSOR_TRAIL_SECONDARY_LEN_SCALE)
-                                                    .min(cell_width_px * (CURSOR_TRAIL_MAX_LEN_CELLS * 1.8));
-                                            let secondary_trail_origin_x = if delta_cols.is_sign_positive() {
-                                                cursor_origin.x - secondary_trail_width
-                                            } else {
-                                                cursor_origin.x + beam_width
-                                            };
+                                            let secondary_trail_width = (primary_trail_width
+                                                * CURSOR_TRAIL_SECONDARY_LEN_SCALE)
+                                                .min(
+                                                    cell_width_px
+                                                        * (CURSOR_TRAIL_MAX_LEN_CELLS * 1.8),
+                                                );
+                                            let secondary_trail_origin_x =
+                                                if delta_cols.is_sign_positive() {
+                                                    cursor_origin.x - secondary_trail_width
+                                                } else {
+                                                    cursor_origin.x + beam_width
+                                                };
                                             let mut secondary_trail_color = palette.cursor_bg;
                                             secondary_trail_color.a = (secondary_trail_color.a
                                                 * CURSOR_TRAIL_SECONDARY_ALPHA_SCALE)
                                                 .clamp(0.0, 1.0);
                                             window.paint_quad(fill(
                                                 Bounds::new(
-                                                    point(secondary_trail_origin_x, cursor_origin.y),
+                                                    point(
+                                                        secondary_trail_origin_x,
+                                                        cursor_origin.y,
+                                                    ),
                                                     size(secondary_trail_width, line_height),
                                                 ),
                                                 secondary_trail_color,
@@ -498,7 +510,10 @@ impl Render for AgentTerminal {
                                     ));
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            point(cursor_origin.x, cursor_origin.y + line_height - border_y),
+                                            point(
+                                                cursor_origin.x,
+                                                cursor_origin.y + line_height - border_y,
+                                            ),
                                             size(cell_width_px, border_y),
                                         ),
                                         palette.cursor_bg,
@@ -509,7 +524,10 @@ impl Render for AgentTerminal {
                                     ));
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            point(cursor_origin.x + cell_width_px - border_x, cursor_origin.y),
+                                            point(
+                                                cursor_origin.x + cell_width_px - border_x,
+                                                cursor_origin.y,
+                                            ),
                                             size(border_x, line_height),
                                         ),
                                         palette.cursor_bg,
@@ -518,7 +536,10 @@ impl Render for AgentTerminal {
                                 CursorShape::Hidden => {}
                                 CursorShape::Block => {
                                     window.paint_quad(fill(
-                                        Bounds::new(cursor_origin, size(cell_width_px, line_height)),
+                                        Bounds::new(
+                                            cursor_origin,
+                                            size(cell_width_px, line_height),
+                                        ),
                                         palette.cursor_bg,
                                     ));
                                 }

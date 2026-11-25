@@ -98,6 +98,25 @@ fn binary(content_type: &'static str, body: Vec<u8>) -> RouteOutcome {
     }
 }
 
+pub(crate) fn is_public_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/favicon.svg"
+            | "/web"
+            | "/web/"
+            | "/web/index.html"
+            | "/web/style.css"
+            | "/web/app.js"
+            | "/web/manifest.webmanifest"
+            | "/web/vendor/xterm.min.js"
+            | "/web/vendor/xterm.min.css"
+            | "/web/icons/icon.svg"
+            | "/web/icons/icon-192.png"
+            | "/web/icons/icon-512.png"
+            | "/web/icons/apple-touch-icon.png"
+    )
+}
+
 pub(crate) fn static_response(path: &str) -> Option<RouteOutcome> {
     match path {
         "/favicon.svg" | "/web/icons/icon.svg" => {
@@ -207,6 +226,15 @@ mod tests {
                 other => panic!("unexpected outcome for {path}: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn only_assets_are_public() {
+        assert!(is_public_path("/web/app.js"));
+        assert!(is_public_path("/web/icons/icon-192.png"));
+        assert!(!is_public_path("/web/config"));
+        assert!(!is_public_path("/web/debug"));
+        assert!(!is_public_path("/tabs"));
     }
 
     #[test]

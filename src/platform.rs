@@ -12,23 +12,22 @@
 
 use std::path::PathBuf;
 
-use gpui::{KeyBinding, Keystroke, Menu, MenuItem, Pixels, Window, div};
-#[cfg(target_os = "macos")]
-use gpui::SystemMenuType;
 #[cfg(not(target_os = "windows"))]
 use gpui::Styled;
+#[cfg(target_os = "macos")]
+use gpui::SystemMenuType;
+use gpui::{KeyBinding, Keystroke, Menu, MenuItem, Pixels, Window, div};
 #[cfg(target_os = "windows")]
 use gpui::{WindowControlArea, prelude::*, px, rgb};
 
 use crate::{
-    CaptureSnapshotTab, CloseTab, NewTab, NextTab, PrevTab, QuitApp, SwitchToTab1, SwitchToTab10,
-    SwitchToTab2, SwitchToTab3, SwitchToTab4, SwitchToTab5, SwitchToTab6, SwitchToTab7,
-    SwitchToTab8, SwitchToTab9,
+    CaptureSnapshotTab, CloseTab, NewTab, NextTab, PrevTab, QuitApp, SwitchToTab1, SwitchToTab2,
+    SwitchToTab3, SwitchToTab4, SwitchToTab5, SwitchToTab6, SwitchToTab7, SwitchToTab8,
+    SwitchToTab9, SwitchToTab10,
 };
 
 #[cfg(target_os = "macos")]
-const HOME_UNSET_MESSAGE: &str =
-    "cannot expand '~' in --history-log-dir because HOME is unset";
+const HOME_UNSET_MESSAGE: &str = "cannot expand '~' in --history-log-dir because HOME is unset";
 #[cfg(not(target_os = "macos"))]
 const HOME_UNSET_MESSAGE: &str =
     "cannot expand '~' in --history-log-dir because USERPROFILE (or HOME) is unset";
@@ -272,16 +271,8 @@ pub(crate) fn titlebar_right_slot(_window: &Window, _mac_width: Pixels) -> gpui:
         action: WindowButton,
         close: bool,
     ) -> impl gpui::IntoElement {
-        let hover_bg = if close {
-            rgb(0xc42b32)
-        } else {
-            rgb(0x2a2f3a)
-        };
-        let active_bg = if close {
-            rgb(0x9e2228)
-        } else {
-            rgb(0x353b48)
-        };
+        let hover_bg = if close { rgb(0xc42b32) } else { rgb(0x2a2f3a) };
+        let active_bg = if close { rgb(0x9e2228) } else { rgb(0x353b48) };
         div()
             .id(id)
             .w(px(38.0))

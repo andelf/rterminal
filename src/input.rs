@@ -467,13 +467,16 @@ impl AgentTerminal {
                     self.font_size,
                 )),
             ) {
-                let dynamic_padding_y =
-                    terminal_content_padding_y(bounds.size.height, self.line_height(), self.grid_size.rows as usize);
+                let dynamic_padding_y = terminal_content_padding_y(
+                    bounds.size.height,
+                    self.line_height(),
+                    self.grid_size.rows as usize,
+                );
                 let visible_cols =
                     ((bounds.size.width - TEXT_PADDING_X * 2.0) / cell_width).floor() as usize;
-                let visible_rows =
-                    ((bounds.size.height - dynamic_padding_y * 2.0) / self.line_height()).floor()
-                        as usize;
+                let visible_rows = ((bounds.size.height - dynamic_padding_y * 2.0)
+                    / self.line_height())
+                .floor() as usize;
                 let max_cols = self.grid_size.cols as usize;
                 let max_rows = self.grid_size.rows as usize;
                 if max_cols > visible_cols || max_rows > visible_rows {

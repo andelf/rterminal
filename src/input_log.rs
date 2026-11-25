@@ -54,10 +54,7 @@ impl InputLogger {
                 let _ = writer.flush();
             });
 
-        Ok(Self {
-            sender,
-            raw,
-        })
+        Ok(Self { sender, raw })
     }
 
     pub(crate) fn text_value(&self, text: &str) -> Value {

@@ -114,13 +114,19 @@ fn emit_key(mods: Mods, key: &str, original: &str, out: &mut Vec<u8>) -> Result<
                 out.extend_from_slice(b"\x1b[Z");
                 return Ok(());
             }
-            _ => return Err(format!("Shift modifier not supported with '{key}' in '{original}'")),
+            _ => {
+                return Err(format!(
+                    "Shift modifier not supported with '{key}' in '{original}'"
+                ));
+            }
         }
     }
 
     if let Some(bytes) = named {
         if mods.ctrl {
-            return Err(format!("Ctrl modifier not supported with named key '{key}' in '{original}'"));
+            return Err(format!(
+                "Ctrl modifier not supported with named key '{key}' in '{original}'"
+            ));
         }
         if mods.meta {
             out.push(0x1b);
@@ -130,7 +136,9 @@ fn emit_key(mods: Mods, key: &str, original: &str, out: &mut Vec<u8>) -> Result<
     }
 
     let mut chars = key.chars();
-    let ch = chars.next().ok_or_else(|| format!("unknown key token: {original}"))?;
+    let ch = chars
+        .next()
+        .ok_or_else(|| format!("unknown key token: {original}"))?;
     if chars.next().is_some() {
         return Err(format!("unknown key token: {original}"));
     }
@@ -139,7 +147,9 @@ fn emit_key(mods: Mods, key: &str, original: &str, out: &mut Vec<u8>) -> Result<
         let upper = ch.to_ascii_uppercase() as u32;
         // Ctrl maps 'A'..='_' (and '@') to 0x01..=0x1F
         if !(('A' as u32..=b'_' as u32).contains(&upper) || upper == '@' as u32) {
-            return Err(format!("Ctrl modifier not supported with '{ch}' in '{original}'"));
+            return Err(format!(
+                "Ctrl modifier not supported with '{ch}' in '{original}'"
+            ));
         }
         let ctrl_byte = if upper == '@' as u32 {
             0u8
