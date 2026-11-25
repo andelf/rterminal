@@ -141,6 +141,12 @@ body.with-toolbar {
   border-color: var(--accent);
 }
 
+/* Short acknowledgement shared with the full screen keyboard. */
+.key-toolbar button.key-down {
+  background: #2a3040;
+  border-color: #3a4256;
+}
+
 .key-toolbar .key-mod { color: #e7c547; }
 
 /* One-tap modifiers are blue and are spent by the next key. */
@@ -199,18 +205,11 @@ body.with-toolbar.with-screen-keyboard {
 .screen-keyboard::-webkit-scrollbar { display: none; }
 .screen-keyboard[hidden] { display: none; }
 
-/* A fixed strip above the scrollable key rows: the layout switch must stay
-   reachable even when a narrow viewport scrolls the keyboard sideways. */
-.sk-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
-  min-width: max-content;
-  font-size: 11px;
-  color: var(--muted);
-}
+/* The layout switch lives above the right-hand navigation pads, inside the
+   existing six-row keyboard height rather than in a separate header row. */
 .sk-layout-toggle {
+  align-self: flex-end;
+  min-height: 26px;
   padding: 2px 8px;
   font-size: 11px;
   color: var(--muted);
@@ -281,6 +280,13 @@ body.with-toolbar.with-screen-keyboard {
 }
 .screen-keyboard .sk-key.sk-wide { min-width: 58px; }
 .screen-keyboard .sk-key.sk-space { min-width: 170px; }
+/* Touch Chrome keeps :hover after pointerup. Only the timed .sk-down flash
+   and explicit held/latched states may recolour a key after that gesture. */
+.screen-keyboard .sk-key:hover,
+.screen-keyboard .sk-key:active {
+  background: var(--action-bg);
+  border-color: var(--line);
+}
 .screen-keyboard .sk-key.sk-down {
   background: #2a3040;
   border-color: #3a4256;

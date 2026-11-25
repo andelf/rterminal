@@ -1052,12 +1052,24 @@ function bindHoldRepeat(button, press) {
   button.addEventListener("contextmenu", (event) => event.preventDefault());
 }
 
+const toolbarPressTimers = new WeakMap();
+function flashToolbarKey(button) {
+  const previous = toolbarPressTimers.get(button);
+  if (previous) clearTimeout(previous);
+  button.classList.add("key-down");
+  toolbarPressTimers.set(button, setTimeout(() => {
+    toolbarPressTimers.delete(button);
+    button.classList.remove("key-down");
+  }, 120));
+}
+
 function makeKeyButton(key, onPress) {
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = key.label;
   button.title = key.title || key.label;
   if (key.mod) button.classList.add("key-mod");
+  button.addEventListener("pointerdown", () => flashToolbarKey(button));
   const press = () => onPress();
   if (key.repeat) {
     bindHoldRepeat(button, press);
@@ -1611,6 +1623,8 @@ function buildScreenKeyboard() {
     }
     side.appendChild(pad);
   }
+  // Keep Win/Mac switching in the right-hand key area, not a separate header.
+  side.prepend(skLayoutToggle);
   layout.appendChild(side);
   skLayoutHolder.replaceChildren(layout);
   updateScreenShiftLabels();
@@ -2605,13 +2619,41 @@ function recordDomScroll(event) {
 document.addEventListener("scroll", recordDomScroll, true);
 
 // CSS overflow/touch-action alone does not stop iPad Chrome from scrolling the
-// root for a focused input. Only designated application scrollers may consume
-// a touch drag; every other drag must not move the outer document.
+// root. Arbitrate the gesture at document level: an inner scroller may consume
+// a drag only while it can still move in that direction. At either boundary —
+// including an exactly fitted pane — the outer document must not take over.
+let touchScrollStart = null;
+document.addEventListener("touchstart", (event) => {
+  const touch = event.touches[0];
+  const target = event.target instanceof Element ? event.target : null;
+  touchScrollStart = touch && target
+    ? { x: touch.clientX, y: touch.clientY, pane: target.closest(".pane") }
+    : null;
+}, { passive: true });
+
 document.addEventListener("touchmove", (event) => {
   const target = event.target instanceof Element ? event.target : null;
-  if (target && target.closest(".pane, .key-scroll, .tabstrip, .screen-keyboard")) return;
+  if (target && target.closest(".screen-keyboard, .key-scroll, .tabstrip")) return;
+  const touch = event.touches[0];
+  const start = touchScrollStart;
+  if (touch && start && start.pane && event.touches.length === 1) {
+    const dx = start.x - touch.clientX;
+    const dy = start.y - touch.clientY;
+    const horizontal = Math.abs(dx) > Math.abs(dy);
+    const delta = horizontal ? dx : dy;
+    const current = horizontal ? start.pane.scrollLeft : start.pane.scrollTop;
+    const maximum = horizontal
+      ? start.pane.scrollWidth - start.pane.clientWidth
+      : start.pane.scrollHeight - start.pane.clientHeight;
+    const canScroll = delta > 0
+      ? current < maximum - 1
+      : current > 1;
+    if (canScroll && Math.abs(delta) > 2) return;
+  }
   event.preventDefault();
 }, { passive: false });
+document.addEventListener("touchend", () => { touchScrollStart = null; }, { passive: true });
+document.addEventListener("touchcancel", () => { touchScrollStart = null; }, { passive: true });
 
 let lastViewportDebugAt = 0;
 function recordViewport(event) {
