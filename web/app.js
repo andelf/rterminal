@@ -111,6 +111,44 @@ function applySizeModeUi() {
 applySizeModeUi();
 toolbarToggle.setAttribute("aria-pressed", String(state.showToolbar));
 
+// Command buttons act without stealing the editor's focus or dismissing the
+// OS keyboard. Keep native click and keyboard activation intact; modal Help
+// and keyboard-mode focus handling deliberately use their own rules.
+for (const id of [
+  "new-tab",
+  "empty-new-tab",
+  "scrollback",
+  "refresh",
+  "toggle-toolbar",
+  "debug",
+  "size-mode",
+  "sync-size",
+  "staged-input-send"
+]) {
+  const button = document.getElementById(id);
+  let suppressTrustedClickUntil = 0;
+  button.addEventListener("click", (event) => {
+    if (event.isTrusted && performance.now() < suppressTrustedClickUntil) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
+  button.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    if (event.pointerType === "touch") {
+      suppressTrustedClickUntil = performance.now() + 500;
+    }
+    event.preventDefault();
+  });
+  button.addEventListener("pointerup", (event) => {
+    if (event.button !== 0 || event.pointerType !== "touch") return;
+    // iOS/Chrome may suppress the compatibility click after pointerdown was
+    // cancelled. Complete the touch explicitly without allowing a duplicate.
+    event.preventDefault();
+    button.click();
+  });
+}
+
 function closeHelp() {
   helpOverlay.hidden = true;
   helpButton.focus({ preventScroll: true });
