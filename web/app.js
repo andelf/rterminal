@@ -24,6 +24,9 @@ const keyToolbar = document.getElementById("key-toolbar");
 const keyScroll = document.getElementById("key-scroll");
 const keyNav = document.getElementById("key-nav");
 const debugButton = document.getElementById("debug");
+const helpButton = document.getElementById("help-button");
+const helpOverlay = document.getElementById("help-overlay");
+const helpCloseButton = document.getElementById("help-close");
 
 function savedSizeMode() {
   // "pc" (default): the native window decides the grid; this view mirrors it
@@ -107,6 +110,25 @@ function applySizeModeUi() {
 }
 applySizeModeUi();
 toolbarToggle.setAttribute("aria-pressed", String(state.showToolbar));
+
+function closeHelp() {
+  helpOverlay.hidden = true;
+  helpButton.focus({ preventScroll: true });
+}
+helpButton.addEventListener("click", () => {
+  helpOverlay.hidden = false;
+  helpCloseButton.focus({ preventScroll: true });
+});
+helpCloseButton.addEventListener("click", closeHelp);
+helpOverlay.addEventListener("click", (event) => {
+  if (event.target === helpOverlay) closeHelp();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !helpOverlay.hidden) {
+    event.preventDefault();
+    closeHelp();
+  }
+});
 
 // Phones keep a stable layout viewport while the on-screen keyboard shrinks
 // only the visual viewport. Treat that as a viewport pan, not a terminal
@@ -2141,6 +2163,29 @@ function destroyTab(tab) {
   state.tabs.delete(tab.id);
 }
 
+function touchWheelCell(tab, event) {
+  const screen = tab.term.element && tab.term.element.querySelector(".xterm-screen");
+  const metrics = cellMetrics(tab);
+  if (!screen || !metrics) return { col: 1, row: 1 };
+  const rect = screen.getBoundingClientRect();
+  return {
+    col: Math.max(1, Math.min(tab.term.cols, Math.floor((event.clientX - rect.left) / metrics.cw) + 1)),
+    row: Math.max(1, Math.min(tab.term.rows, Math.floor((event.clientY - rect.top) / metrics.ch) + 1))
+  };
+}
+
+function emitTouchWheel(tab, button, event) {
+  const mouseMode = tab.term.modes && tab.term.modes.mouseTracking !== "none";
+  if (mouseMode) {
+    const { col, row } = touchWheelCell(tab, event);
+    sendInput(tab, `\x1b[<${button};${col};${row}M`, "key");
+  } else if (typeof tab.term.scrollLines === "function") {
+    tab.followCursor = false;
+    armScrollGuard(tab);
+    tab.term.scrollLines(button === 65 ? 1 : -1);
+  }
+}
+
 function createTab(dto) {
   const id = String(dto.id);
   const wrapper = document.createElement("div");
@@ -2217,7 +2262,8 @@ function createTab(dto) {
     keySentText: "",
     pendingPaint: null,
     debugPaintLine: null,
-    debugPaintAlt: null
+    debugPaintAlt: null,
+    touchWheel: null
   };
   state.tabs.set(id, tab);
 
@@ -2303,6 +2349,64 @@ function createTab(dto) {
   wrapper.addEventListener("paste", () => {
     tab.lastPasteAt = Date.now();
   }, true);
+
+  // The right third is a touch-wheel zone, excluding the browser's outer
+  // gesture edge. The gesture is claimed only after a clear vertical drag,
+  // so taps and the left two-thirds keep xterm's normal selection behavior.
+  wrapper.addEventListener("pointerdown", (event) => {
+    if (event.pointerType !== "touch" || !event.isPrimary || event.touches > 1) return;
+    const rect = wrapper.getBoundingClientRect();
+    if (event.clientX < rect.left + rect.width * 2 / 3 || event.clientX > rect.right - 24) return;
+    tab.touchWheel = {
+      pointer: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      lastY: event.clientY,
+      remaining: 0,
+      active: false
+    };
+  });
+  wrapper.addEventListener("pointermove", (event) => {
+    const gesture = tab.touchWheel;
+    if (!gesture || gesture.pointer !== event.pointerId) return;
+    const totalX = event.clientX - gesture.x;
+    const totalY = event.clientY - gesture.y;
+    if (!gesture.active) {
+      if (Math.abs(totalY) < 10) return;
+      if (Math.abs(totalX) > Math.abs(totalY)) {
+        tab.touchWheel = null;
+        return;
+      }
+      gesture.active = true;
+      if (typeof tab.term.clearSelection === "function") tab.term.clearSelection();
+      if (event.isTrusted) {
+        try { wrapper.setPointerCapture(event.pointerId); } catch {}
+      }
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    gesture.remaining += event.clientY - gesture.lastY;
+    gesture.lastY = event.clientY;
+    const metrics = cellMetrics(tab);
+    const step = metrics ? metrics.ch : 16;
+    while (Math.abs(gesture.remaining) >= step) {
+      // Natural touch direction: swipe up moves forward, swipe down moves back.
+      const button = gesture.remaining < 0 ? 65 : 64;
+      gesture.remaining += gesture.remaining < 0 ? step : -step;
+      emitTouchWheel(tab, button, event);
+    }
+  });
+  const finishTouchWheel = (event) => {
+    const gesture = tab.touchWheel;
+    if (!gesture || gesture.pointer !== event.pointerId) return;
+    if (gesture.active) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    tab.touchWheel = null;
+  };
+  wrapper.addEventListener("pointerup", finishTouchWheel);
+  wrapper.addEventListener("pointercancel", finishTouchWheel);
 
   wrapper.addEventListener("scroll", () => {
     if (tab.scrollGuard) return;
@@ -2633,7 +2737,7 @@ document.addEventListener("touchstart", (event) => {
 
 document.addEventListener("touchmove", (event) => {
   const target = event.target instanceof Element ? event.target : null;
-  if (target && target.closest(".screen-keyboard, .key-scroll, .tabstrip")) return;
+  if (target && target.closest(".screen-keyboard, .key-scroll, .tabstrip, .help-card")) return;
   const touch = event.touches[0];
   const start = touchScrollStart;
   if (touch && start && start.pane && event.touches.length === 1) {
