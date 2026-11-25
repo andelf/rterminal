@@ -14,13 +14,13 @@
       <button id="new-tab" class="icon-btn" title="New tab">+</button>
       <button id="scrollback" class="icon-btn" title="Scrollback">↕</button>
       <button id="refresh" class="icon-btn" title="Refresh tabs">↻</button>
-      <button id="toggle-toolbar" class="icon-btn" title="Toggle key toolbar" aria-pressed="false">⌨</button>
-      <button id="debug" class="icon-btn" title="采集输入事件用于调试：开启后浏览器把 keydown / composition / beforeinput / input / 实际发送的字节流回传到服务端日志，可用 GET /web/debug/log 取回。" aria-pressed="false">◎</button>
-      <button id="size-mode" class="mode-toggle" aria-pressed="false" title="切换尺寸权威方。PC 尺寸（默认）：以 PC 窗口为准，浏览器镜像网格并滚动/补点。浏览器尺寸：以浏览器视口为准，PC 窗口自动调整到相同网格，两端都不滚动。">
-        <span id="size-mode-label">PC 尺寸</span>
+      <button id="toggle-toolbar" class="icon-btn" title="Toggle key toolbar" aria-label="Toggle terminal key toolbar" aria-pressed="false">⌘</button>
+      <button id="debug" class="icon-btn" title="Record keydown, composition, beforeinput, input, and transmitted bytes in the server log. Retrieve the log with GET /web/debug/log." aria-pressed="false">◎</button>
+      <button id="size-mode" class="mode-toggle" aria-pressed="false" title="Switch grid size control. PC size (default): the browser mirrors the native window. Browser size: the native window matches this viewport.">
+        <span id="size-mode-label" class="mode-icon" aria-hidden="true">🖥</span>
       </button>
-      <button id="keyboard-mode" class="mode-toggle" aria-pressed="false" title="切换输入方式。系统键盘（默认）：使用浏览器/系统软键盘，支持中文听写与 IME。屏幕键盘：使用页面内置全键盘，按键直接送入终端，不唤起系统软键盘；外接物理键盘仍然可用。">
-        <span id="keyboard-mode-label">系统键盘</span>
+      <button id="keyboard-mode" class="mode-toggle" aria-pressed="false" title="Switch input method. System keyboard (default): use the OS keyboard with dictation and IME. Screen keyboard: use the built-in keyboard without opening the OS keyboard.">
+        <span id="keyboard-mode-label" class="mode-icon" aria-hidden="true">⌨</span>
       </button>
     </div>
   </header>
@@ -42,14 +42,18 @@
 
   <section id="screen-keyboard" class="screen-keyboard" aria-label="Built-in screen keyboard" hidden>
     <div class="sk-bar">
-      <span class="sk-bar-label">屏幕键盘</span>
-      <button id="sk-layout-toggle" class="sk-layout-toggle" type="button" aria-pressed="false">Mac 样式</button>
+      <span class="sk-bar-label">Screen keyboard</span>
+      <button id="sk-layout-toggle" class="sk-layout-toggle" type="button" aria-pressed="false">Mac layout</button>
     </div>
     <div id="sk-layout" class="sk-layout"></div>
   </section>
 
   <footer class="statusbar">
     <span id="status">connecting…</span>
+    <form id="staged-input-form" class="staged-input-form" autocomplete="off">
+      <input id="staged-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="input any text" aria-label="Text to insert into the active terminal; empty submission sends Enter" title="Type or dictate text. Click Input or press Enter to insert it. Empty submission sends Enter; Backspace on an empty field deletes in the terminal.">
+      <button id="staged-input-send" type="submit" title="Insert text at the active terminal cursor; submit an empty field to send Enter">Input</button>
+    </form>
   </footer>
 
   <script src="/web/vendor/xterm.min.js"></script>

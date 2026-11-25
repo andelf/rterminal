@@ -8,6 +8,8 @@ const tabStrip = document.getElementById("tabs");
 const panes = document.getElementById("panes");
 const statusEl = document.getElementById("status");
 const statusBar = document.querySelector(".statusbar");
+const stagedInputForm = document.getElementById("staged-input-form");
+const stagedInput = document.getElementById("staged-input");
 const scrollbackView = document.getElementById("scrollback-view");
 const emptyState = document.getElementById("empty-state");
 const sizeModeButton = document.getElementById("size-mode");
@@ -88,7 +90,10 @@ const state = {
 };
 function applySizeModeUi() {
   const browser = state.sizeMode === "browser";
-  sizeModeLabel.textContent = browser ? "浏览器尺寸" : "PC 尺寸";
+  sizeModeLabel.textContent = "🖥";
+  sizeModeButton.setAttribute("aria-label", browser
+    ? "Browser size active; switch to PC size"
+    : "PC size active; switch to browser size");
   sizeModeButton.setAttribute("aria-pressed", String(browser));
 }
 applySizeModeUi();
@@ -145,7 +150,7 @@ async function notifyClient(connected) {
     if (connected) state.clientBlocked = false;
   } catch (error) {
     if (connected && /409|already connected/.test(String(error))) {
-      statusEl.textContent = "另一个 Web 客户端已连接";
+      statusEl.textContent = "Another web client is connected";
       const active = currentTab();
       if (active) stopPolling(active);
       if (!state.clientBlocked) {
@@ -413,7 +418,7 @@ function applyDebugUi() {
   debugButton.classList.toggle("on", debug.on);
   if (debug.on) {
     announceDebug();
-    statusEl.textContent = "调试记录已开启（回传服务端日志）";
+    statusEl.textContent = "Input debug recording enabled (saved to the server log)";
   }
 }
 
@@ -433,7 +438,7 @@ debugButton.addEventListener("click", () => {
   } else {
     flushDebug(true);
     debug.announced = false;
-    statusEl.textContent = "调试记录已停止";
+    statusEl.textContent = "Input debug recording stopped";
   }
   applyDebugUi();
   // The byte trace flag is part of the WebSocket URL, so reconnect to apply it.
@@ -524,6 +529,42 @@ async function api(path, options = {}) {
 function currentTab() {
   return state.active === null ? null : state.tabs.get(state.active) || null;
 }
+
+// A separate field for speech recognition and other input methods that rewrite
+// their text while producing it. Nothing reaches the PTY until submission, so
+// no prefix comparison, synthetic Backspace or utterance mirror is involved.
+// Direct input through xterm remains available for ordinary keyboards and IME.
+stagedInputForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const tab = currentTab();
+  const text = stagedInput.value;
+  if (!tab) {
+    report(new Error("No active terminal"));
+    return;
+  }
+  // Non-empty text is inserted exactly as written, without an implicit CR.
+  // An empty submission is the explicit shortcut for the terminal Enter key.
+  sendInput(tab, text || "\r", "staged");
+  stagedInput.value = "";
+});
+
+// Backspace normally edits only this staging field. Once the field is empty,
+// forward the same gesture to the terminal instead. keydown covers hardware
+// and most soft keyboards; beforeinput covers mobile engines that omit it.
+// Cancelling keydown prevents the corresponding beforeinput, avoiding a
+// duplicate DEL on browsers that implement both events.
+function forwardEmptyStagedBackspace(event) {
+  const isBackspace = event.type === "keydown"
+    ? event.key === "Backspace" && event.keyCode !== 229
+    : event.inputType === "deleteContentBackward";
+  if (!isBackspace || event.isComposing || stagedInput.value !== "") return;
+  const tab = currentTab();
+  if (!tab) return;
+  event.preventDefault();
+  sendInput(tab, "\x7f", "staged");
+}
+stagedInput.addEventListener("keydown", forwardEmptyStagedBackspace);
+stagedInput.addEventListener("beforeinput", forwardEmptyStagedBackspace);
 
 // Inject keystrokes through the same serialised chain as xterm's onData, so a
 // toolbar Enter cannot overtake characters still queued from the soft keyboard.
@@ -825,8 +866,8 @@ const lastModifierTap = new Map();
 
 function modifierTitle(key) {
   const mode = state.mods[key.id];
-  const stateText = mode === "locked" ? "已锁定" : mode === "once" ? "下一个按键生效" : "关闭";
-  return `${key.label} · ${stateText} ｜ 单击=仅作用于下一个按键；快速双击=持续锁定；再单击=关闭`;
+  const stateText = mode === "locked" ? "locked" : mode === "once" ? "next key only" : "off";
+  return `${key.label} · ${stateText} | Tap: next key only; double-tap: lock; tap again: off`;
 }
 
 function applyModifierUi() {
@@ -1052,9 +1093,9 @@ function setToolbar(visible) {
 // This is a different input model from the compact toolbar above. The toolbar
 // edits text through the browser's hidden textarea; here we act *as* the
 // keyboard: each tap dispatches a real-shaped keydown/keyup at xterm's textarea
-// with modifier flags on the event, and xterm does the encoding. There is no
-// one-shot/lock state, no textarea reconciliation and no IME — by design. The
-// system keyboard is one button away for those.
+// with modifier flags on the event, and xterm does the encoding. A one-second
+// modifier latch is available; textarea reconciliation and IME are deliberately
+// absent. The system keyboard is one button away for those.
 
 function sk(label, key, code, vk, shifted, extra) {
   return { label, key, code, vk, shifted, ...(extra || {}) };
@@ -1071,7 +1112,7 @@ function skLetters(letters) {
 }
 function skCaps() {
   return sk("Caps", "CapsLock", "CapsLock", 20, null, {
-    wide: true, caps: true, title: "Caps Lock（切换字母大小写）"
+    wide: true, caps: true, title: "Caps Lock (toggle letter case)"
   });
 }
 const SK_DIGITS = "1234567890";
@@ -1139,13 +1180,13 @@ const SCREEN_KEY_ROWS_MAC = [
   ],
   SCREEN_KEY_ROWS_WIN[4],
   [
-    skMod("⌃", "ctrl", "ControlLeft", 17, { key: "Control", title: "Control（按住）" }),
-    skMod("⌥", "alt", "AltLeft", 18, { key: "Alt", title: "Option（按住）" }),
-    skMod("⌘", "meta", "MetaLeft", 91, { key: "Meta", title: "Command（按住）" }),
+    skMod("⌃", "ctrl", "ControlLeft", 17, { key: "Control" }),
+    skMod("⌥", "alt", "AltLeft", 18, { key: "Alt" }),
+    skMod("⌘", "meta", "MetaLeft", 91, { key: "Meta" }),
     sk("Space", " ", "Space", 32, null, { space: true }),
-    skMod("⌘", "meta", "MetaRight", 92, { key: "Meta", title: "Command（按住）" }),
-    skMod("⌥", "alt", "AltRight", 18, { key: "Alt", title: "Option（按住）" }),
-    skMod("⌃", "ctrl", "ControlRight", 17, { key: "Control", title: "Control（按住）" })
+    skMod("⌘", "meta", "MetaRight", 92, { key: "Meta" }),
+    skMod("⌥", "alt", "AltRight", 18, { key: "Alt" }),
+    skMod("⌃", "ctrl", "ControlRight", 17, { key: "Control" })
   ]
 ];
 
@@ -1168,11 +1209,13 @@ const SCREEN_ARROW_KEYS = [
   ]
 ];
 
-// Which modifiers are currently DOWN on the on-screen keyboard. This is held
-// key state, not a latched mode: it can only be true while a finger is on a
-// modifier button, exactly like a physical keyboard.
+// Effective modifiers on the on-screen keyboard. Most are held only while a
+// finger is down; a modifier held for one second moves into screenLatchedMods
+// instead and survives its pointerup for exactly one subsequent non-modifier.
+const SCREEN_MOD_LATCH_MS = 1000;
 const screenHeldMods = new Set();
 const screenHeldDefs = new Map();
+const screenLatchedMods = new Set();
 const screenModButtons = new Map();
 // Keys with an upper-case / shifted variant. Their caps follow the held Shift
 // state instead of hard-coding one symbol: digits and punctuation show both
@@ -1237,7 +1280,21 @@ function releaseAllScreenModifiers() {
   for (const [mod, def] of screenHeldDefs) dispatchScreenKey("keyup", def);
   screenHeldMods.clear();
   screenHeldDefs.clear();
+  screenLatchedMods.clear();
   refreshScreenModButtons();
+}
+
+function releaseLatchedScreenModifiers() {
+  if (!screenLatchedMods.size) return;
+  // The physical modifier pointer already sent its keyup when the latch was
+  // established. Only the effective flags remain to be cleared here.
+  for (const mod of screenLatchedMods) {
+    screenHeldMods.delete(mod);
+    screenHeldDefs.delete(mod);
+  }
+  screenLatchedMods.clear();
+  refreshScreenModButtons();
+  dbg("screen-mod-consume", null, {});
 }
 
 function updateScreenShiftLabels() {
@@ -1256,7 +1313,12 @@ function updateScreenShiftLabels() {
 function refreshScreenModButtons() {
   for (const [mod, buttons] of screenModButtons) {
     const held = screenHeldMods.has(mod);
-    for (const button of buttons) button.classList.toggle("sk-held", held);
+    const latched = screenLatchedMods.has(mod);
+    for (const button of buttons) {
+      button.classList.toggle("sk-held", held);
+      button.classList.toggle("sk-latched", latched);
+      button.setAttribute("aria-pressed", String(latched));
+    }
   }
   if (screenCapsButton) {
     screenCapsButton.classList.toggle("sk-caps", screenCapsLock);
@@ -1279,7 +1341,9 @@ function screenKeyButton(def) {
   // swapped the visible cap to its upper variant.
   button.dataset.label = def.label;
   button.dataset.key = def.key;
-  button.title = def.title || (def.mod ? `${def.label}（按住）` : def.label);
+  button.title = def.title || (def.mod
+    ? `${def.label} (hold; hold for 1 second to latch for the next key)`
+    : def.label);
   if (def.shifted) {
     const main = document.createElement("span");
     main.className = "sk-key-main";
@@ -1299,6 +1363,7 @@ function screenKeyButton(def) {
   if (def.mod) {
     if (!screenModButtons.has(def.mod)) screenModButtons.set(def.mod, []);
     screenModButtons.get(def.mod).push(button);
+    button.setAttribute("aria-pressed", "false");
   }
   if (def.caps) {
     screenCapsButton = button;
@@ -1323,13 +1388,18 @@ function screenKeyButton(def) {
     pointer = null;
     button.classList.remove("sk-down");
     if (!activeDef) return;
-    if (activeDef.mod) {
-      screenHeldMods.delete(activeDef.mod);
-      screenHeldDefs.delete(activeDef.mod);
+    const released = activeDef;
+    if (released.mod && !screenLatchedMods.has(released.mod)) {
+      screenHeldMods.delete(released.mod);
+      screenHeldDefs.delete(released.mod);
       refreshScreenModButtons();
     }
-    dispatchScreenKey("keyup", activeDef);
+    dispatchScreenKey("keyup", released);
     activeDef = null;
+    // A latched modifier applies to one complete non-modifier keystroke. Its
+    // keyup is dispatched before the latch is cleared, so xterm sees matching
+    // modifier flags on both halves of that keystroke.
+    if (!released.mod) releaseLatchedScreenModifiers();
   };
 
   button.addEventListener("pointerdown", (event) => {
@@ -1356,10 +1426,27 @@ function screenKeyButton(def) {
     activeDef = def.mod ? def : effectiveScreenKey(def);
     dbg("skdown", null, { key: def.label, mod: def.mod || null, held: [...screenHeldMods] });
     if (def.mod) {
+      // Tapping an already latched modifier is the explicit way to cancel it
+      // without spending it on a key.
+      if (screenLatchedMods.has(def.mod)) {
+        screenLatchedMods.delete(def.mod);
+        screenHeldMods.delete(def.mod);
+        screenHeldDefs.delete(def.mod);
+        activeDef = null;
+        refreshScreenModButtons();
+        return;
+      }
       if (screenHeldMods.has(def.mod)) { activeDef = null; return; }
       screenHeldMods.add(def.mod);
       screenHeldDefs.set(def.mod, def);
       refreshScreenModButtons();
+      delayTimer = setTimeout(() => {
+        delayTimer = null;
+        if (activeDef !== def) return;
+        screenLatchedMods.add(def.mod);
+        refreshScreenModButtons();
+        dbg("screen-mod-latch", null, { mod: def.mod });
+      }, SCREEN_MOD_LATCH_MS);
     }
     dispatchScreenKey("keydown", activeDef);
     // xterm deliberately ignores a bare keydown whose key is an upper-case
@@ -1394,6 +1481,49 @@ function screenKeyButton(def) {
   button.addEventListener("contextmenu", (event) => event.preventDefault());
   return button;
 }
+
+// A quick horizontal movement is usually a finger slipping off a key, not a
+// request to move the whole keyboard. Require a half-second touch before a
+// horizontal drag can take over. CSS touch-action:none prevents the browser's
+// native panner from bypassing this gate; wheel/trackpad scrolling is unchanged.
+const SCREEN_SCROLL_HOLD_MS = 500;
+let screenScrollGesture = null;
+
+screenKeyboard.addEventListener("pointerdown", (event) => {
+  if (event.pointerType !== "touch" || !event.isPrimary) return;
+  screenScrollGesture = {
+    pointer: event.pointerId,
+    x: event.clientX,
+    lastX: event.clientX,
+    at: performance.now(),
+    scrolling: false
+  };
+});
+
+screenKeyboard.addEventListener("pointermove", (event) => {
+  const gesture = screenScrollGesture;
+  if (!gesture || event.pointerId !== gesture.pointer) return;
+  if (!gesture.scrolling) {
+    if (performance.now() - gesture.at < SCREEN_SCROLL_HOLD_MS ||
+        Math.abs(event.clientX - gesture.x) < 8) return;
+    gesture.scrolling = true;
+    gesture.lastX = event.clientX;
+    // Cancel the key/repeat that the finger originally landed on before the
+    // gesture becomes a scroll. Latched modifiers have no active pointer here.
+    stopAllRepeats();
+  }
+  event.preventDefault();
+  screenKeyboard.scrollLeft -= event.clientX - gesture.lastX;
+  gesture.lastX = event.clientX;
+});
+
+function endScreenScrollGesture(event) {
+  if (screenScrollGesture && event.pointerId === screenScrollGesture.pointer) {
+    screenScrollGesture = null;
+  }
+}
+screenKeyboard.addEventListener("pointerup", endScreenScrollGesture);
+screenKeyboard.addEventListener("pointercancel", endScreenScrollGesture);
 
 function buildScreenKeyboard() {
   // Rebuilding is only used by the Win/Mac layout switch. Drop the old button
@@ -1436,10 +1566,10 @@ function buildScreenKeyboard() {
   skLayoutHolder.replaceChildren(layout);
   updateScreenShiftLabels();
   const mac = state.screenLayout === "mac";
-  skLayoutToggle.textContent = mac ? "Win 样式" : "Mac 样式";
+  skLayoutToggle.textContent = mac ? "Win layout" : "Mac layout";
   skLayoutToggle.title = mac
-    ? "当前是 Mac 样式键盘（⌘/⌥/⌃）。点此切回 Win 样式（Win/Alt/Ctrl）。"
-    : "当前是 Win 样式键盘（Win/Alt/Ctrl）。点此切换为 Mac 样式（⌘/⌥/⌃）。";
+    ? "Mac layout active (⌘/⌥/⌃). Switch to Win layout (Win/Alt/Ctrl)."
+    : "Win layout active (Win/Alt/Ctrl). Switch to Mac layout (⌘/⌥/⌃).";
   skLayoutToggle.setAttribute("aria-pressed", String(mac));
 }
 
@@ -1460,7 +1590,10 @@ skLayoutToggle.addEventListener("click", () => {
 function applyKeyboardModeUi() {
   const screen = state.keyboardMode === "screen";
   keyboardModeButton.setAttribute("aria-pressed", String(screen));
-  keyboardModeLabel.textContent = screen ? "屏幕键盘" : "系统键盘";
+  keyboardModeButton.setAttribute("aria-label", screen
+    ? "Screen keyboard active; switch to system keyboard"
+    : "System keyboard active; switch to screen keyboard");
+  keyboardModeLabel.textContent = screen ? "▦" : "⌨";
   screenKeyboard.hidden = !screen;
   document.body.classList.toggle("with-screen-keyboard", screen);
 }
@@ -2032,6 +2165,10 @@ function createTab(dto) {
   // idempotent reconciler, so an extra or missing call cannot duplicate text.
   const textarea = term.element && term.element.querySelector(".xterm-helper-textarea");
   if (textarea) {
+    // Ask Chrome not to offer stored passwords, cards or addresses for the
+    // terminal. This is only a hint: mobile Chrome may still show its native
+    // keyboard accessory bar, including the Done button.
+    textarea.setAttribute("autocomplete", "off");
     // The built-in keyboard dispatches events directly at this field; it does
     // not need focus. Blurring it here stops the OS soft keyboard from popping
     // up over the built-in one when a tap lands on the terminal.
@@ -2223,7 +2360,7 @@ async function refresh() {
     if (active !== state.active) activate(active, false);
     else updateTabButtons();
     // Re-sync the visible tab with the latest native dimensions, or re-fit it
-    // to this viewport when "Web 尺寸优先" is enabled.
+    // to this viewport when browser-size mode is enabled.
     const activeTab = currentTab();
     if (activeTab) {
       fitTab(activeTab);

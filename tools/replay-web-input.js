@@ -154,6 +154,18 @@ const SCENARIOS = {
       { mode: "system", delay: 300 }
     ]
   },
+  // Long-hold Ctrl latches it for one key: Ctrl+A is 0x01, then the modifier
+  // springs back and the following plain A is 0x61.
+  "screen-latch": {
+    steps: [
+      { mode: "screen", delay: 300 },
+      { screenDown: "Ctrl", delay: 1100 },
+      { screenUp: "Ctrl", delay: 60 },
+      { screenTap: "a", delay: 90 },
+      { screenTap: "a", delay: 90 },
+      { mode: "system", delay: 300 }
+    ]
+  },
   // Space is the one printable key xterm will not encode on keydown: keyCode
   // 32 is below its >= 48 cutoff, so a synthetic keydown produced no PTY byte
   // at all (the iPhone session showed keydown with no onData). The screen key
