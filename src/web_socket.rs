@@ -41,9 +41,11 @@ struct Connection {
     debug: bool,
 }
 
-pub(crate) fn start_ws_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> io::Result<()> {
+pub(crate) fn start_ws_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> io::Result<u16> {
     let listener = TcpListener::bind(addr)?;
-    eprintln!("web data stream listening on ws://{}", listener.local_addr()?);
+    let local_addr = listener.local_addr()?;
+    let port = local_addr.port();
+    eprintln!("web data stream listening on ws://{local_addr}");
     thread::Builder::new()
         .name("agent-web-ws".to_string())
         .spawn(move || {
@@ -63,7 +65,7 @@ pub(crate) fn start_ws_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> io::Res
                 }
             }
         })?;
-    Ok(())
+    Ok(port)
 }
 
 fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), String> {
@@ -82,7 +84,9 @@ fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), Str
         let Some(tab) = path.strip_prefix("/ws/tabs/") else {
             return Err(not_found("expected /ws/tabs/<id>"));
         };
-        let tab_id = tab.parse::<u64>().map_err(|_| not_found("invalid tab id"))?;
+        let tab_id = tab
+            .parse::<u64>()
+            .map_err(|_| not_found("invalid tab id"))?;
         let mut client = String::new();
         let mut debug = false;
         if let Some(query) = request.uri().query() {
@@ -100,12 +104,21 @@ fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), Str
         if client.is_empty() {
             return Err(not_found("missing client id"));
         }
-        conn.set(Some(Connection { tab_id, client, debug }));
+        conn.set(Some(Connection {
+            tab_id,
+            client,
+            debug,
+        }));
         Ok(response)
     };
     let mut socket = accept_hdr(stream, callback).map_err(|err| format!("handshake: {err}"))?;
-    let Connection { tab_id, client, debug } =
-        conn.into_inner().ok_or_else(|| "handshake lost connection info".to_string())?;
+    let Connection {
+        tab_id,
+        client,
+        debug,
+    } = conn
+        .into_inner()
+        .ok_or_else(|| "handshake lost connection info".to_string())?;
     let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
 
     let (pty_rx, mut snapshot) = attach(&cmd_tx, tab_id, client.clone(), stream_id)?;
@@ -179,7 +192,10 @@ fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), Str
             Ok(Message::Close(_)) => break,
             Ok(_) => {}
             Err(tungstenite::Error::Io(err))
-                if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
             Err(err) => {
                 eprintln!("web socket read: {err}");
                 break;
@@ -212,7 +228,10 @@ fn attach(
         .recv_blocking()
         .map_err(|_| "attach reply channel closed".to_string())?;
     let snapshot = match reply {
-        ApiReply::Ok { body: ReplyBody::Json(value), .. } => value,
+        ApiReply::Ok {
+            body: ReplyBody::Json(value),
+            ..
+        } => value,
         ApiReply::Err { error, .. } => return Err(error),
         _ => return Err("unexpected attach reply".to_string()),
     };
@@ -229,9 +248,10 @@ fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &str) -
     };
     match value.get("type").and_then(Value::as_str) {
         Some("resize") => {
-            let (Some(cols), Some(rows)) =
-                (value.get("cols").and_then(Value::as_u64), value.get("rows").and_then(Value::as_u64))
-            else {
+            let (Some(cols), Some(rows)) = (
+                value.get("cols").and_then(Value::as_u64),
+                value.get("rows").and_then(Value::as_u64),
+            ) else {
                 return true;
             };
             if !(20..=300).contains(&cols) || !(5..=200).contains(&rows) {
@@ -298,6 +318,18 @@ fn percent_decode(input: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ephemeral_bind_returns_the_actual_port() {
+        let (tx, _rx) = async_channel::unbounded();
+        let port = start_ws_server("127.0.0.1:0", tx).expect("bind ephemeral port");
+        assert!(port > 0);
+    }
 }
 
 fn hex_val(byte: u8) -> Option<u8> {

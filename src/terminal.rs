@@ -25,16 +25,16 @@ use serde_json::json;
 use crate::cli::{AmbiguousWidth, CliOptions, Theme};
 use crate::color::indexed_to_rgb;
 use crate::color::{ansi_bg_to_hsla, ansi_to_hsla};
-use crate::tab_runtime::TabRuntimeState;
 use crate::history_log::HistoryLogger;
 use crate::input_log::InputLogger;
 use crate::keyboard::encode_keystroke;
 use crate::pty::{PtySession, SharedPtyWriter, write_to_pty};
 use crate::render::{
-    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y,
-    line_height_for, measure_cell_width, terminal_content_padding_y,
+    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y, line_height_for,
+    measure_cell_width, terminal_content_padding_y,
 };
 use crate::snapshot_tab::SnapshotTabData;
+use crate::tab_runtime::TabRuntimeState;
 use crate::text_utils::summarize_text_for_trace;
 
 const DEFAULT_COLS: u16 = 80;
@@ -103,7 +103,10 @@ impl Dimensions for GridSize {
 #[derive(Clone)]
 enum PendingTerminalEvent {
     ClipboardStore(ClipboardType, String),
-    ClipboardLoad(ClipboardType, Arc<dyn Fn(&str) -> String + Sync + Send + 'static>),
+    ClipboardLoad(
+        ClipboardType,
+        Arc<dyn Fn(&str) -> String + Sync + Send + 'static>,
+    ),
 }
 
 #[derive(Clone)]
@@ -368,20 +371,24 @@ impl AgentTerminal {
             },
             None => None,
         };
-        let history_logger = match HistoryLogger::new(&cli.history_log_dir, &shell) {
-            Ok(logger) => {
-                debug.set_note(Some(format!(
-                    "history transcript: {}",
-                    logger.path().to_string_lossy()
-                )));
-                Some(logger)
-            }
-            Err(err) => {
-                debug.set_error(format!(
-                    "failed to open history log dir {}: {err}",
-                    cli.history_log_dir.to_string_lossy()
-                ));
-                None
+        let history_logger = if cli.no_history_log {
+            None
+        } else {
+            match HistoryLogger::new(&cli.history_log_dir, &shell) {
+                Ok(logger) => {
+                    debug.set_note(Some(format!(
+                        "history transcript: {}",
+                        logger.path().to_string_lossy()
+                    )));
+                    Some(logger)
+                }
+                Err(err) => {
+                    debug.set_error(format!(
+                        "failed to open history log dir {}: {err}",
+                        cli.history_log_dir.to_string_lossy()
+                    ));
+                    None
+                }
             }
         };
 
@@ -607,11 +614,7 @@ impl AgentTerminal {
             .set_note(Some(format!("osc52 copied to {clipboard:?}")));
     }
 
-    fn load_osc52_clipboard(
-        &mut self,
-        cx: &mut Context<Self>,
-        clipboard: ClipboardType,
-    ) -> String {
+    fn load_osc52_clipboard(&mut self, cx: &mut Context<Self>, clipboard: ClipboardType) -> String {
         let text = match clipboard {
             ClipboardType::Clipboard | ClipboardType::Selection => {
                 cx.read_from_clipboard().and_then(|item| item.text())
@@ -758,8 +761,7 @@ impl AgentTerminal {
         } else {
             px(0.0)
         };
-        let width = grid.cols as f32 * f32::from(cell_width)
-            + f32::from(TEXT_PADDING_X) * 2.0;
+        let width = grid.cols as f32 * f32::from(cell_width) + f32::from(TEXT_PADDING_X) * 2.0;
         let height = grid.rows as f32 * f32::from(self.line_height())
             + f32::from(CUSTOM_TITLE_BAR_HEIGHT)
             + f32::from(status_height)
@@ -1517,20 +1519,36 @@ pub(crate) fn snapshot_transition_shape(
 }
 
 fn count_matching_rows(old_rows: &[Vec<CellSnapshot>], new_rows: &[Vec<CellSnapshot>]) -> usize {
-    old_rows.iter().zip(new_rows).filter(|(a, b)| a == b).count()
+    old_rows
+        .iter()
+        .zip(new_rows)
+        .filter(|(a, b)| a == b)
+        .count()
 }
 
 fn count_changed_rows(old: &ScreenSnapshot, new: &ScreenSnapshot) -> usize {
-    old.cells.iter().zip(&new.cells).filter(|(a, b)| a != b).count()
+    old.cells
+        .iter()
+        .zip(&new.cells)
+        .filter(|(a, b)| a != b)
+        .count()
         + old.cells.len().abs_diff(new.cells.len())
 }
 
 fn snapshot_row_summary(snapshot: &ScreenSnapshot, row: usize) -> String {
-    snapshot.cells.get(row).map(|r| row_summary(r)).unwrap_or_default()
+    snapshot
+        .cells
+        .get(row)
+        .map(|r| row_summary(r))
+        .unwrap_or_default()
 }
 
 fn snapshot_last_row_summary(snapshot: &ScreenSnapshot) -> String {
-    snapshot.cells.last().map(|r| row_summary(r)).unwrap_or_default()
+    snapshot
+        .cells
+        .last()
+        .map(|r| row_summary(r))
+        .unwrap_or_default()
 }
 
 fn row_summary(row: &[CellSnapshot]) -> String {

@@ -14,7 +14,11 @@ pub(crate) enum Theme {
 }
 
 #[derive(Clone, Parser)]
-#[command(name = "agent_terminal", about = "A GPU-accelerated terminal emulator for AI agents")]
+#[command(
+    name = "agent_terminal",
+    version,
+    about = "A GPU-accelerated terminal emulator for AI agents"
+)]
 pub(crate) struct CliOptions {
     #[arg(long, help = "Run a self-diagnostic check and exit")]
     pub(crate) self_check: bool,
@@ -22,17 +26,32 @@ pub(crate) struct CliOptions {
     pub(crate) show_status_bar: bool,
     #[arg(long, default_value_t = crate::platform::default_font_family().to_string(), help = "Primary font family for terminal text")]
     pub(crate) font_family: String,
-    #[arg(long = "font-fallback", value_delimiter = ',', help = "Fallback font families, comma-separated or repeated")]
+    #[arg(
+        long = "font-fallback",
+        value_delimiter = ',',
+        help = "Fallback font families, comma-separated or repeated"
+    )]
     pub(crate) font_fallbacks: Vec<String>,
-    #[arg(long = "double-width-char", value_delimiter = ',', help = "Characters to render at double cell width, comma-separated or repeated")]
+    #[arg(
+        long = "double-width-char",
+        value_delimiter = ',',
+        help = "Characters to render at double cell width, comma-separated or repeated"
+    )]
     pub(crate) double_width_chars: Vec<String>,
     #[arg(long, value_enum, default_value_t = AmbiguousWidth::Single, help = "Treat ambiguous-width Unicode characters as single or double width")]
     pub(crate) ambiguous_width: AmbiguousWidth,
     #[arg(long, value_enum, default_value_t = Theme::Default, help = "Color theme")]
     pub(crate) theme: Theme,
-    #[arg(long, help = "Write structured input/output log events to this JSONL file")]
+    #[arg(
+        long,
+        help = "Write structured input/output log events to this JSONL file"
+    )]
     pub(crate) input_log_file: Option<PathBuf>,
-    #[arg(long, help = "Include raw PTY bytes in input log events (base64-encoded)")]
+    #[arg(
+        long,
+        requires = "input_log_file",
+        help = "Include raw PTY bytes in input log events (base64-encoded); requires --input-log-file"
+    )]
     pub(crate) input_log_raw: bool,
     #[arg(
         long,
@@ -41,6 +60,8 @@ pub(crate) struct CliOptions {
         help = "Directory for per-tab raw PTY transcript files (.ansi)"
     )]
     pub(crate) history_log_dir: PathBuf,
+    #[arg(long, help = "Disable per-tab raw PTY transcript logging")]
+    pub(crate) no_history_log: bool,
     #[arg(long, help = "Disable smooth cursor slide animation")]
     pub(crate) no_cursor_slide: bool,
     #[arg(
@@ -87,7 +108,8 @@ fn parse_history_log_dir(value: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AmbiguousWidth, Theme, parse_cli_options_from};
+    use super::{AmbiguousWidth, CliOptions, Theme, parse_cli_options_from};
+    use clap::Parser;
 
     #[test]
     fn ambiguous_width_defaults_to_single() {
@@ -231,10 +253,8 @@ mod tests {
 
     #[test]
     fn api_addr_accepts_override() {
-        let cli = parse_cli_options_from(vec![
-            "--api-addr".to_string(),
-            "127.0.0.1:9000".to_string(),
-        ]);
+        let cli =
+            parse_cli_options_from(vec!["--api-addr".to_string(), "127.0.0.1:9000".to_string()]);
         assert_eq!(cli.api_addr, "127.0.0.1:9000");
     }
 
@@ -242,5 +262,23 @@ mod tests {
     fn ws_addr_defaults_to_loopback() {
         let cli = parse_cli_options_from(Vec::<String>::new());
         assert_eq!(cli.ws_addr, "127.0.0.1:7879");
+    }
+
+    #[test]
+    fn ws_addr_accepts_override_and_ephemeral_port() {
+        let cli = parse_cli_options_from(vec!["--ws-addr".to_string(), "127.0.0.1:0".to_string()]);
+        assert_eq!(cli.ws_addr, "127.0.0.1:0");
+    }
+
+    #[test]
+    fn input_log_raw_requires_input_log_file() {
+        let result = CliOptions::try_parse_from(["agent_terminal", "--input-log-raw"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn history_logging_can_be_disabled() {
+        let cli = parse_cli_options_from(vec!["--no-history-log".to_string()]);
+        assert!(cli.no_history_log);
     }
 }

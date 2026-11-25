@@ -139,6 +139,29 @@ fn process_is_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+fn bind_is_loopback(addr: &str) -> bool {
+    let host = if addr.starts_with('[') {
+        addr.split(']').next().unwrap_or("").trim_start_matches('[')
+    } else {
+        addr.rsplit_once(':').map(|(host, _)| host).unwrap_or(addr)
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+fn warn_if_public_bind(name: &str, addr: &str) {
+    if !bind_is_loopback(addr) {
+        eprintln!(
+            "WARNING: {name} is listening on {addr} without authentication; \
+             reachable devices can read and control the terminal"
+        );
+    }
+}
+
 fn main() {
     let cli = parse_cli_options();
 
@@ -150,6 +173,12 @@ fn main() {
         return;
     }
 
+    if cli.cursor_trail && cli.no_cursor_slide {
+        eprintln!("warning: --cursor-trail has no effect when --no-cursor-slide is set");
+    }
+    warn_if_public_bind("HTTP API", &cli.api_addr);
+    warn_if_public_bind("WebSocket", &cli.ws_addr);
+
     let _instance = match acquire_instance_lock() {
         Ok(guard) => guard,
         Err(message) => {
@@ -159,25 +188,22 @@ fn main() {
     };
 
     let (api_tx, api_rx) = async_channel::unbounded::<crate::api_protocol::ApiCommand>();
-    let ws_port = cli
-        .ws_addr
-        .rsplit(':')
-        .next()
-        .and_then(|port| port.parse::<u16>().ok())
-        .unwrap_or(7879);
-    crate::api_server::set_ws_port(ws_port);
     if let Err(err) = crate::api_server::start_api_server(&cli.api_addr, api_tx.clone()) {
         eprintln!("failed to start api server on {}: {err:#}", cli.api_addr);
         eprintln!("another instance may already be using this address; exiting.");
         std::process::exit(1);
     }
-    if let Err(err) = crate::web_socket::start_ws_server(&cli.ws_addr, api_tx) {
-        eprintln!(
-            "failed to start web data stream on {}: {err:#}",
-            cli.ws_addr
-        );
-        std::process::exit(1);
-    }
+    let ws_port = match crate::web_socket::start_ws_server(&cli.ws_addr, api_tx) {
+        Ok(port) => port,
+        Err(err) => {
+            eprintln!(
+                "failed to start web data stream on {}: {err:#}",
+                cli.ws_addr
+            );
+            std::process::exit(1);
+        }
+    };
+    crate::api_server::set_ws_port(ws_port);
 
     application().run(move |cx: &mut App| {
         cx.on_action(|_: &QuitApp, cx: &mut App| cx.quit());
@@ -217,4 +243,19 @@ fn main() {
         .expect("failed to open window");
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_is_loopback;
+
+    #[test]
+    fn loopback_bind_detection_handles_ip_and_hostnames() {
+        assert!(bind_is_loopback("127.0.0.1:7878"));
+        assert!(bind_is_loopback("localhost:7878"));
+        assert!(bind_is_loopback("[::1]:7878"));
+        assert!(!bind_is_loopback("0.0.0.0:7878"));
+        assert!(!bind_is_loopback("192.168.1.10:7878"));
+        assert!(!bind_is_loopback("[::]:7878"));
+    }
 }

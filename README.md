@@ -191,7 +191,7 @@ HTML and unversioned resources use `Cache-Control: no-store`. Versioned JS, CSS,
 - "Scrollback" fetches `GET /tabs/:id/scrollback` into an overlay (xterm.js's own scrollback is only a local replay buffer).
 - Only one instance runs at a time (tracked by `~/.rterminal/instance.lock`). A second launch prints the running PID and exits; it cannot start a second HTTP server even with a different `--api-addr`.
 
-The server has no authentication. Keep the default loopback bind; exposing `--api-addr 0.0.0.0` exposes full terminal control to anyone who can reach the port.
+The server has no authentication. Keep the default loopback bind; exposing `--api-addr 0.0.0.0` exposes full terminal control to anyone who can reach the port. The app prints a startup warning for non-loopback HTTP or WebSocket binds. `--no-history-log` disables persistent raw PTY transcripts when they are not needed.
 
 ### Logging & Tracing
 - Input event tracing: `AGENT_TUI_INPUT_TRACE=1`
@@ -235,15 +235,16 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 | `--ambiguous-width <single\|double>` | `single` | Width for Unicode ambiguous-width characters |
 | `--theme <default\|eye-care>` | `default` | Color theme |
 | `--force-vertical-cursor` | off | Always use beam cursor regardless of app mode |
-| `--cursor-trail` | off | Enable trailing glow effect on beam cursor |
+| `--cursor-trail` | off | Enable trailing glow effect on beam cursor (requires cursor slide; conflicts with `--no-cursor-slide`) |
 | `--no-cursor-slide` | off | Disable smooth cursor movement animation |
 | `--no-option-as-meta` | off | Treat Option key as native input instead of Meta/Alt |
 | `--show-status-bar` | off | Show debug status bar at bottom |
 | `--api-addr <host:port>` | `127.0.0.1:7878` | Bind address for the HTTP control API (use `:0` for an OS-assigned port; the actual port is logged on startup) |
-| `--ws-addr <host:port>` | `127.0.0.1:7879` | Bind address for the browser WebSocket data stream |
+| `--ws-addr <host:port>` | `127.0.0.1:7879` | Bind address for the browser WebSocket data stream (`:0` is supported and reported through `/web/config`) |
 | `--input-log-file <path>` | — | Write structured input events to JSONL file |
-| `--input-log-raw` | off | Include full text values in input log (not truncated) |
+| `--input-log-raw` | off | Include base64-encoded raw PTY bytes; requires `--input-log-file` |
 | `--history-log-dir <dir>` | `~/.rterminal/history` | Write per-tab raw PTY output transcripts (`.ansi`) and metadata sidecars |
+| `--no-history-log` | off | Disable per-tab raw PTY transcript logging |
 | `--self-check` | — | Run startup self-check and exit |
 
 ## Tech Stack
