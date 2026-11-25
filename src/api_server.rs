@@ -375,10 +375,39 @@ fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
             },
             Err(err) => error_response(err.status, &err.message),
         };
+        let response = with_cache_control(response, cache_policy(&path, &query));
         if let Err(err) = request.respond(response) {
             eprintln!("agent api: failed to send response: {err}");
         }
     }
+}
+
+fn cache_policy(path: &str, query: &str) -> &'static str {
+    let versioned_static = matches!(
+        path,
+        "/web/app.js"
+            | "/web/style.css"
+            | "/web/icons/icon.svg"
+            | "/web/icons/icon-192.png"
+            | "/web/icons/icon-512.png"
+            | "/web/icons/apple-touch-icon.png"
+            | "/favicon.svg"
+    ) || path.starts_with("/web/vendor/");
+    if versioned_static && query.split('&').any(|part| part.starts_with("v=")) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    }
+}
+
+fn with_cache_control(
+    mut response: Response<Cursor<Vec<u8>>>,
+    policy: &'static str,
+) -> Response<Cursor<Vec<u8>>> {
+    if let Ok(header) = Header::from_bytes("Cache-Control", policy) {
+        response = response.with_header(header);
+    }
+    response
 }
 
 fn method_str(m: &Method) -> &'static str {
@@ -415,9 +444,6 @@ fn text_response(
     if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
         resp = resp.with_header(header);
     }
-    if let Ok(header) = Header::from_bytes("Cache-Control", "no-store") {
-        resp = resp.with_header(header);
-    }
     resp
 }
 
@@ -446,6 +472,21 @@ mod tests {
                 panic!("expected command, got immediate response")
             }
         }
+    }
+
+    #[test]
+    fn cache_policy_requires_a_version_for_long_lived_assets() {
+        assert_eq!(
+            cache_policy("/web/app.js", "v=20261125-1"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            cache_policy("/web/vendor/xterm.min.js", "v=5.5.0"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(cache_policy("/web/app.js", ""), "no-store");
+        assert_eq!(cache_policy("/web/", ""), "no-store");
+        assert_eq!(cache_policy("/web/config", ""), "no-store");
     }
 
     #[test]

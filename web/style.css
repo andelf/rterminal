@@ -454,6 +454,18 @@ button.mode-toggle[aria-pressed="true"],
   white-space: nowrap;
 }
 
+.sync-size {
+  flex: 0 0 auto;
+  min-width: 30px;
+  padding: 3px 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.sync-size[hidden] { display: none; }
+
 .mode-icon {
   display: inline-flex;
   align-items: center;

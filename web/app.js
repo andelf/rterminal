@@ -14,6 +14,7 @@ const stagedInput = document.getElementById("staged-input");
 const scrollbackView = document.getElementById("scrollback-view");
 const emptyState = document.getElementById("empty-state");
 const sizeModeButton = document.getElementById("size-mode");
+const syncSizeButton = document.getElementById("sync-size");
 const keyboardModeButton = document.getElementById("keyboard-mode");
 const screenKeyboard = document.getElementById("screen-keyboard");
 const skLayoutHolder = document.getElementById("sk-layout");
@@ -75,6 +76,9 @@ const state = {
   active: null,
   refreshing: false,
   sizeMode: savedSizeMode(),
+  // Browser-size mode starts in auto-follow. Sync size takes one explicit
+  // snapshot and then holds that grid until the next click or PC-size mode.
+  sizeLocked: false,
   keyboardMode: savedKeyboardMode(),
   screenLayout: savedScreenLayout(),
   showToolbar: savedToolbar(),
@@ -90,9 +94,16 @@ const state = {
 function applySizeModeUi() {
   const browser = state.sizeMode === "browser";
   sizeModeButton.setAttribute("aria-label", browser
-    ? "Browser size active; switch to PC size"
+    ? `Browser size ${state.sizeLocked ? "locked" : "auto-follow"}; switch to PC size`
     : "PC size active; switch to browser size");
   sizeModeButton.setAttribute("aria-pressed", String(browser));
+  syncSizeButton.hidden = !browser;
+  syncSizeButton.setAttribute("aria-label", state.sizeLocked
+    ? "Browser size locked; sync latest size and lock again"
+    : "Sync current browser size and lock it");
+  syncSizeButton.title = state.sizeLocked
+    ? "Size is locked. Click to sync the latest browser grid and keep it locked again."
+    : "Sync the current browser grid once and keep it fixed until the next click.";
 }
 applySizeModeUi();
 toolbarToggle.setAttribute("aria-pressed", String(state.showToolbar));
@@ -1403,14 +1414,17 @@ function screenKeyButton(def) {
   let activeDef = null;
   let delayTimer = null;
   let repeatTimer = null;
+  let pressTimer = null;
   const stop = () => {
     // Share the global stop registry with the compact toolbar: switching tabs
     // or keyboard modes must be able to cancel an in-flight key repeat.
     repeatStops.delete(stop);
     if (delayTimer !== null) clearTimeout(delayTimer);
     if (repeatTimer !== null) clearInterval(repeatTimer);
+    if (pressTimer !== null) clearTimeout(pressTimer);
     delayTimer = null;
     repeatTimer = null;
+    pressTimer = null;
     if (pointer !== null && button.hasPointerCapture?.(pointer)) {
       try { button.releasePointerCapture(pointer); } catch {}
     }
@@ -1444,6 +1458,12 @@ function screenKeyButton(def) {
       try { button.setPointerCapture?.(event.pointerId); } catch {}
     }
     button.classList.add("sk-down");
+    // A key press is a short visual acknowledgement, not a persistent mode.
+    // Held modifiers/Caps retain their separate state colours after this.
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      button.classList.remove("sk-down");
+    }, 120);
     if (def.caps) {
       // A lock, not a key event: nothing is sent to the PTY, only the letter
       // caps and the next keystrokes change.
@@ -1825,7 +1845,7 @@ function applyPadding(tab) {
   }
 }
 
-function fitTab(tab, forceSync = false) {
+function fitTab(tab, forceSync = false, allowKeyboardSync = false) {
   // The web grid is ALWAYS the native PTY grid. The screen.ansi repaint is
   // rendered for exactly dto.cols x dto.rows, so mirroring that grid 1:1 keeps
   // the cursor and every cell aligned. Letting the browser pick its own grid
@@ -1852,10 +1872,12 @@ function fitTab(tab, forceSync = false) {
   //             show and ask the native side to adopt it AND resize the PC
   //             window to match (sync_window), so neither side scrolls.
   //
-  // The soft keyboard only changes what is visible; resizing the PTY or the PC
-  // window then would redraw running programs on every keystroke, so both
-  // modes stay frozen while it is up.
-  if (state.sizeMode === "browser" && keyboardInset === 0 && keyboardTimer === null) {
+  // Automatic following stays frozen while the soft keyboard is up or after
+  // Sync size locked the grid. An explicit Sync size click is the only path
+  // allowed to synchronize the keyboard-reduced viewport.
+  const canSync = allowKeyboardSync ||
+    (!state.sizeLocked && keyboardInset === 0 && keyboardTimer === null);
+  if (state.sizeMode === "browser" && canSync) {
     const rect = panes.getBoundingClientRect();
     const metrics = cellMetrics(tab);
     if (rect.width && rect.height && metrics) {
@@ -2418,6 +2440,7 @@ toolbarToggle.addEventListener("click", () => setToolbar(!state.showToolbar));
 
 sizeModeButton.addEventListener("click", () => {
   state.sizeMode = state.sizeMode === "pc" ? "browser" : "pc";
+  state.sizeLocked = false;
   applySizeModeUi();
   try {
     localStorage.setItem("rterminal.sizeMode", state.sizeMode);
@@ -2432,6 +2455,17 @@ sizeModeButton.addEventListener("click", () => {
     fitTab(tab, state.sizeMode === "browser");
     applyPadding(tab);
   }
+});
+
+syncSizeButton.addEventListener("click", () => {
+  const tab = currentTab();
+  if (!tab || state.sizeMode !== "browser") return;
+  state.sizeLocked = true;
+  applySizeModeUi();
+  // This explicit action intentionally supports capturing the reduced height
+  // while the keyboard is open. Later viewport changes only adjust padding.
+  fitTab(tab, true, true);
+  applyPadding(tab);
 });
 
 document.getElementById("scrollback").addEventListener("click", async () => {
@@ -2634,8 +2668,15 @@ notifyClient(true);
 // right port even when the CLI overrides the default.
 api("/web/config")
   .then((config) => {
-    if (config && config.ws_port) state.wsPort = Number(config.ws_port);
+    if (!config || !config.ws_port) return;
+    const port = Number(config.ws_port);
+    if (port === state.wsPort) return;
+    state.wsPort = port;
+    const active = currentTab();
+    if (active) startStream(active);
   })
-  .catch(() => {})
-  .finally(refresh);
+  .catch(() => {});
+// Do not hold the first paint hostage to the config request. The default port
+// is used immediately and a custom port reconnects as soon as config arrives.
+refresh();
 setInterval(refresh, 1000);
