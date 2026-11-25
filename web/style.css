@@ -35,7 +35,12 @@
    whose only effect was to carry the top bar off screen. */
 html {
   position: fixed;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  /* JS keeps the ROOT scroll container equal to visualViewport.height. On
+     iPad Chrome, layout height also includes browser-chrome-covered space. */
+  height: var(--app-height, 100%);
   overflow: hidden;
   overflow: clip;
   overscroll-behavior: none;
@@ -59,6 +64,9 @@ body {
   height: var(--app-height, 100%);
   max-height: 100%;
   overflow: hidden;
+  /* Only the terminal pane opts back into touch scrolling. This prevents
+     iOS from panning the visual viewport over the unused layout-height gap. */
+  touch-action: none;
   display: grid;
   grid-template-rows: 38px 34px minmax(0, 1fr) 38px;
 }
@@ -329,6 +337,17 @@ body.with-toolbar.with-screen-keyboard {
   white-space: nowrap;
 }
 
+.steal-client {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 2px 8px;
+  color: #fff;
+  background: #8a6d1f;
+  border-color: #e7c547;
+}
+.steal-client[hidden] { display: none; }
+.steal-client:disabled { opacity: 0.6; }
+
 .staged-input-form {
   flex: 0 1 520px;
   min-width: 150px;
@@ -375,9 +394,22 @@ body.with-toolbar.with-screen-keyboard {
 .actions { margin-left: auto; display: flex; gap: 4px; }
 
 .icon-btn {
-  min-width: 28px;
+  min-width: 30px;
   padding: 3px 7px;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ui-icon {
+  width: 17px;
+  height: 17px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* Recording indicator: a lit button is the only hint that input is being
@@ -419,7 +451,6 @@ button.mode-toggle[aria-pressed="true"],
   min-width: 32px;
   padding: 3px 7px;
   color: var(--muted);
-  font-size: 16px;
   white-space: nowrap;
 }
 
@@ -438,6 +469,9 @@ button.mode-toggle[aria-pressed="true"],
    When the window is larger, the leftover area is filled by .dot-pad. */
 .panes .pane {
   overflow: auto;
+  /* xterm places its helper at -9999em; iOS may pan the outer viewport when
+     that off-screen field receives focus. Keep it invisible but in-flow. */
+  contain: layout;
   /* One-finger panning is how a phone reaches the wider/taller PC grid.
      Pinch zoom is excluded: it desynchronises the fixed terminal cells from
      the visual viewport (and would look like a soft keyboard to our
@@ -522,6 +556,10 @@ button.mode-toggle[aria-pressed="true"],
 
 .pane .xterm {
   height: 100%;
+}
+
+.pane .xterm-helper-textarea {
+  left: 0 !important;
 }
 
 .empty-state {

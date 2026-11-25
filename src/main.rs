@@ -172,7 +172,10 @@ fn main() {
         std::process::exit(1);
     }
     if let Err(err) = crate::web_socket::start_ws_server(&cli.ws_addr, api_tx) {
-        eprintln!("failed to start web data stream on {}: {err:#}", cli.ws_addr);
+        eprintln!(
+            "failed to start web data stream on {}: {err:#}",
+            cli.ws_addr
+        );
         std::process::exit(1);
     }
 
@@ -181,7 +184,17 @@ fn main() {
         cx.bind_keys(crate::platform::key_bindings());
         cx.set_menus(crate::platform::app_menu());
 
-        let bounds = Bounds::centered(None, size(px(1000.0), px(520.0)), cx);
+        let initial_size = cx
+            .primary_display()
+            .map(|display| {
+                let display_size = display.bounds().size;
+                size(
+                    px(f32::from(display_size.width) * 0.5),
+                    px(f32::from(display_size.height) * 0.5),
+                )
+            })
+            .unwrap_or_else(|| size(px(1000.0), px(520.0)));
+        let bounds = Bounds::centered(None, initial_size, cx);
         let cli = cli.clone();
         let api_rx = api_rx.clone();
         cx.open_window(

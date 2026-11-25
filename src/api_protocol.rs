@@ -50,21 +50,50 @@ pub(crate) struct WebClientRequest {
     pub(crate) rows: u16,
     #[serde(default, alias = "web_fit")]
     pub(crate) browser_size: bool,
+    #[serde(default)]
+    pub(crate) force: bool,
 }
 
 #[derive(Debug)]
 pub(crate) enum ApiCommand {
-    ListTabs { reply: Sender<ApiReply> },
-    CreateTab { reply: Sender<ApiReply> },
-    CloseTab { id: TabSelector, reply: Sender<ApiReply> },
-    ActivateTab { id: TabSelector, reply: Sender<ApiReply> },
-    GetTab { id: TabSelector, reply: Sender<ApiReply> },
-    GetScreen { id: TabSelector, reply: Sender<ApiReply> },
+    ListTabs {
+        reply: Sender<ApiReply>,
+    },
+    CreateTab {
+        reply: Sender<ApiReply>,
+    },
+    CloseTab {
+        id: TabSelector,
+        reply: Sender<ApiReply>,
+    },
+    ActivateTab {
+        id: TabSelector,
+        reply: Sender<ApiReply>,
+    },
+    GetTab {
+        id: TabSelector,
+        reply: Sender<ApiReply>,
+    },
+    GetScreen {
+        id: TabSelector,
+        reply: Sender<ApiReply>,
+    },
     /// Whole-screen repaint encoded as ANSI (colour + cursor + alt-screen flag
     /// in the first byte) for the built-in xterm.js web client.
-    GetScreenAnsi { id: TabSelector, reply: Sender<ApiReply> },
-    GetScrollback { id: TabSelector, lines: Option<usize>, reply: Sender<ApiReply> },
-    ScrollDisplay { id: TabSelector, action: ScrollAction, reply: Sender<ApiReply> },
+    GetScreenAnsi {
+        id: TabSelector,
+        reply: Sender<ApiReply>,
+    },
+    GetScrollback {
+        id: TabSelector,
+        lines: Option<usize>,
+        reply: Sender<ApiReply>,
+    },
+    ScrollDisplay {
+        id: TabSelector,
+        action: ScrollAction,
+        reply: Sender<ApiReply>,
+    },
     ResizeTab {
         id: TabSelector,
         cols: u16,
@@ -81,12 +110,37 @@ pub(crate) enum ApiCommand {
         cols: u16,
         rows: u16,
         browser_size: bool,
+        force: bool,
         reply: Sender<ApiReply>,
     },
-    WriteInput { id: TabSelector, bytes: Vec<u8>, reply: Sender<ApiReply> },
-    SendKeys { id: TabSelector, body: String, reply: Sender<ApiReply> },
-    SetNote { id: TabSelector, note: Option<String>, reply: Sender<ApiReply> },
-    ReplaceLine { id: TabSelector, bytes: Vec<u8>, reply: Sender<ApiReply> },
+    /// Browser input is fenced to the current owner so a displaced client
+    /// cannot write during its heartbeat/reconnect grace window.
+    WebInput {
+        id: TabSelector,
+        client: String,
+        bytes: Vec<u8>,
+        reply: Sender<ApiReply>,
+    },
+    WriteInput {
+        id: TabSelector,
+        bytes: Vec<u8>,
+        reply: Sender<ApiReply>,
+    },
+    SendKeys {
+        id: TabSelector,
+        body: String,
+        reply: Sender<ApiReply>,
+    },
+    SetNote {
+        id: TabSelector,
+        note: Option<String>,
+        reply: Sender<ApiReply>,
+    },
+    ReplaceLine {
+        id: TabSelector,
+        bytes: Vec<u8>,
+        reply: Sender<ApiReply>,
+    },
     /// Attach a WebSocket data stream to a tab. The reply carries the current
     /// screen as an ANSI repaint so the browser can seed xterm before any
     /// incremental PTY bytes arrive (no gap, no double-apply).
@@ -104,7 +158,10 @@ pub(crate) enum ApiCommand {
     /// Drop one specific stream when its WebSocket closes. The heartbeat
     /// registry is deliberately untouched here — HTTP `connected:false` and
     /// the 5 s stale timeout own client lifetime.
-    WebStreamDetach { stream_id: u64, reply: Sender<ApiReply> },
+    WebStreamDetach {
+        stream_id: u64,
+        reply: Sender<ApiReply>,
+    },
 }
 
 #[derive(Debug)]
@@ -122,7 +179,16 @@ pub(crate) enum ReplyBody {
 #[derive(Debug)]
 pub(crate) enum RouteOutcome {
     Command(ApiCommand, Receiver<ApiReply>),
-    Immediate { status: u16, content_type: &'static str, body: String },
+    Immediate {
+        status: u16,
+        content_type: &'static str,
+        body: String,
+    },
+    ImmediateBinary {
+        status: u16,
+        content_type: &'static str,
+        body: Vec<u8>,
+    },
 }
 
 pub(crate) fn oneshot() -> (Sender<ApiReply>, Receiver<ApiReply>) {

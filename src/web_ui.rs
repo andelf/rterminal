@@ -19,6 +19,11 @@ mod embedded {
     pub(crate) const APP_JS: &str = "";
     pub(crate) const XTERM_JS: &str = "";
     pub(crate) const XTERM_CSS: &str = "";
+    pub(crate) const MANIFEST: &str = "";
+    pub(crate) const ICON_SVG: &[u8] = b"";
+    pub(crate) const ICON_192: &[u8] = b"";
+    pub(crate) const ICON_512: &[u8] = b"";
+    pub(crate) const APPLE_TOUCH_ICON: &[u8] = b"";
 }
 
 #[cfg(not(debug_assertions))]
@@ -28,6 +33,11 @@ mod embedded {
     pub(crate) const APP_JS: &str = include_str!("../web/app.js");
     pub(crate) const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
     pub(crate) const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
+    pub(crate) const MANIFEST: &str = include_str!("../web/manifest.webmanifest");
+    pub(crate) const ICON_SVG: &[u8] = include_bytes!("../web/icons/icon.svg");
+    pub(crate) const ICON_192: &[u8] = include_bytes!("../web/icons/icon-192.png");
+    pub(crate) const ICON_512: &[u8] = include_bytes!("../web/icons/icon-512.png");
+    pub(crate) const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../web/icons/apple-touch-icon.png");
 }
 
 /// Locate the source `web/` directory. The executable is usually in
@@ -60,6 +70,16 @@ fn find_web_dir() -> Option<PathBuf> {
     }
 }
 
+fn load_bytes(rel: &str, embedded: &[u8]) -> Vec<u8> {
+    if let Some(dir) = find_web_dir() {
+        let path = dir.join(rel);
+        if let Ok(bytes) = fs::read(path) {
+            return bytes;
+        }
+    }
+    embedded.to_vec()
+}
+
 fn load(rel: &str, embedded: &str) -> String {
     if let Some(dir) = find_web_dir() {
         let path = dir.join(rel);
@@ -70,7 +90,43 @@ fn load(rel: &str, embedded: &str) -> String {
     embedded.to_string()
 }
 
+fn binary(content_type: &'static str, body: Vec<u8>) -> RouteOutcome {
+    RouteOutcome::ImmediateBinary {
+        status: 200,
+        content_type,
+        body,
+    }
+}
+
 pub(crate) fn static_response(path: &str) -> Option<RouteOutcome> {
+    match path {
+        "/favicon.svg" | "/web/icons/icon.svg" => {
+            return Some(binary(
+                "image/svg+xml",
+                load_bytes("icons/icon.svg", embedded::ICON_SVG),
+            ));
+        }
+        "/web/icons/icon-192.png" => {
+            return Some(binary(
+                "image/png",
+                load_bytes("icons/icon-192.png", embedded::ICON_192),
+            ));
+        }
+        "/web/icons/icon-512.png" => {
+            return Some(binary(
+                "image/png",
+                load_bytes("icons/icon-512.png", embedded::ICON_512),
+            ));
+        }
+        "/web/icons/apple-touch-icon.png" => {
+            return Some(binary(
+                "image/png",
+                load_bytes("icons/apple-touch-icon.png", embedded::APPLE_TOUCH_ICON),
+            ));
+        }
+        _ => {}
+    }
+
     let (content_type, body) = match path {
         "/web" | "/web/" | "/web/index.html" => (
             "text/html; charset=utf-8",
@@ -83,6 +139,10 @@ pub(crate) fn static_response(path: &str) -> Option<RouteOutcome> {
         "/web/app.js" => (
             "text/javascript; charset=utf-8",
             load("app.js", embedded::APP_JS),
+        ),
+        "/web/manifest.webmanifest" => (
+            "application/manifest+json; charset=utf-8",
+            load("manifest.webmanifest", embedded::MANIFEST),
         ),
         "/web/vendor/xterm.min.js" => (
             "text/javascript; charset=utf-8",
@@ -113,6 +173,7 @@ mod tests {
             "/web/index.html",
             "/web/style.css",
             "/web/app.js",
+            "/web/manifest.webmanifest",
             "/web/vendor/xterm.min.js",
             "/web/vendor/xterm.min.css",
         ] {
@@ -120,6 +181,28 @@ mod tests {
                 RouteOutcome::Immediate { status, body, .. } => {
                     assert_eq!(status, 200);
                     assert!(!body.is_empty());
+                }
+                other => panic!("unexpected outcome for {path}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn serves_binary_icons() {
+        for (path, signature) in [
+            ("/web/icons/icon-192.png", &[0x89, 0x50, 0x4e, 0x47][..]),
+            ("/web/icons/icon-512.png", &[0x89, 0x50, 0x4e, 0x47][..]),
+            (
+                "/web/icons/apple-touch-icon.png",
+                &[0x89, 0x50, 0x4e, 0x47][..],
+            ),
+            ("/web/icons/icon.svg", b"<svg"),
+            ("/favicon.svg", b"<svg"),
+        ] {
+            match static_response(path).expect("known icon") {
+                RouteOutcome::ImmediateBinary { status, body, .. } => {
+                    assert_eq!(status, 200);
+                    assert!(body.starts_with(signature), "unexpected asset at {path}");
                 }
                 other => panic!("unexpected outcome for {path}: {other:?}"),
             }

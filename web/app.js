@@ -8,14 +8,13 @@ const tabStrip = document.getElementById("tabs");
 const panes = document.getElementById("panes");
 const statusEl = document.getElementById("status");
 const statusBar = document.querySelector(".statusbar");
+const stealClientButton = document.getElementById("steal-client");
 const stagedInputForm = document.getElementById("staged-input-form");
 const stagedInput = document.getElementById("staged-input");
 const scrollbackView = document.getElementById("scrollback-view");
 const emptyState = document.getElementById("empty-state");
 const sizeModeButton = document.getElementById("size-mode");
-const sizeModeLabel = document.getElementById("size-mode-label");
 const keyboardModeButton = document.getElementById("keyboard-mode");
-const keyboardModeLabel = document.getElementById("keyboard-mode-label");
 const screenKeyboard = document.getElementById("screen-keyboard");
 const skLayoutHolder = document.getElementById("sk-layout");
 const skLayoutToggle = document.getElementById("sk-layout-toggle");
@@ -90,7 +89,6 @@ const state = {
 };
 function applySizeModeUi() {
   const browser = state.sizeMode === "browser";
-  sizeModeLabel.textContent = "🖥";
   sizeModeButton.setAttribute("aria-label", browser
     ? "Browser size active; switch to PC size"
     : "PC size active; switch to browser size");
@@ -126,14 +124,15 @@ const clientId = (() => {
   }
 })();
 
-async function notifyClient(connected) {
+async function notifyClient(connected, force = false) {
   const tab = currentTab();
   const body = JSON.stringify({
     id: clientId,
     connected,
     cols: tab ? tab.term.cols : 80,
     rows: tab ? tab.term.rows : 24,
-    browser_size: state.sizeMode === "browser"
+    browser_size: state.sizeMode === "browser",
+    force
   });
   try {
     const response = await fetch("/web/client", {
@@ -148,9 +147,12 @@ async function notifyClient(connected) {
     }
     state.webConnected = connected;
     if (connected) state.clientBlocked = false;
+    stealClientButton.hidden = true;
+    return true;
   } catch (error) {
     if (connected && /409|already connected/.test(String(error))) {
       statusEl.textContent = "Another web client is connected";
+      stealClientButton.hidden = false;
       const active = currentTab();
       if (active) stopPolling(active);
       if (!state.clientBlocked) {
@@ -166,7 +168,23 @@ async function notifyClient(connected) {
       report(error);
     }
   }
+  return false;
 }
+
+stealClientButton.addEventListener("click", async () => {
+  stealClientButton.disabled = true;
+  try {
+    if (await notifyClient(true, true)) {
+      // Invalidate every old socket/reconnect before attaching the new owner.
+      for (const tab of state.tabs.values()) stopPolling(tab);
+      await refresh();
+      const active = currentTab();
+      if (active) startStream(active);
+    }
+  } finally {
+    stealClientButton.disabled = false;
+  }
+});
 
 window.addEventListener("beforeunload", () => {
   const body = JSON.stringify({
@@ -297,7 +315,10 @@ function flushDebug(beacon) {
 }
 
 function debugHeaders() {
-  return debug.on ? { "X-Rterminal-Debug": "1" } : undefined;
+  return {
+    "X-Rterminal-Client": clientId,
+    ...(debug.on ? { "X-Rterminal-Debug": "1" } : {})
+  };
 }
 
 function sessionFacts(tab) {
@@ -313,6 +334,14 @@ function sessionFacts(tab) {
     vw: viewport ? Math.round(viewport.width) : null,
     vh: viewport ? Math.round(viewport.height) : null,
     scale: viewport ? viewport.scale : null,
+    offset: viewport ? [Math.round(viewport.offsetLeft), Math.round(viewport.offsetTop)] : null,
+    scroll: [Math.round(window.scrollX), Math.round(window.scrollY)],
+    scrollSize: document.scrollingElement
+      ? [document.scrollingElement.scrollWidth, document.scrollingElement.scrollHeight]
+      : null,
+    appHeight: appViewportHeight(),
+    rootHeight: Math.round(document.documentElement.getBoundingClientRect().height),
+    bodyHeight: Math.round(document.body.getBoundingClientRect().height),
     // Document geometry, so a "the page scrolls for no reason" report can be
     // checked from the log alone: the two numbers must stay equal.
     doc: (() => {
@@ -1593,7 +1622,6 @@ function applyKeyboardModeUi() {
   keyboardModeButton.setAttribute("aria-label", screen
     ? "Screen keyboard active; switch to system keyboard"
     : "System keyboard active; switch to screen keyboard");
-  keyboardModeLabel.textContent = screen ? "▦" : "⌨";
   screenKeyboard.hidden = !screen;
   document.body.classList.toggle("with-screen-keyboard", screen);
 }
@@ -2479,6 +2507,14 @@ function syncViewportHeight() {
   }
 
   if (wasActive) {
+    recordViewport("keyboard-close");
+    // iPad Chrome scrolls the root element to reveal a focused bottom input.
+    // Once the keyboard is gone, end that focus-driven pan and restore the
+    // root immediately and again after the viewport transition settles.
+    const active = document.activeElement;
+    if (active && typeof active.blur === "function") active.blur();
+    pinDocument();
+    requestAnimationFrame(pinDocument);
     // Keyboard closed: wait for the layout to settle before allowing another
     // window -> PTY resize, otherwise closing it replays the resize we
     // deliberately skipped on open.
@@ -2486,26 +2522,69 @@ function syncViewportHeight() {
     keyboardTimer = setTimeout(() => {
       keyboardTimer = null;
       normalViewportHeight = visualViewport.height || window.innerHeight;
+      pinDocument();
       scheduleFit();
     }, 200);
   }
 }
 
-// Height the app may occupy: the visual viewport (so it ends above the soft
-// keyboard) clamped to the layout viewport (so it can never overflow).
+// The root element and body both use this height. window.innerHeight and the
+// initial layout viewport include iPad Chrome's browser-chrome-covered strip;
+// visualViewport.height is the actual area available to the application.
 function appViewportHeight() {
-  const layout = document.documentElement.clientHeight || window.innerHeight || 0;
-  const visual = visualViewport ? visualViewport.height || 0 : layout;
-  if (!layout) return visual;
-  if (!visual) return layout;
-  return Math.min(visual, layout);
+  const fallback = window.innerHeight || document.documentElement.clientHeight || 0;
+  return visualViewport ? visualViewport.height || fallback : fallback;
 }
 
 // Belt and braces for engines where overflow:clip is unavailable or the
 // viewport was panned anyway (iOS scrolling an off-screen focused field into
 // view). A no-op once the document is genuinely unscrollable.
 function pinDocument() {
+  const scroller = document.scrollingElement;
+  if (scroller && (scroller.scrollLeft !== 0 || scroller.scrollTop !== 0)) {
+    scroller.scrollLeft = 0;
+    scroller.scrollTop = 0;
+  }
   if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+}
+
+const scrollDebugTimes = new WeakMap();
+function recordDomScroll(event) {
+  const target = event.target;
+  const element = target === document ? document.scrollingElement : target;
+  if (!element) return;
+  const now = Date.now();
+  if (now - (scrollDebugTimes.get(element) || 0) < 250) return;
+  scrollDebugTimes.set(element, now);
+  const active = document.activeElement;
+  dbg("dom-scroll", currentTab(), {
+    target: element.id || element.className || element.tagName,
+    top: Math.round(element.scrollTop || 0),
+    left: Math.round(element.scrollLeft || 0),
+    range: [element.clientWidth, element.clientHeight, element.scrollWidth, element.scrollHeight],
+    active: active ? active.id || active.className || active.tagName : null,
+    ...sessionFacts(currentTab())
+  });
+}
+// Scroll does not bubble, but capture sees the root, pane and xterm scrolling
+// separately. This identifies the actual moving container on keyboard close.
+document.addEventListener("scroll", recordDomScroll, true);
+
+// CSS overflow/touch-action alone does not stop iPad Chrome from scrolling the
+// root for a focused input. Only designated application scrollers may consume
+// a touch drag; every other drag must not move the outer document.
+document.addEventListener("touchmove", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target && target.closest(".pane, .key-scroll, .tabstrip, .screen-keyboard")) return;
+  event.preventDefault();
+}, { passive: false });
+
+let lastViewportDebugAt = 0;
+function recordViewport(event) {
+  const now = Date.now();
+  if (now - lastViewportDebugAt < 250) return;
+  lastViewportDebugAt = now;
+  dbg("viewport", currentTab(), { event, ...sessionFacts(currentTab()) });
 }
 
 if (visualViewport) {
@@ -2514,8 +2593,10 @@ if (visualViewport) {
     syncViewportHeight();
     revealBottom(currentTab());
     scheduleFit();
+    recordViewport("resize");
   });
   visualViewport.addEventListener("scroll", () => {
+    recordViewport("scroll-before-pin");
     pinDocument();
     syncViewportHeight();
     scheduleFit();
@@ -2543,6 +2624,11 @@ buildScreenKeyboard();
 applyKeyboardModeUi();
 keyToolbar.hidden = !state.showToolbar;
 document.body.classList.toggle("with-toolbar", state.showToolbar);
+
+// Register immediately instead of waiting for config, tab construction and a
+// WebSocket attempt. A conflicting client must see Steal as soon as the server
+// answers; clientBlocked then prevents all later stream attempts in refresh().
+notifyClient(true);
 
 // The data-plane port comes from the server so a LAN client (iPad) uses the
 // right port even when the CLI overrides the default.

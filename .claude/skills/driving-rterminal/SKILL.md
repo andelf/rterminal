@@ -16,7 +16,7 @@ Use this skill whenever the work involves:
 
 ## Discovering the API endpoint
 
-The default address is `127.0.0.1:7878`. If rterminal was launched with `--api-addr`, use that. When unsure, ask the user or default to the documented port. The server only binds to loopback — no auth needed, but also no remote access.
+The default address is `127.0.0.1:7878`. If rterminal was launched with `--api-addr`, use that. When unsure, ask the user or default to the documented port. The server binds to loopback by default and has no authentication; do not expose it on a non-loopback interface unless you understand the risk.
 
 Quick liveness check:
 ```bash
@@ -38,6 +38,7 @@ All responses are JSON unless noted. Errors return `{"error":"..."}` with the ap
 | `GET` | `/tabs/:id/screen` | Current visible screen as plain text |
 | `GET` | `/tabs/:id/scrollback?lines=N` | Plain text: last N content rows of history + viewport (default = all, capped at 10000) |
 | `POST` | `/tabs/:id/scroll` | Move the viewport. JSON body `{"action":"up\|down\|page_up\|page_down\|top\|bottom","lines":N}` |
+| `POST` | `/tabs/:id/resize` | Resize the grid. JSON body `{"cols":100,"rows":30,"sync_window":false}` |
 | `POST` | `/tabs/:id/input` | Write raw bytes to PTY (any content-type) |
 | `POST` | `/tabs/:id/keys` | tmux-style key tokens (`Enter`, `C-c`, `Up`, `"text"`) |
 
@@ -314,9 +315,9 @@ The server has **no per-request timeout** today — clients should add their own
 ## Limits to be aware of
 
 - **`/screen` only shows the visible viewport.** Use `GET /tabs/:id/scrollback` to read history beyond what fits on screen. Up to 10000 rows of history are retained by the underlying terminal — older content is gone.
-- **No resize endpoint.** The tab's grid follows the GUI window — adjust the window size if you need more rows/cols.
+- **Resize bounds.** `/resize` accepts 20–300 columns and 5–200 rows. By default only the PTY grid changes; `"sync_window":true` also resizes the native window.
 - **Snapshot tabs are read-only.** Writes return 409. You can identify them via `kind: "snapshot"` in `GET /tabs`.
-- **No streaming.** All reads are pull-based. Implement waits client-side.
+- **No agent-facing streaming endpoint.** Implement waits by polling the HTTP API. The built-in browser client has a separate WebSocket data plane for its own live view.
 - **`active` is mutable.** Between calls the user may have switched tabs in the GUI. If you need a stable target, pin to a numeric id from the start.
 
 ## When NOT to use this skill

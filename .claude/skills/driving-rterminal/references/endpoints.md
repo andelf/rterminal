@@ -28,7 +28,7 @@ List all tabs and the active id.
 }
 ```
 
-`active` is `null` when there are no tabs (rare — normally rterminal always has ≥1 tab while the window is open).
+`active` is `null` when there are no tabs. Closing the last tab leaves an empty native window and keeps the HTTP/Web service running; `POST /tabs` creates a new tab.
 `kind` is `"terminal"` for live shells, `"snapshot"` for read-only captured views.
 
 ### `POST /tabs`
@@ -53,7 +53,7 @@ Close a tab. Works for both terminal and snapshot tabs.
 
 **Error:** 404 if the id is unknown.
 
-If the closed tab was the last one, rterminal quits.
+If the closed tab was the last one, rterminal keeps an empty window open instead of quitting, so the HTTP and browser services remain available.
 
 ### `POST /tabs/:id/activate`
 
@@ -163,6 +163,30 @@ Move the visible viewport up/down through history.
 
 After a scroll, subsequent `GET /tabs/:id/screen` returns the new viewport position; the GUI also reflects the change. Use `/scrollback` instead when you only want to *read* history without moving what the user sees.
 
+## Grid resize
+
+### `POST /tabs/:id/resize`
+
+Resize the terminal grid.
+
+**Request body:** `application/json`
+```json
+{"cols": 100, "rows": 30, "sync_window": false}
+```
+
+`cols` must be 20–300 and `rows` 5–200. `sync_window` is optional and defaults to `false`; when true, the native window is also resized to fit the requested grid. This is the behavior used by the browser client's **Browser size** mode.
+
+**Response 200:**
+```json
+{"cols": 100, "rows": 30}
+```
+
+**Errors:**
+- 400 for malformed JSON or out-of-range dimensions
+- 404 for an unknown tab
+- 409 for a snapshot tab
+- 503 if the PTY cannot be resized
+
 ## Input
 
 ### `POST /tabs/:id/input`
@@ -231,9 +255,8 @@ All error bodies have shape `{"error": "<message>"}` with `Content-Type: applica
 
 The spec acknowledges these gaps; if you hit one, work around it client-side or surface to the user:
 
-- **No resize endpoint** — grid size follows the GUI window.
-- **No rename endpoint** — but the shell can emit `\e]0;new title\a` (OSC 0) which rterminal honours and surfaces via `tab_title`.
-- **No streaming / SSE** — all reads are pull-based. Poll `/screen` or `counters.bytes_from_pty`.
+- **No rename endpoint** — but the shell can emit `\e]0;new title\a` (OSC 0) which rterminal honours and surfaces via `title`.
+- **No agent-facing streaming / SSE endpoint** — poll `/screen` or `counters.bytes_from_pty`. The built-in browser UI uses a separate WebSocket data plane on `127.0.0.1:7879` by default (`--ws-addr`).
 - **No per-request timeout on the server side** — clients should use `curl --max-time 5` or equivalent to bound their waits.
-- **No auth** — the server only binds to loopback, so this is fine for single-user machines. Don't run rterminal on a shared host with `--api-addr 0.0.0.0:...`.
+- **No auth** — the server binds to loopback by default. Don't use `--api-addr 0.0.0.0:...` on a shared or untrusted network.
 - **`POST /tabs` takes no parameters** — can't specify `cwd`, `command`, or environment. Workaround: create the tab, then `POST /input` a `cd …` and the command you want to run.

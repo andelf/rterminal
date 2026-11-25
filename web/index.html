@@ -4,23 +4,39 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>rterminal · web</title>
+  <meta name="theme-color" content="#171a21">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="rterminal">
+  <link rel="icon" href="/web/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" sizes="180x180" href="/web/icons/apple-touch-icon.png">
+  <link rel="manifest" href="/web/manifest.webmanifest">
   <link rel="stylesheet" href="/web/vendor/xterm.min.css">
-  <link rel="stylesheet" href="/web/style.css">
+  <link rel="stylesheet" href="/web/style.css?v=viewport-3">
 </head>
 <body>
+  <!-- Lucide Icons (ISC): web/vendor/lucide-LICENSE -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l4 2"/></symbol>
+    <symbol id="i-rotate-ccw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></symbol>
+    <symbol id="i-command" viewBox="0 0 24 24"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></symbol>
+    <symbol id="i-bug" viewBox="0 0 24 24"><path d="m8 2 1.5 1.5M16 2l-1.5 1.5M3 12h4M17 12h4M5 5l2 2M19 5l-2 2M5 19l2-2M19 19l-2-2M7 12h10"/><rect x="7" y="6" width="10" height="16" rx="5"/></symbol>
+    <symbol id="i-proportions" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M3 9h18"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M10 13h.01M14 13h.01M18 13h.01M8 17h8"/></symbol>
+  </svg>
   <header class="topbar">
     <span class="brand">rterminal<span class="brand-dim"> / web</span></span>
     <div class="actions">
-      <button id="new-tab" class="icon-btn" title="New tab">+</button>
-      <button id="scrollback" class="icon-btn" title="Scrollback">↕</button>
-      <button id="refresh" class="icon-btn" title="Refresh tabs">↻</button>
-      <button id="toggle-toolbar" class="icon-btn" title="Toggle key toolbar" aria-label="Toggle terminal key toolbar" aria-pressed="false">⌘</button>
-      <button id="debug" class="icon-btn" title="Record keydown, composition, beforeinput, input, and transmitted bytes in the server log. Retrieve the log with GET /web/debug/log." aria-pressed="false">◎</button>
+      <button id="new-tab" class="icon-btn" title="New tab" aria-label="New tab"><svg class="ui-icon" aria-hidden="true"><use href="#i-plus"/></svg></button>
+      <button id="scrollback" class="icon-btn" title="Scrollback" aria-label="Open scrollback"><svg class="ui-icon" aria-hidden="true"><use href="#i-history"/></svg></button>
+      <button id="refresh" class="icon-btn" title="Refresh tabs" aria-label="Refresh tabs"><svg class="ui-icon" aria-hidden="true"><use href="#i-rotate-ccw"/></svg></button>
+      <button id="toggle-toolbar" class="icon-btn" title="Toggle key toolbar" aria-label="Toggle terminal key toolbar" aria-pressed="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-command"/></svg></button>
+      <button id="debug" class="icon-btn" title="Record keydown, composition, beforeinput, input, and transmitted bytes in the server log. Retrieve the log with GET /web/debug/log." aria-label="Toggle input debug recording" aria-pressed="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-bug"/></svg></button>
       <button id="size-mode" class="mode-toggle" aria-pressed="false" title="Switch grid size control. PC size (default): the browser mirrors the native window. Browser size: the native window matches this viewport.">
-        <span id="size-mode-label" class="mode-icon" aria-hidden="true">🖥</span>
+        <span id="size-mode-label" class="mode-icon" aria-hidden="true"><svg class="ui-icon"><use href="#i-proportions"/></svg></span>
       </button>
       <button id="keyboard-mode" class="mode-toggle" aria-pressed="false" title="Switch input method. System keyboard (default): use the OS keyboard with dictation and IME. Screen keyboard: use the built-in keyboard without opening the OS keyboard.">
-        <span id="keyboard-mode-label" class="mode-icon" aria-hidden="true">⌨</span>
+        <span id="keyboard-mode-label" class="mode-icon" aria-hidden="true"><svg class="ui-icon"><use href="#i-keyboard"/></svg></span>
       </button>
     </div>
   </header>
@@ -50,6 +66,7 @@
 
   <footer class="statusbar">
     <span id="status">connecting…</span>
+    <button id="steal-client" class="steal-client" type="button" title="Disconnect the other web client and take over this terminal" hidden>Steal</button>
     <form id="staged-input-form" class="staged-input-form" autocomplete="off">
       <input id="staged-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="input any text" aria-label="Text to insert into the active terminal; empty submission sends Enter" title="Type or dictate text. Click Input or press Enter to insert it. Empty submission sends Enter; Backspace on an empty field deletes in the terminal.">
       <button id="staged-input-send" type="submit" title="Insert text at the active terminal cursor; submit an empty field to send Enter">Input</button>
@@ -57,6 +74,6 @@
   </footer>
 
   <script src="/web/vendor/xterm.min.js"></script>
-  <script src="/web/app.js"></script>
+  <script src="/web/app.js?v=viewport-3"></script>
 </body>
 </html>

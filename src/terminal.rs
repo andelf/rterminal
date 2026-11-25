@@ -529,6 +529,12 @@ impl AgentTerminal {
         rx
     }
 
+    pub(crate) fn detach_other_web_streams(&mut self, owner: &str) {
+        // Dropping a sender closes its receiver and wakes the old socket
+        // thread even when the PTY is idle.
+        self.web_streams.retain(|(_, client, _)| client == owner);
+    }
+
     pub(crate) fn detach_web_stream(&mut self, stream_id: u64) {
         // Never match on client id: attach and detach run on different threads
         // and an old connection's detach can overtake a new one's attach.

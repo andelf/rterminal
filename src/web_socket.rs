@@ -153,8 +153,9 @@ fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), Str
                     crate::web_debug::append_input(&format!("/ws/tabs/{tab_id}"), &data);
                 }
                 let (reply_tx, reply_rx) = oneshot();
-                let cmd = ApiCommand::WriteInput {
+                let cmd = ApiCommand::WebInput {
                     id: TabSelector::Id(tab_id),
+                    client: client.clone(),
                     bytes: data.to_vec(),
                     reply: reply_tx,
                 };
@@ -262,6 +263,7 @@ fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &str) -
                         .get("browser_size")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    force: false,
                     reply: reply_tx,
                 })
                 .is_ok()

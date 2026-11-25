@@ -93,12 +93,15 @@ pub(crate) struct TerminalTabs {
     next_tab_id: usize,
     next_snapshot_id: usize,
     pending_focus_sync: bool,
-    pending_create_requests: Vec<async_channel::Sender<crate::api_protocol::ApiReply>>,
     web_client: Option<WebClientInfo>,
     pending_sync_to_window: bool,
     /// "浏览器尺寸" mode: resize the native window to fit this grid. Consumed
     /// in render(), the only place with a `&mut Window`.
     pending_window_resize: Option<crate::terminal::GridSize>,
+    default_window_size: gpui::Size<gpui::Pixels>,
+    browser_size_restore: Option<gpui::Size<gpui::Pixels>>,
+    browser_size_target: Option<gpui::Size<gpui::Pixels>>,
+    pending_window_restore: bool,
     _api_drain: Task<()>,
 }
 
@@ -111,7 +114,12 @@ impl TerminalTabs {
     ) -> Self {
         let api_drain = cx.spawn(async move |this, cx| {
             while let Ok(cmd) = api_rx.recv().await {
-                let _ = this.update(cx, |this, cx| this.apply_api_command(cmd, cx));
+                // update_in supplies the Window directly from the app context.
+                // Unlike deferring work to render(), this still runs while the
+                // screen is locked or the native window is not being redrawn.
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.apply_api_command(cmd, window, cx)
+                });
             }
         });
 
@@ -122,10 +130,13 @@ impl TerminalTabs {
             next_tab_id: 1,
             next_snapshot_id: 1,
             pending_focus_sync: false,
-            pending_create_requests: Vec::new(),
             web_client: None,
             pending_sync_to_window: false,
             pending_window_resize: None,
+            default_window_size: window.viewport_size(),
+            browser_size_restore: None,
+            browser_size_target: None,
+            pending_window_restore: false,
             _api_drain: api_drain,
         };
 
@@ -329,7 +340,12 @@ impl TerminalTabs {
         (on_switch_to_tab10, crate::SwitchToTab10, 9),
     );
 
-    fn apply_api_command(&mut self, cmd: crate::api_protocol::ApiCommand, cx: &mut Context<Self>) {
+    fn apply_api_command(
+        &mut self,
+        cmd: crate::api_protocol::ApiCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, TabSelector, TabSummaryDto};
 
         // Count this request against the targeted tab so that `http_requests`
@@ -345,6 +361,7 @@ impl TerminalTabs {
             | ApiCommand::ScrollDisplay { id, .. }
             | ApiCommand::ResizeTab { id, .. }
             | ApiCommand::WriteInput { id, .. }
+            | ApiCommand::WebInput { id, .. }
             | ApiCommand::SendKeys { id, .. }
             | ApiCommand::SetNote { id, .. }
             | ApiCommand::ReplaceLine { id, .. }
@@ -377,9 +394,18 @@ impl TerminalTabs {
             }
 
             ApiCommand::CreateTab { reply } => {
-                // Defer until next render where we have &mut Window.
-                self.pending_create_requests.push(reply);
-                cx.notify();
+                self.open_new_tab(window, cx);
+                let summary = self
+                    .tabs
+                    .last()
+                    .map(|tab| build_tab_summary(tab, cx))
+                    .expect("just-created tab must be present");
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 201,
+                    body: ReplyBody::Json(
+                        serde_json::to_value(summary).unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                });
             }
 
             ApiCommand::CloseTab { id, reply } => {
@@ -460,7 +486,13 @@ impl TerminalTabs {
                 });
             }
 
-            ApiCommand::ResizeTab { id, cols, rows, sync_window, reply } => {
+            ApiCommand::ResizeTab {
+                id,
+                cols,
+                rows,
+                sync_window,
+                reply,
+            } => {
                 let Some((_, tab)) = self.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -492,27 +524,41 @@ impl TerminalTabs {
                 cols: _cols,
                 rows: _rows,
                 browser_size,
+                force,
                 reply,
             } => {
                 let now = Instant::now();
-                let stale = self
-                    .web_client
-                    .as_ref()
-                    .is_some_and(|client| now.duration_since(client.last_seen) > WEB_CLIENT_TIMEOUT);
+                let stale = self.web_client.as_ref().is_some_and(|client| {
+                    now.duration_since(client.last_seen) > WEB_CLIENT_TIMEOUT
+                });
                 if stale {
                     self.web_client = None;
                     self.pending_sync_to_window = true;
                 }
 
                 if connected {
-                    if let Some(client) = &self.web_client
-                        && client.id != id
-                    {
+                    let replacing = self
+                        .web_client
+                        .as_ref()
+                        .is_some_and(|client| client.id != id);
+                    if replacing && !force {
                         let message = format!(
                             "another web client is already connected: {}",
-                            client.id
+                            self.web_client.as_ref().expect("checked above").id
                         );
                         return reply_err(&reply, 409, &message);
+                    }
+                    if replacing {
+                        // Closing every old sender wakes its socket thread even
+                        // when no PTY output is arriving. The old client's late
+                        // detach remains harmless because it uses a stream id.
+                        for tab in &self.tabs {
+                            if let TerminalTabKind::Terminal { terminal, .. } = &tab.kind {
+                                terminal.update(cx, |term, _| {
+                                    term.detach_other_web_streams(&id)
+                                });
+                            }
+                        }
                     }
                     self.web_client = Some(WebClientInfo { id, last_seen: now });
                     if !browser_size {
@@ -527,12 +573,22 @@ impl TerminalTabs {
                         }
                         self.pending_sync_to_window = true;
                         self.pending_window_resize = None;
+                        self.pending_window_restore = self.browser_size_restore.is_some();
                     }
-                } else if self.web_client.as_ref().is_some_and(|client| client.id == id) {
+                } else if self
+                    .web_client
+                    .as_ref()
+                    .is_some_and(|client| client.id == id)
+                {
                     self.web_client = None;
                     self.pending_sync_to_window = true;
                 }
 
+                // Mode changes update pending window/grid work for render().
+                // Explicitly schedule that render even when the native window
+                // is otherwise static; without this notification switching back
+                // to PC-size mode could wait for an unrelated future repaint.
+                cx.notify();
                 let connected_now = self.web_client.is_some();
                 let _ = reply.send_blocking(ApiReply::Ok {
                     status: 200,
@@ -579,20 +635,33 @@ impl TerminalTabs {
                 });
             }
 
+            ApiCommand::WebInput {
+                id,
+                client,
+                bytes,
+                reply,
+            } => {
+                if !self
+                    .web_client
+                    .as_ref()
+                    .is_some_and(|owner| owner.id == client)
+                {
+                    return reply_err(&reply, 409, "web client ownership changed");
+                }
+                self.with_terminal_write(id, &reply, cx, move |term| term.write_injected(&bytes));
+            }
             ApiCommand::WriteInput { id, bytes, reply } => {
                 self.with_terminal_write(id, &reply, cx, move |term| term.write_injected(&bytes));
             }
 
-            ApiCommand::SendKeys { id, body, reply } => {
-                match crate::api_keys::parse_keys(&body) {
-                    Ok(bytes) => {
-                        self.with_terminal_write(id, &reply, cx, move |term| {
-                            term.write_injected(&bytes)
-                        });
-                    }
-                    Err(err) => reply_err(&reply, 400, &err),
+            ApiCommand::SendKeys { id, body, reply } => match crate::api_keys::parse_keys(&body) {
+                Ok(bytes) => {
+                    self.with_terminal_write(id, &reply, cx, move |term| {
+                        term.write_injected(&bytes)
+                    });
                 }
-            }
+                Err(err) => reply_err(&reply, 400, &err),
+            },
 
             ApiCommand::SetNote { id, note, reply } => {
                 let Some((_, tab)) = self.resolve_tab(id) else {
@@ -618,7 +687,13 @@ impl TerminalTabs {
                 });
             }
 
-            ApiCommand::WebStreamAttach { id, client, stream_id, reply, stream } => {
+            ApiCommand::WebStreamAttach {
+                id,
+                client,
+                stream_id,
+                reply,
+                stream,
+            } => {
                 let Some((_, tab)) = self.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -644,7 +719,10 @@ impl TerminalTabs {
                 {
                     return reply_err(&reply, 409, "another web client is already connected");
                 }
-                self.web_client = Some(WebClientInfo { id: client.clone(), last_seen: now });
+                self.web_client = Some(WebClientInfo {
+                    id: client.clone(),
+                    last_seen: now,
+                });
 
                 // Register the reader and capture the snapshot in the same UI
                 // turn: PTY batches are also applied on this thread, so no
@@ -653,7 +731,13 @@ impl TerminalTabs {
                     let rx = term.attach_web_stream(stream_id, client);
                     let encoded = encode_screen(&term.snapshot, term.term.mode().clone());
                     let alt = encoded.starts_with('1');
-                    (rx, alt, encoded[1..].to_string(), term.grid_size.cols, term.grid_size.rows)
+                    (
+                        rx,
+                        alt,
+                        encoded[1..].to_string(),
+                        term.grid_size.cols,
+                        term.grid_size.rows,
+                    )
                 });
                 let _ = stream.send_blocking(rx);
                 let _ = reply.send_blocking(ApiReply::Ok {
@@ -743,7 +827,13 @@ fn build_tab_summary(
             (TabKind::Snapshot, 0u16, 0u16, snapshot.read(cx).title())
         }
     };
-    TabSummaryDto { id: tab.api_id(), title, kind, cols, rows }
+    TabSummaryDto {
+        id: tab.api_id(),
+        title,
+        kind,
+        cols,
+        rows,
+    }
 }
 
 fn build_tab_detail(
@@ -804,34 +894,49 @@ fn reply_err(
 
 impl Render for TerminalTabs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.pending_create_requests.is_empty() {
-            let replies = std::mem::take(&mut self.pending_create_requests);
-            for reply in replies {
-                self.open_new_tab(window, cx);
-                let summary = self
-                    .tabs
-                    .last()
-                    .map(|tab| build_tab_summary(tab, cx))
-                    .expect("just-created tab must be present");
-                let _ = reply.send_blocking(crate::api_protocol::ApiReply::Ok {
-                    status: 201,
-                    body: crate::api_protocol::ReplyBody::Json(
-                        serde_json::to_value(summary).unwrap_or_else(|_| serde_json::json!({})),
-                    ),
-                });
-            }
-        }
-
         if self.pending_focus_sync {
             self.pending_focus_sync = false;
             self.request_focus_active_tab(window, cx);
         }
 
-        // "浏览器尺寸" mode: a resize command arrived on the API thread, which
-        // has no Window handle. Apply it here where we do. Resizing the window
-        // fires observe_window_bounds -> sync_grid_to_window, but the grid
-        // override is still set, so the browser-driven grid survives.
+        if self.pending_window_restore {
+            self.pending_window_restore = false;
+            if let Some(restore) = self.browser_size_restore.take() {
+                let user_resized = self
+                    .browser_size_target
+                    .is_some_and(|target| !window_sizes_match(window.viewport_size(), target));
+                if !user_resized {
+                    window.resize(restore);
+                }
+            }
+            self.browser_size_target = None;
+        }
+
+        // Browser-size mode needs an ordinary window: fullscreen/maximized
+        // bounds cannot faithfully mirror a small browser grid. Save the
+        // ordinary size once, then restore it when PC-size mode resumes.
         if let Some(grid) = self.pending_window_resize.take() {
+            if self.browser_size_restore.is_none() {
+                let constrained = window.is_fullscreen()
+                    || window.is_simple_fullscreen()
+                    || window.is_maximized();
+                self.browser_size_restore = Some(if constrained {
+                    self.default_window_size
+                } else {
+                    window.viewport_size()
+                });
+            }
+            if window.is_fullscreen() {
+                window.toggle_fullscreen();
+            } else if window.is_simple_fullscreen() {
+                window.toggle_simple_fullscreen();
+            }
+            if window.is_maximized() {
+                window.zoom_window();
+            }
+            // Resizing the window fires observe_window_bounds ->
+            // sync_grid_to_window, but the grid override is still set, so the
+            // browser-driven grid survives.
             if let Some((_, tab)) = self.resolve_tab(crate::api_protocol::TabSelector::Active)
                 && let TerminalTabKind::Terminal { terminal, .. } = &tab.kind
             {
@@ -842,6 +947,7 @@ impl Render for TerminalTabs {
                     terminal.read(cx).font_size,
                 );
                 let target = terminal.read(cx).window_size_for_grid(grid, cell_width);
+                self.browser_size_target = Some(target);
                 window.resize(target);
             }
         }
@@ -879,7 +985,9 @@ impl Render for TerminalTabs {
             })
             .collect();
         let active_content = self.tabs.get(self.active_tab).map(|tab| match &tab.kind {
-            TerminalTabKind::Terminal { terminal, .. } => ActiveTabContent::Terminal(terminal.clone()),
+            TerminalTabKind::Terminal { terminal, .. } => {
+                ActiveTabContent::Terminal(terminal.clone())
+            }
             TerminalTabKind::Snapshot { snapshot } => ActiveTabContent::Snapshot(snapshot.clone()),
         });
 
@@ -916,12 +1024,7 @@ impl Render for TerminalTabs {
 
         let this = this.clone();
         let tabs_row = if web_connected {
-            tabs_row.child(
-                div()
-                    .px_2()
-                    .text_color(rgb(0x7ee2b8))
-                    .child("● web 已连接"),
-            )
+            tabs_row.child(div().px_2().text_color(rgb(0x7ee2b8)).child("● web 已连接"))
         } else {
             tabs_row
         };
@@ -997,6 +1100,13 @@ fn next_active_tab_index(active: usize, removed: usize, remaining_len: usize) ->
     }
 }
 
+fn window_sizes_match(a: gpui::Size<gpui::Pixels>, b: gpui::Size<gpui::Pixels>) -> bool {
+    // Platform window callbacks can round logical pixels differently. Treat
+    // subpixel/one-pixel rounding as the same size, not a user resize.
+    (f32::from(a.width) - f32::from(b.width)).abs() <= 1.0
+        && (f32::from(a.height) - f32::from(b.height)).abs() <= 1.0
+}
+
 fn truncate_tab_title(title: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -1018,7 +1128,7 @@ fn truncate_tab_title(title: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_active_tab_index, truncate_tab_title};
+    use super::{next_active_tab_index, truncate_tab_title, window_sizes_match};
 
     #[test]
     fn closing_tab_before_active_shifts_active_left() {
@@ -1036,13 +1146,29 @@ mod tests {
     }
 
     #[test]
+    fn window_restore_tolerates_pixel_rounding_but_not_user_resize() {
+        let target = gpui::size(gpui::px(800.0), gpui::px(500.0));
+        assert!(window_sizes_match(
+            target,
+            gpui::size(gpui::px(800.5), gpui::px(499.5))
+        ));
+        assert!(!window_sizes_match(
+            target,
+            gpui::size(gpui::px(900.0), gpui::px(500.0))
+        ));
+    }
+
+    #[test]
     fn truncate_tab_title_keeps_short_title() {
         assert_eq!(truncate_tab_title("short", 10), "short");
     }
 
     #[test]
     fn truncate_tab_title_adds_ellipsis_for_long_title() {
-        assert_eq!(truncate_tab_title("abcdefghijklmnopqrstuvwxyz", 10), "abcdefg...");
+        assert_eq!(
+            truncate_tab_title("abcdefghijklmnopqrstuvwxyz", 10),
+            "abcdefg..."
+        );
     }
 
     #[test]

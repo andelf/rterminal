@@ -22,11 +22,22 @@ pub(crate) struct RouteError {
     pub(crate) message: String,
 }
 
+#[cfg(test)]
 pub(crate) fn parse_request(
     method: &str,
     path: &str,
     query: &str,
     body: Vec<u8>,
+) -> Result<RouteOutcome, RouteError> {
+    parse_request_with_client(method, path, query, body, None)
+}
+
+fn parse_request_with_client(
+    method: &str,
+    path: &str,
+    query: &str,
+    body: Vec<u8>,
+    browser_client: Option<String>,
 ) -> Result<RouteOutcome, RouteError> {
     if let Some(outcome) = crate::web_ui::static_response(path) {
         return Ok(outcome);
@@ -36,10 +47,7 @@ pub(crate) fn parse_request(
         return Ok(RouteOutcome::Immediate {
             status: 200,
             content_type: "application/json; charset=utf-8",
-            body: format!(
-                "{{\"ws_port\":{}}}",
-                WS_PORT.get().copied().unwrap_or(7879)
-            ),
+            body: format!("{{\"ws_port\":{}}}", WS_PORT.get().copied().unwrap_or(7879)),
         });
     }
 
@@ -50,17 +58,26 @@ pub(crate) fn parse_request(
         // /tabs management
         ("GET", ["tabs"]) => ApiCommand::ListTabs { reply: tx },
         ("POST", ["tabs"]) => ApiCommand::CreateTab { reply: tx },
-        ("DELETE", ["tabs", sel]) => ApiCommand::CloseTab { id: parse_selector(sel)?, reply: tx },
-        ("POST", ["tabs", sel, "activate"]) => {
-            ApiCommand::ActivateTab { id: parse_selector(sel)?, reply: tx }
-        }
-        ("GET", ["tabs", sel]) => ApiCommand::GetTab { id: parse_selector(sel)?, reply: tx },
-        ("GET", ["tabs", sel, "screen"]) => {
-            ApiCommand::GetScreen { id: parse_selector(sel)?, reply: tx }
-        }
-        ("GET", ["tabs", sel, "screen.ansi"]) => {
-            ApiCommand::GetScreenAnsi { id: parse_selector(sel)?, reply: tx }
-        }
+        ("DELETE", ["tabs", sel]) => ApiCommand::CloseTab {
+            id: parse_selector(sel)?,
+            reply: tx,
+        },
+        ("POST", ["tabs", sel, "activate"]) => ApiCommand::ActivateTab {
+            id: parse_selector(sel)?,
+            reply: tx,
+        },
+        ("GET", ["tabs", sel]) => ApiCommand::GetTab {
+            id: parse_selector(sel)?,
+            reply: tx,
+        },
+        ("GET", ["tabs", sel, "screen"]) => ApiCommand::GetScreen {
+            id: parse_selector(sel)?,
+            reply: tx,
+        },
+        ("GET", ["tabs", sel, "screen.ansi"]) => ApiCommand::GetScreenAnsi {
+            id: parse_selector(sel)?,
+            reply: tx,
+        },
         ("POST", ["tabs", sel, "resize"]) => {
             let req: ResizeRequest = serde_json::from_slice(&body).map_err(|err| RouteError {
                 status: 400,
@@ -96,13 +113,27 @@ pub(crate) fn parse_request(
             reply: tx,
         },
         ("POST", ["tabs", sel, "input"]) => {
-            ApiCommand::WriteInput { id: parse_selector(sel)?, bytes: body, reply: tx }
+            let id = parse_selector(sel)?;
+            match browser_client {
+                Some(client) => ApiCommand::WebInput {
+                    id,
+                    client,
+                    bytes: body,
+                    reply: tx,
+                },
+                None => ApiCommand::WriteInput {
+                    id,
+                    bytes: body,
+                    reply: tx,
+                },
+            }
         }
         ("POST", ["web", "client"]) => {
-            let req: WebClientRequest = serde_json::from_slice(&body).map_err(|err| RouteError {
-                status: 400,
-                message: format!("invalid web client body: {err}"),
-            })?;
+            let req: WebClientRequest =
+                serde_json::from_slice(&body).map_err(|err| RouteError {
+                    status: 400,
+                    message: format!("invalid web client body: {err}"),
+                })?;
             if req.id.is_empty() || req.id.len() > 128 {
                 return Err(RouteError {
                     status: 400,
@@ -115,6 +146,7 @@ pub(crate) fn parse_request(
                 cols: req.cols,
                 rows: req.rows,
                 browser_size: req.browser_size,
+                force: req.force,
                 reply: tx,
             }
         }
@@ -154,10 +186,14 @@ pub(crate) fn parse_request(
                 body: legacy_help_text(),
             });
         }
-        ("GET", ["debug", "state"]) => ApiCommand::GetTab { id: TabSelector::Active, reply: tx },
-        ("GET", ["debug", "screen"]) => {
-            ApiCommand::GetScreen { id: TabSelector::Active, reply: tx }
-        }
+        ("GET", ["debug", "state"]) => ApiCommand::GetTab {
+            id: TabSelector::Active,
+            reply: tx,
+        },
+        ("GET", ["debug", "screen"]) => ApiCommand::GetScreen {
+            id: TabSelector::Active,
+            reply: tx,
+        },
         ("POST", ["debug", "input"]) => ApiCommand::WriteInput {
             id: TabSelector::Active,
             bytes: body,
@@ -174,8 +210,16 @@ pub(crate) fn parse_request(
                 message: "note body must be utf-8".to_string(),
             })?;
             let trimmed = raw.trim();
-            let note = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
-            ApiCommand::SetNote { id: TabSelector::Active, note, reply: tx }
+            let note = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+            ApiCommand::SetNote {
+                id: TabSelector::Active,
+                note,
+                reply: tx,
+            }
         }
 
         _ => {
@@ -207,13 +251,10 @@ fn parse_lines_query(query: &str) -> Result<Option<usize>, RouteError> {
         let key = it.next().unwrap_or("");
         let val = it.next().unwrap_or("");
         if key == "lines" {
-            return val
-                .parse::<usize>()
-                .map(Some)
-                .map_err(|_| RouteError {
-                    status: 400,
-                    message: format!("invalid `lines` value: {val}"),
-                });
+            return val.parse::<usize>().map(Some).map_err(|_| RouteError {
+                status: 400,
+                message: format!("invalid `lines` value: {val}"),
+            });
         }
     }
     Ok(None)
@@ -305,15 +346,26 @@ fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
         }
         // Opt-in byte trace: the browser sets this header while its debug
         // recorder is on, so we can see exactly what reached the PTY.
-        if crate::web_debug::wants_input_trace(request.headers())
-            && path.contains("/input")
-        {
+        if crate::web_debug::wants_input_trace(request.headers()) && path.contains("/input") {
             crate::web_debug::append_input(&path, &body);
         }
-        let response = match parse_request(&method, &path, &query, body) {
-            Ok(RouteOutcome::Immediate { status, content_type, body }) => {
-                text_response(status, content_type, body)
-            }
+        let browser_client = request.headers().iter().find_map(|header| {
+            header
+                .field
+                .equiv("X-Rterminal-Client")
+                .then(|| header.value.as_str().to_string())
+        });
+        let response = match parse_request_with_client(&method, &path, &query, body, browser_client) {
+            Ok(RouteOutcome::Immediate {
+                status,
+                content_type,
+                body,
+            }) => text_response(status, content_type, body),
+            Ok(RouteOutcome::ImmediateBinary {
+                status,
+                content_type,
+                body,
+            }) => text_response(status, content_type, body),
             Ok(RouteOutcome::Command(cmd, rx)) => match cmd_tx.send_blocking(cmd) {
                 Ok(()) => match rx.recv_blocking() {
                     Ok(reply) => render_reply(reply),
@@ -363,6 +415,9 @@ fn text_response(
     if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
         resp = resp.with_header(header);
     }
+    if let Ok(header) = Header::from_bytes("Cache-Control", "no-store") {
+        resp = resp.with_header(header);
+    }
     resp
 }
 
@@ -387,18 +442,26 @@ mod tests {
     ) -> Result<ApiCommand, RouteError> {
         match parse_request(method, path, query, body.to_vec())? {
             RouteOutcome::Command(cmd, _rx) => Ok(cmd),
-            RouteOutcome::Immediate { .. } => panic!("expected command, got immediate response"),
+            RouteOutcome::Immediate { .. } | RouteOutcome::ImmediateBinary { .. } => {
+                panic!("expected command, got immediate response")
+            }
         }
     }
 
     #[test]
     fn get_tabs_routes_to_list() {
-        assert!(matches!(route("GET", "/tabs", b"").unwrap(), ApiCommand::ListTabs { .. }));
+        assert!(matches!(
+            route("GET", "/tabs", b"").unwrap(),
+            ApiCommand::ListTabs { .. }
+        ));
     }
 
     #[test]
     fn post_tabs_routes_to_create() {
-        assert!(matches!(route("POST", "/tabs", b"").unwrap(), ApiCommand::CreateTab { .. }));
+        assert!(matches!(
+            route("POST", "/tabs", b"").unwrap(),
+            ApiCommand::CreateTab { .. }
+        ));
     }
 
     #[test]
@@ -453,6 +516,47 @@ mod tests {
         }
         let err = route("POST", "/tabs/3/resize", br#"{"cols":1,"rows":30}"#).unwrap_err();
         assert_eq!(err.status, 400);
+    }
+
+    #[test]
+    fn browser_input_carries_client_ownership() {
+        match parse_request_with_client(
+            "POST",
+            "/tabs/3/input",
+            "",
+            b"abc".to_vec(),
+            Some("browser-a".to_string()),
+        )
+        .unwrap()
+        {
+            RouteOutcome::Command(
+                ApiCommand::WebInput {
+                    id: TabSelector::Id(3),
+                    client,
+                    bytes,
+                    ..
+                },
+                _,
+            ) => {
+                assert_eq!(client, "browser-a");
+                assert_eq!(bytes, b"abc");
+            }
+            other => panic!("unexpected route: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_client_force_flag_is_routed() {
+        match route(
+            "POST",
+            "/web/client",
+            br#"{"id":"browser-b","connected":true,"force":true}"#,
+        )
+        .unwrap()
+        {
+            ApiCommand::WebClient { id, force: true, .. } => assert_eq!(id, "browser-b"),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
