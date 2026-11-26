@@ -647,6 +647,22 @@ function currentTab() {
 // their text while producing it. Nothing reaches the PTY until submission, so
 // no prefix comparison, synthetic Backspace or utterance mirror is involved.
 // Direct input through xterm remains available for ordinary keyboards and IME.
+// Android soft keyboards often do not turn an empty-field Enter into a form
+// submit (iOS does), so handle the gesture explicitly on both keydown and
+// beforeinput. Empty submission is the documented shortcut for terminal Enter.
+stagedInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  stagedInputForm.requestSubmit();
+});
+stagedInput.addEventListener("beforeinput", (event) => {
+  if (event.isComposing) return;
+  if (event.inputType === "insertLineBreak" || event.inputType === "insertParagraph" || event.data === "\n") {
+    event.preventDefault();
+    stagedInputForm.requestSubmit();
+  }
+});
+
 stagedInputForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const tab = currentTab();
