@@ -2325,6 +2325,8 @@ function createTab(dto) {
     lastInputIsComposing: false,
     lastKeyDownAt: 0,
     beforeInputIsKey: false,
+    handledBeforeInputKey: false,
+    handledBeforeInputText: "",
     lastPasteAt: 0,
     lastCompositionEndAt: 0,
     // Utterance synchronisation state (see reconcileTo).
@@ -2376,6 +2378,7 @@ function createTab(dto) {
     // `keydown`, so keydown timing cannot classify the keystroke; the
     // beforeinput metadata can.
     textarea.addEventListener("beforeinput", (event) => {
+      tab.handledBeforeInputKey = false;
       tab.beforeInputIsKey =
         (event.inputType === "insertText" || event.inputType === "insertCompositionText") &&
         typeof event.data === "string" &&
@@ -2522,6 +2525,13 @@ function createTab(dto) {
   }
   term.onData((data) => {
     const text = textOf(data);
+    // Android may invoke onData twice for one keystroke (before, then after
+    // the late keydown). The first pass already handled it; drop the replay.
+    if (tab.handledBeforeInputKey && text === tab.handledBeforeInputText) {
+      tab.handledBeforeInputKey = false;
+      dbg("dedupe-late", tab, { text: clip(text) });
+      return;
+    }
     // Snapshot the decision inputs at the moment xterm handed us the bytes.
     dbg("ondata", tab, {
       text: clip(text),
@@ -2564,6 +2574,10 @@ function createTab(dto) {
       // xterm encoded this key correctly, so `data` IS the transmission. The
       // field merely mirrors it (and WebKit may have inserted a copy anyway);
       // clearing it keeps an accumulating field from replaying old characters.
+      if (tab.beforeInputIsKey) {
+        tab.handledBeforeInputKey = true;
+        tab.handledBeforeInputText = text;
+      }
       tab.beforeInputIsKey = false;
       sendInput(tab, encodeTyped(text), "key");
       // The browser has usually queued its own DOM insertion for this same key,
