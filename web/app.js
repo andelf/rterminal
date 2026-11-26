@@ -748,6 +748,11 @@ const RECONCILE_HOLD_MS = 600;
 // A key's DOM update lands within a frame; dictation never comes anywhere near
 // this window after the last physical key.
 const KEY_WINDOW_MS = 200;
+// Mobile soft keyboards (Android Chrome in particular) can deliver the
+// matching `input` event well after xterm already sent the key and cleared the
+// field. A short window dropped the dedupe and the same character was sent
+// twice, so keep a generous window for the dedupe check only.
+const DEDUPE_WINDOW_MS = 2000;
 // DEL is what the toolbar's Backspace sends and what PSReadLine expects.
 const BACKSPACE = "\x7f";
 
@@ -2303,6 +2308,7 @@ function createTab(dto) {
     lastInputType: "",
     lastInputIsComposing: false,
     lastKeyDownAt: 0,
+    beforeInputIsKey: false,
     lastPasteAt: 0,
     lastCompositionEndAt: 0,
     // Utterance synchronisation state (see reconcileTo).
@@ -2349,6 +2355,17 @@ function createTab(dto) {
       // impossible to send twice, and a commit xterm dropped is still sent.
       syncField(tab);
     }, true);
+    // Capture phase runs before xterm's own beforeinput handler, which is
+    // what emits onData. Android delivers `input`/beforeinput before the late
+    // `keydown`, so keydown timing cannot classify the keystroke; the
+    // beforeinput metadata can.
+    textarea.addEventListener("beforeinput", (event) => {
+      tab.beforeInputIsKey =
+        (event.inputType === "insertText" || event.inputType === "insertCompositionText") &&
+        typeof event.data === "string" &&
+        event.data.length === 1 &&
+        !event.isComposing;
+    }, true);
     textarea.addEventListener("beforeinput", (event) => {
       tab.lastInputType = event.inputType || "";
       tab.lastInputIsComposing = !!event.isComposing;
@@ -2362,7 +2379,7 @@ function createTab(dto) {
       const raw = textareaText(tab);
       if (
         raw !== null &&
-        Date.now() - (tab.keySentAt || 0) <= KEY_WINDOW_MS &&
+        Date.now() - (tab.keySentAt || 0) <= DEDUPE_WINDOW_MS &&
         normalizeField(raw) === (tab.keySentText || "")
       ) {
         endUtterance(tab);
@@ -2514,10 +2531,24 @@ function createTab(dto) {
       endUtterance(tab);
       return;
     }
-    if (keyDriven(tab)) {
+    if (keyDriven(tab) || tab.beforeInputIsKey) {
+      // Android Chrome can fire `input` (and therefore the reconcile route)
+      // before the late `keydown` that makes this onData key-driven. In that
+      // case the character has already reached the PTY through reconcile, so
+      // sending it again here would duplicate it. Recognise that by the mirror
+      // state instead of a timing heuristic: if `sent` already holds this text,
+      // it has been transmitted and there is nothing more to do.
+      const alreadySent = (tab.sent || []).length > 0 &&
+        (tab.sent || []).slice(-(Array.from(text).length)).join("") === text;
+      if (alreadySent) {
+        dbg("dedupe-key", tab, { text: clip(text) });
+        endUtterance(tab);
+        return;
+      }
       // xterm encoded this key correctly, so `data` IS the transmission. The
       // field merely mirrors it (and WebKit may have inserted a copy anyway);
       // clearing it keeps an accumulating field from replaying old characters.
+      tab.beforeInputIsKey = false;
       sendInput(tab, encodeTyped(text), "key");
       // The browser has usually queued its own DOM insertion for this same key,
       // so an input event is still coming. Remember which text was sent, so that

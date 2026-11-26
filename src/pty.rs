@@ -34,6 +34,20 @@ impl PtySession {
         for arg in crate::platform::shell_args() {
             command.arg(*arg);
         }
+        // Terminals and line editors (readline/zsh) expect TERM to be set;
+        // portable-pty does not populate it, so an unset value made shells fall
+        // back to "dumb" behaviour until the user exported one manually.
+        command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        // Ensure a UTF-8 locale so multibyte (e.g. CJK) text is handled by the
+        // shell and line editors instead of being dropped or mojibaked when the
+        // launching environment did not export one.
+        if std::env::var("LANG").is_err() {
+            command.env("LANG", "C.UTF-8");
+        }
+        if std::env::var("LC_CTYPE").is_err() {
+            command.env("LC_CTYPE", "C.UTF-8");
+        }
 
         let child = pair
             .slave
