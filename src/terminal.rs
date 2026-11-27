@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::Term;
@@ -113,6 +114,12 @@ enum PendingTerminalEvent {
 pub(crate) struct TitleTrackingListener {
     pub(crate) title: Arc<Mutex<Option<String>>>,
     pub(crate) writer: Option<SharedPtyWriter>,
+    /// Set while a browser WebSocket stream is attached to this tab. The web
+    /// client's xterm.js then answers terminal capability queries, so the
+    /// native terminal must stay silent: programs like tmux accept only the
+    /// first reply per query and forward later duplicates to the pane as
+    /// keystrokes, which the shell then echoes as `^[[?1;2c`-style garbage.
+    pub(crate) web_attached: Arc<AtomicBool>,
     pending_events: Arc<Mutex<Vec<PendingTerminalEvent>>>,
 }
 
@@ -126,6 +133,14 @@ impl EventListener for TitleTrackingListener {
                 *self.title.lock() = None;
             }
             AlacTermEvent::PtyWrite(text) => {
+                // While a browser stream is attached, xterm.js owns query
+                // replies. Writing them from the native terminal as well gives
+                // the program two answers per query; tmux keeps the first and
+                // forwards the duplicate to the pane, where the shell echoes
+                // it as `^[[?1;2c`-style garbage.
+                if self.web_attached.load(Ordering::Relaxed) {
+                    return;
+                }
                 if let Some(writer) = &self.writer {
                     let _ = write_to_pty(writer, text.as_bytes());
                 }
@@ -262,6 +277,9 @@ pub(crate) struct AgentTerminal {
     // precise; the client id is only used to replace a stale stream to the
     // same tab on reconnect.
     web_streams: Vec<(u64, String, async_channel::Sender<Vec<u8>>)>,
+    /// Mirrors `!web_streams.is_empty()` so the terminal listener can gate
+    /// automatic query replies without borrowing the terminal.
+    web_attached: Arc<AtomicBool>,
     pending_term_events: Arc<Mutex<Vec<PendingTerminalEvent>>>,
     pub(crate) _window_bounds_sub: Option<Subscription>,
     pub(crate) _focus_in_sub: Option<Subscription>,
@@ -312,6 +330,7 @@ impl AgentTerminal {
 
         let terminal_title = Arc::new(Mutex::new(None));
         let pending_term_events = Arc::new(Mutex::new(Vec::new()));
+        let web_attached = Arc::new(AtomicBool::new(false));
         let (shell, master, writer, child, output_rx, debug) =
             match PtySession::spawn(grid_size.rows, grid_size.cols) {
                 Ok(session) => {
@@ -343,6 +362,7 @@ impl AgentTerminal {
             TitleTrackingListener {
                 title: terminal_title.clone(),
                 writer: writer.clone(),
+                web_attached: web_attached.clone(),
                 pending_events: pending_term_events.clone(),
             },
         );
@@ -454,6 +474,7 @@ impl AgentTerminal {
             shell_exited: false,
             debug,
             web_streams: Vec::new(),
+            web_attached: web_attached.clone(),
             pending_term_events,
             _window_bounds_sub: None,
             _focus_in_sub: None,
@@ -533,6 +554,7 @@ impl AgentTerminal {
         // without waiting for the old socket thread to process its detach.
         self.web_streams.retain(|(_, owner, _)| owner != &client);
         self.web_streams.push((stream_id, client, tx));
+        self.sync_web_attached();
         rx
     }
 
@@ -540,17 +562,28 @@ impl AgentTerminal {
         // Dropping a sender closes its receiver and wakes the old socket
         // thread even when the PTY is idle.
         self.web_streams.retain(|(_, client, _)| client == owner);
+        self.sync_web_attached();
     }
 
     pub(crate) fn detach_web_stream(&mut self, stream_id: u64) {
         // Never match on client id: attach and detach run on different threads
         // and an old connection's detach can overtake a new one's attach.
         self.web_streams.retain(|(id, _, _)| id != &stream_id);
+        self.sync_web_attached();
     }
 
     fn broadcast_web_streams(&mut self, bytes: &[u8]) {
         self.web_streams
             .retain(|(_, _, tx)| tx.try_send(bytes.to_vec()).is_ok());
+        self.sync_web_attached();
+    }
+
+    /// The terminal listener answers capability queries only while no browser
+    /// is attached. Keeping this exactly equal to "the stream list is not
+    /// empty" avoids a second reply (see `TitleTrackingListener::web_attached`).
+    fn sync_web_attached(&self) {
+        self.web_attached
+            .store(!self.web_streams.is_empty(), Ordering::Relaxed);
     }
 
     pub(crate) fn ingest_batch(&mut self, cx: &mut Context<Self>, chunks: &[Vec<u8>]) {
@@ -1618,21 +1651,27 @@ mod tests {
 
     fn make_listener(
         writer: Option<SharedPtyWriter>,
-    ) -> (TitleTrackingListener, Arc<Mutex<Vec<PendingTerminalEvent>>>) {
+    ) -> (
+        TitleTrackingListener,
+        Arc<Mutex<Vec<PendingTerminalEvent>>>,
+        Arc<AtomicBool>,
+    ) {
         let title = Arc::new(Mutex::new(None));
         let pending_events = Arc::new(Mutex::new(Vec::new()));
+        let web_attached = Arc::new(AtomicBool::new(false));
         let listener = TitleTrackingListener {
             title,
             writer,
+            web_attached: web_attached.clone(),
             pending_events: pending_events.clone(),
         };
-        (listener, pending_events)
+        (listener, pending_events, web_attached)
     }
 
     #[test]
     fn device_status_report_writes_cursor_position_to_pty() {
         let (writer, bytes) = recording_writer();
-        let (listener, _) = make_listener(Some(writer));
+        let (listener, _, _) = make_listener(Some(writer));
         let mut term = Term::new(
             Config::default(),
             &GridSize { cols: 80, rows: 24 },
@@ -1647,8 +1686,36 @@ mod tests {
     }
 
     #[test]
+    fn web_client_owns_query_replies_while_attached() {
+        let (writer, bytes) = recording_writer();
+        let (listener, _, web_attached) = make_listener(Some(writer));
+        let mut term = Term::new(
+            Config::default(),
+            &GridSize { cols: 80, rows: 24 },
+            listener,
+        );
+        let mut processor = Processor::<StdSyncHandler>::new();
+
+        // With a browser attached, xterm.js answers capability queries. A
+        // second reply from the native terminal makes tmux (and similar
+        // programs) forward the duplicate into the pane as keystrokes.
+        web_attached.store(true, Ordering::Relaxed);
+        processor.advance(&mut term, b"\x1b[6n");
+        assert!(
+            bytes.lock().is_empty(),
+            "native terminal answered while the web client was attached: {:?}",
+            &*bytes.lock()
+        );
+
+        // Once the browser goes away the native terminal answers again.
+        web_attached.store(false, Ordering::Relaxed);
+        processor.advance(&mut term, b"\x1b[6n");
+        assert_eq!(&*bytes.lock(), b"\x1b[1;1R");
+    }
+
+    #[test]
     fn osc52_copy_sequence_is_queued_for_clipboard_store() {
-        let (listener, pending_events) = make_listener(None);
+        let (listener, pending_events, _) = make_listener(None);
         let mut term = Term::new(
             Config::default(),
             &GridSize { cols: 80, rows: 24 },
@@ -1674,7 +1741,7 @@ mod tests {
             osc52: Osc52::CopyPaste,
             ..Config::default()
         };
-        let (listener, pending_events) = make_listener(None);
+        let (listener, pending_events, _) = make_listener(None);
         let mut term = Term::new(config, &GridSize { cols: 80, rows: 24 }, listener);
         let mut processor = Processor::<StdSyncHandler>::new();
 
