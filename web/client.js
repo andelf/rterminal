@@ -548,6 +548,7 @@ function createTab(dto) {
     reconcileTimer: null,
     keySentAt: 0,
     keySentText: "",
+    pasteSentAt: 0,
     pendingPaint: null,
     debugPaintLine: null,
     debugPaintAlt: null,
@@ -603,12 +604,24 @@ function createTab(dto) {
       tab.lastInputIsComposing = !!event.isComposing;
     }, true);
     textarea.addEventListener("input", () => {
+      const raw = textareaText(tab);
+      // A paste is not a single key, so there is no key marker to compare: an
+      // `insertFromPaste` input that follows an onData already forwarded as a
+      // paste is the browser's DOM insertion of those same bytes (Safari on
+      // iPad with a hardware keyboard always performs it). Drop it.
+      if (
+        tab.lastInputType === "insertFromPaste" &&
+        Date.now() - (tab.pasteSentAt || 0) <= DEDUPE_WINDOW_MS
+      ) {
+        dbg("dedupe-paste", tab, { text: clip(raw) });
+        endUtterance(tab);
+        return;
+      }
       // xterm already transmitted this key from its own handler; this input
       // event is just the browser's DOM insertion of the same text. Drop the
       // field contents and stay out of the way. Matching the text (not just the
       // time) keeps a genuinely new character typed in quick succession, and
       // dictation that follows a keystroke, out of this branch.
-      const raw = textareaText(tab);
       if (
         raw !== null &&
         Date.now() - (tab.keySentAt || 0) <= DEDUPE_WINDOW_MS &&
@@ -761,6 +774,15 @@ function createTab(dto) {
     if (isCompositionInput(tab)) {
       dbg("gate", tab, { text: clip(text), why: "composing" });
       return;
+    }
+    // xterm forwards a clipboard paste once, from its paste event. It does not
+    // cancel the browser's default insertion into the hidden textarea, though:
+    // Safari on iPad with a hardware keyboard writes the same clipboard text
+    // there and fires `insertFromPaste` right afterwards. Remember that the
+    // paste has already been transmitted, so the input listener can drop the
+    // DOM copy instead of reconciling it into a second copy of the text.
+    if (Date.now() - (tab.lastPasteAt || 0) <= KEY_WINDOW_MS) {
+      tab.pasteSentAt = Date.now();
     }
     if (!isPrintable(text)) {
       // Control key: CR, DEL, an arrow/Home/End sequence, a Ctrl chord. These
