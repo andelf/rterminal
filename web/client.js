@@ -427,6 +427,9 @@ function activate(id, fromUser) {
     if (next.followCursor) scrollToCursor(next);
     startStream(next);
   }
+  // An open scrollback dump belongs to the tab it was taken from; follow the
+  // newly active tab (or close when there is none).
+  syncScrollback();
   if (fromUser) {
     api(`/tabs/${id}/activate`, { method: "POST" })
       .then(refresh)
@@ -866,6 +869,8 @@ async function refresh() {
     const active = info.active === null || info.active === undefined ? null : String(info.active);
     if (info.tabs.length === 0) {
       state.active = null;
+      // No tab is left to describe; never keep an old dump on screen.
+      syncScrollback();
       emptyState.hidden = false;
       statusEl.textContent = "no tabs";
       clearError();
@@ -934,18 +939,56 @@ syncSizeButton.addEventListener("click", () => {
   applyPadding(tab);
 });
 
-document.getElementById("scrollback").addEventListener("click", async () => {
+const scrollbackText = document.getElementById("scrollback-text");
+// The overlay is a snapshot of one tab, so it follows the active tab: switching
+// tabs reloads it instead of leaving another tab's text under this tab's
+// chrome. Each load is tagged, so a slow response for the previous tab cannot
+// overwrite the newer one.
+let scrollbackTabId = null;
+let scrollbackLoad = 0;
+
+function closeScrollback() {
+  scrollbackView.hidden = true;
+  scrollbackTabId = null;
+  scrollbackLoad += 1;
+}
+
+async function loadScrollback(tab) {
+  const seq = ++scrollbackLoad;
+  scrollbackTabId = tab.id;
+  scrollbackText.textContent = "";
+  try {
+    const text = await api(`/tabs/${tab.id}/scrollback`);
+    if (seq !== scrollbackLoad) return;
+    scrollbackText.textContent = text;
+    scrollbackText.scrollTop = 0;
+  } catch (error) {
+    if (seq !== scrollbackLoad) return;
+    scrollbackText.textContent =
+      `⚠ ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function syncScrollback() {
+  if (scrollbackView.hidden) return;
+  const tab = currentTab();
+  if (!tab) {
+    closeScrollback();
+    return;
+  }
+  if (tab.id !== scrollbackTabId) loadScrollback(tab);
+}
+
+document.getElementById("scrollback-close").addEventListener("click", closeScrollback);
+
+document.getElementById("scrollback").addEventListener("click", () => {
   if (!scrollbackView.hidden) {
-    scrollbackView.hidden = true;
+    closeScrollback();
     return;
   }
   const tab = currentTab();
   if (!tab) return;
-  try {
-    scrollbackView.textContent = await api(`/tabs/${tab.id}/scrollback`);
-    scrollbackView.hidden = false;
-  } catch (error) {
-    report(error);
-  }
+  scrollbackView.hidden = false;
+  loadScrollback(tab);
 });
 

@@ -208,15 +208,25 @@ document.addEventListener("touchstart", (event) => {
   const touch = event.touches[0];
   const target = event.target instanceof Element ? event.target : null;
   touchScrollStart = touch && target
-    ? { x: touch.clientX, y: touch.clientY, pane: target.closest(".pane") }
+    ? {
+        x: touch.clientX,
+        y: touch.clientY,
+        pane: target.closest(".pane"),
+        // Text selection is a native gesture: the blue grabbers are dragged
+        // with touch moves, so this subtree must never see a cancelled move.
+        selectable: target.closest(".scrollback") !== null
+      }
     : null;
 }, { passive: true });
 
 document.addEventListener("touchmove", (event) => {
   const target = event.target instanceof Element ? event.target : null;
-  if (target && target.closest(".screen-keyboard, .key-scroll, .tabstrip, .help-card")) return;
+  if (target && target.closest(".screen-keyboard, .key-scroll, .tabstrip, .help-card, .scrollback")) return;
   const touch = event.touches[0];
   const start = touchScrollStart;
+  // A selection drag may report the overlay itself, or nothing at all, as the
+  // move target; the gesture that started in the scrollback is still native.
+  if (start && start.selectable) return;
   if (touch && start && start.pane && event.touches.length === 1) {
     const dx = start.x - touch.clientX;
     const dy = start.y - touch.clientY;
