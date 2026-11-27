@@ -6,6 +6,7 @@ mod api_server;
 mod auth;
 mod cli;
 mod color;
+mod geometry;
 mod history_log;
 mod input;
 mod input_log;
@@ -14,6 +15,7 @@ mod macos_ax;
 mod platform;
 mod pty;
 mod render;
+mod selection;
 mod snapshot_tab;
 mod tab_runtime;
 mod tabs;
@@ -157,8 +159,8 @@ fn bind_is_loopback(addr: &str) -> bool {
 fn warn_if_public_bind(name: &str, addr: &str) {
     if !bind_is_loopback(addr) {
         eprintln!(
-            "WARNING: {name} is listening on {addr} without authentication; \
-             reachable devices can read and control the terminal"
+            "WARNING: {name} is listening on {addr} with token authentication; \
+             reachable devices can control the terminal if the token leaks"
         );
     }
 }

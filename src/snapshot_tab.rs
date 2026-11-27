@@ -5,8 +5,10 @@ use gpui::{
 };
 
 use crate::cli::Theme;
-use crate::input::selection_contains_cell;
-use crate::render::{LINE_HEIGHT_SCALE, TEXT_PADDING_X, TEXT_PADDING_Y, measure_cell_width};
+use crate::selection::selection_contains_cell;
+use crate::geometry::{
+    LINE_HEIGHT_SCALE, TEXT_PADDING_X, TEXT_PADDING_Y, measure_cell_width,
+};
 use crate::terminal::{CellSnapshot, SelectionPoint};
 
 #[derive(Clone)]

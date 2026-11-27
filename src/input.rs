@@ -16,11 +16,15 @@ use crate::keyboard::{
     is_zoom_out_shortcut, should_defer_to_text_input,
 };
 use crate::macos_ax::NativeAxInputState;
-use crate::render::{
+use crate::geometry::{
     CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, measure_cell_width,
     terminal_content_padding_y,
 };
-use crate::terminal::{CellSnapshot, ScreenSnapshot, SelectionPoint};
+use crate::selection::{
+    cell_advance_cols, extract_selection_text, normalize_selection_bounds,
+    normalize_selection_col, row_text_without_wide_spacers,
+};
+use crate::terminal::SelectionPoint;
 use crate::text_utils::{
     delete_next_word_utf16, delete_previous_word_utf16, delete_to_end_utf16,
     summarize_text_for_trace, utf16_substring, utf16_to_byte_index,
@@ -1277,144 +1281,6 @@ fn evaluate_paste_risk(text: &str) -> Option<PasteRisk> {
     })
 }
 
-fn normalize_selection_bounds(
-    start: SelectionPoint,
-    end: SelectionPoint,
-) -> (SelectionPoint, SelectionPoint) {
-    if (start.row, start.col) <= (end.row, end.col) {
-        (start, end)
-    } else {
-        (end, start)
-    }
-}
-
-pub(crate) fn selection_contains_cell(
-    start: SelectionPoint,
-    end: SelectionPoint,
-    row: usize,
-    col: usize,
-) -> bool {
-    if row < start.row || row > end.row {
-        return false;
-    }
-
-    if start.row == end.row {
-        return row == start.row && col >= start.col && col <= end.col;
-    }
-
-    if row == start.row {
-        return col >= start.col;
-    }
-
-    if row == end.row {
-        return col <= end.col;
-    }
-
-    true
-}
-
-fn extract_selection_text(
-    snapshot: &ScreenSnapshot,
-    start: SelectionPoint,
-    end: SelectionPoint,
-) -> String {
-    let mut lines = Vec::new();
-
-    for row in start.row..=end.row {
-        let Some(cells) = snapshot.cells.get(row) else {
-            break;
-        };
-        if cells.is_empty() {
-            lines.push((row, String::new()));
-            continue;
-        }
-
-        let line_start = if row == start.row {
-            normalize_selection_col(cells, start.col)
-        } else {
-            0
-        };
-        let line_end = if row == end.row {
-            normalize_selection_col(cells, end.col)
-        } else {
-            cells.len().saturating_sub(1)
-        };
-        if line_start >= cells.len() {
-            lines.push((row, String::new()));
-            continue;
-        }
-
-        let clamped_end = line_end.min(cells.len().saturating_sub(1));
-        if line_start > clamped_end {
-            lines.push((row, String::new()));
-            continue;
-        }
-
-        let mut text = String::new();
-        let mut col = line_start;
-        while col <= clamped_end {
-            let cell = &cells[col];
-            text.push(cell.ch);
-            let step = cell_advance_cols(cell);
-            col = col.saturating_add(step);
-        }
-        let trimmed_len = text.trim_end().len();
-        text.truncate(trimmed_len);
-        lines.push((row, text));
-    }
-
-    join_selected_lines(lines, &snapshot.soft_wrapped_rows)
-}
-
-fn join_selected_lines(lines: Vec<(usize, String)>, soft_wrapped_rows: &[bool]) -> String {
-    let mut text = String::new();
-    for (index, (row, line)) in lines.iter().enumerate() {
-        text.push_str(line);
-        if index + 1 < lines.len() && !soft_wrapped_rows.get(*row).copied().unwrap_or(false) {
-            text.push('\n');
-        }
-    }
-    text
-}
-
-fn normalize_selection_col(cells: &[CellSnapshot], col: usize) -> usize {
-    if cells.is_empty() {
-        return 0;
-    }
-
-    let mut normalized = col.min(cells.len().saturating_sub(1));
-    while normalized > 0 {
-        let prev = normalized - 1;
-        let prev_span = cell_advance_cols(&cells[prev]);
-        if prev_span > 1 && prev.saturating_add(prev_span) > normalized {
-            normalized = prev;
-            continue;
-        }
-        break;
-    }
-
-    normalized
-}
-
-fn row_text_without_wide_spacers(cells: &[CellSnapshot]) -> String {
-    let mut text = String::new();
-    let mut col = 0usize;
-    while col < cells.len() {
-        let cell = &cells[col];
-        text.push(cell.ch);
-        col = col.saturating_add(cell_advance_cols(cell));
-    }
-    text
-}
-
-fn cell_advance_cols(cell: &CellSnapshot) -> usize {
-    if cell.spans_next_col {
-        usize::from(cell.width_cols.max(1))
-    } else {
-        1
-    }
-}
-
 fn probable_ascii_prefix_noise(ax_text: &str, model_text: &str) -> bool {
     if model_text.is_empty() {
         return false;
@@ -1587,12 +1453,12 @@ impl EntityInputHandler for AgentTerminal {
 mod tests {
     use gpui::px;
 
-    use crate::render::terminal_content_padding_y;
+    use crate::geometry::terminal_content_padding_y;
     use crate::terminal::CellSnapshot;
 
-    use super::{
-        evaluate_paste_risk, extract_selection_text, normalize_selection_bounds,
-        probable_ascii_prefix_noise, selection_contains_cell,
+    use super::{evaluate_paste_risk, probable_ascii_prefix_noise};
+    use crate::selection::{
+        extract_selection_text, normalize_selection_bounds, selection_contains_cell,
     };
     use crate::terminal::{ScreenSnapshot, SelectionPoint};
 

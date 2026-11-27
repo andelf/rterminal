@@ -424,7 +424,13 @@ fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
 fn cache_policy(path: &str, query: &str) -> &'static str {
     let versioned_static = matches!(
         path,
-        "/web/app.js"
+        "/web/core.js"
+            | "/web/debug.js"
+            | "/web/viewport.js"
+            | "/web/input.js"
+            | "/web/keyboard.js"
+            | "/web/client.js"
+            | "/web/app.js"
             | "/web/style.css"
             | "/web/icons/icon.svg"
             | "/web/icons/icon-192.png"

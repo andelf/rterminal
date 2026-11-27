@@ -16,6 +16,12 @@ use crate::api_protocol::RouteOutcome;
 mod embedded {
     pub(crate) const INDEX_HTML: &str = "";
     pub(crate) const STYLE_CSS: &str = "";
+    pub(crate) const CORE_JS: &str = "";
+    pub(crate) const DEBUG_JS: &str = "";
+    pub(crate) const VIEWPORT_JS: &str = "";
+    pub(crate) const INPUT_JS: &str = "";
+    pub(crate) const KEYBOARD_JS: &str = "";
+    pub(crate) const CLIENT_JS: &str = "";
     pub(crate) const APP_JS: &str = "";
     pub(crate) const XTERM_JS: &str = "";
     pub(crate) const XTERM_CSS: &str = "";
@@ -30,6 +36,12 @@ mod embedded {
 mod embedded {
     pub(crate) const INDEX_HTML: &str = include_str!("../web/index.html");
     pub(crate) const STYLE_CSS: &str = include_str!("../web/style.css");
+    pub(crate) const CORE_JS: &str = include_str!("../web/core.js");
+    pub(crate) const DEBUG_JS: &str = include_str!("../web/debug.js");
+    pub(crate) const VIEWPORT_JS: &str = include_str!("../web/viewport.js");
+    pub(crate) const INPUT_JS: &str = include_str!("../web/input.js");
+    pub(crate) const KEYBOARD_JS: &str = include_str!("../web/keyboard.js");
+    pub(crate) const CLIENT_JS: &str = include_str!("../web/client.js");
     pub(crate) const APP_JS: &str = include_str!("../web/app.js");
     pub(crate) const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
     pub(crate) const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
@@ -106,6 +118,12 @@ pub(crate) fn is_public_path(path: &str) -> bool {
             | "/web/"
             | "/web/index.html"
             | "/web/style.css"
+            | "/web/core.js"
+            | "/web/debug.js"
+            | "/web/viewport.js"
+            | "/web/input.js"
+            | "/web/keyboard.js"
+            | "/web/client.js"
             | "/web/app.js"
             | "/web/manifest.webmanifest"
             | "/web/vendor/xterm.min.js"
@@ -155,6 +173,30 @@ pub(crate) fn static_response(path: &str) -> Option<RouteOutcome> {
             "text/css; charset=utf-8",
             load("style.css", embedded::STYLE_CSS),
         ),
+        "/web/core.js" => (
+            "text/javascript; charset=utf-8",
+            load("core.js", embedded::CORE_JS),
+        ),
+        "/web/debug.js" => (
+            "text/javascript; charset=utf-8",
+            load("debug.js", embedded::DEBUG_JS),
+        ),
+        "/web/viewport.js" => (
+            "text/javascript; charset=utf-8",
+            load("viewport.js", embedded::VIEWPORT_JS),
+        ),
+        "/web/input.js" => (
+            "text/javascript; charset=utf-8",
+            load("input.js", embedded::INPUT_JS),
+        ),
+        "/web/keyboard.js" => (
+            "text/javascript; charset=utf-8",
+            load("keyboard.js", embedded::KEYBOARD_JS),
+        ),
+        "/web/client.js" => (
+            "text/javascript; charset=utf-8",
+            load("client.js", embedded::CLIENT_JS),
+        ),
         "/web/app.js" => (
             "text/javascript; charset=utf-8",
             load("app.js", embedded::APP_JS),
@@ -191,6 +233,12 @@ mod tests {
             "/web/",
             "/web/index.html",
             "/web/style.css",
+            "/web/core.js",
+            "/web/debug.js",
+            "/web/viewport.js",
+            "/web/input.js",
+            "/web/keyboard.js",
+            "/web/client.js",
             "/web/app.js",
             "/web/manifest.webmanifest",
             "/web/vendor/xterm.min.js",

@@ -1,53 +1,22 @@
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
-    Bounds, Context, Font, FontFallbacks, Hsla, MouseButton, Pixels, Render, Window,
-    WindowControlArea, canvas, div, fill, font, point, prelude::*, px, rgb, rgba, size,
+    Bounds, Context, Hsla, MouseButton, Render, Window, WindowControlArea, canvas, div,
+    fill, point, prelude::*, px, rgb, rgba, size,
 };
 
 use crate::cli::Theme;
-use crate::input::selection_contains_cell;
+use crate::geometry::{
+    CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, build_terminal_font,
+    terminal_content_padding_y,
+};
+use crate::selection::{cell_advance_cols, selection_contains_cell};
 use crate::{AgentTerminal, AgentTerminalInputHandler};
 
-pub(crate) const LINE_HEIGHT_SCALE: f32 = 18.0 / 14.0;
-pub(crate) const TEXT_PADDING_X: Pixels = px(12.0);
-pub(crate) const TEXT_PADDING_Y: Pixels = px(1.0);
-const MIN_TEXT_PADDING_Y: Pixels = px(1.0);
-pub(crate) const CUSTOM_TITLE_BAR_HEIGHT: Pixels = px(32.0);
-pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(42.0);
 const CURSOR_TRAIL_MIN_LEN_CELLS: f32 = 0.34;
 const CURSOR_TRAIL_MAX_LEN_CELLS: f32 = 1.35;
 const CURSOR_TRAIL_PRIMARY_ALPHA_SCALE: f32 = 0.62;
 const CURSOR_TRAIL_SECONDARY_ALPHA_SCALE: f32 = 0.28;
 const CURSOR_TRAIL_SECONDARY_LEN_SCALE: f32 = 1.6;
-
-pub(crate) fn measure_cell_width(
-    window: &mut Window,
-    font_family: &str,
-    font_fallbacks: Option<&FontFallbacks>,
-    font_size: Pixels,
-) -> Pixels {
-    let mono = build_terminal_font(font_family, font_fallbacks);
-    let font_id = window.text_system().resolve_font(&mono);
-    window
-        .text_system()
-        .advance(font_id, font_size, 'M')
-        .map(|advance| advance.width)
-        .unwrap_or(px(8.0))
-}
-
-fn build_terminal_font(font_family: &str, font_fallbacks: Option<&FontFallbacks>) -> Font {
-    let mut mono = font(font_family.to_string());
-    mono.fallbacks = font_fallbacks.cloned();
-    mono
-}
-
-fn cell_advance_cols(cell: &crate::terminal::CellSnapshot) -> usize {
-    if cell.spans_next_col {
-        usize::from(cell.width_cols.max(1))
-    } else {
-        1
-    }
-}
 
 fn visual_extra_cols_before(row: &[crate::terminal::CellSnapshot], logical_col: usize) -> f32 {
     let mut covered_until_col = 0usize;
@@ -65,20 +34,6 @@ fn visual_extra_cols_before(row: &[crate::terminal::CellSnapshot], logical_col: 
         covered_until_col = col_index.saturating_add(cell_advance_cols(cell));
     }
     extra_cols
-}
-
-pub(crate) fn line_height_for(font_size: Pixels) -> Pixels {
-    (font_size * LINE_HEIGHT_SCALE).max(font_size + px(2.0))
-}
-
-pub(crate) fn terminal_content_padding_y(
-    surface_height: Pixels,
-    line_height: Pixels,
-    rows: usize,
-) -> Pixels {
-    let grid_painted_height = line_height * rows as f32;
-    let vertical_slack = (surface_height - grid_painted_height).max(MIN_TEXT_PADDING_Y * 2.0);
-    (vertical_slack / 2.0).max(MIN_TEXT_PADDING_Y)
 }
 
 #[derive(Clone, Copy)]

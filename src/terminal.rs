@@ -29,7 +29,7 @@ use crate::history_log::HistoryLogger;
 use crate::input_log::InputLogger;
 use crate::keyboard::encode_keystroke;
 use crate::pty::{PtySession, SharedPtyWriter, write_to_pty};
-use crate::render::{
+use crate::geometry::{
     CUSTOM_TITLE_BAR_HEIGHT, STATUS_BAR_HEIGHT, TEXT_PADDING_X, TEXT_PADDING_Y, line_height_for,
     measure_cell_width, terminal_content_padding_y,
 };
