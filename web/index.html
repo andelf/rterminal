@@ -11,7 +11,7 @@
   <link rel="apple-touch-icon" sizes="180x180" href="/web/icons/apple-touch-icon.png?v=1">
   <link rel="manifest" href="/web/manifest.webmanifest">
   <link rel="stylesheet" href="/web/vendor/xterm.min.css?v=5.5.0">
-  <link rel="stylesheet" href="/web/style.css?v=20261125-6">
+  <link rel="stylesheet" href="/web/style.css?v=20261127-4">
 </head>
 <body>
   <!-- Lucide Icons (ISC): web/vendor/lucide-LICENSE -->
@@ -26,10 +26,11 @@
     <symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/></symbol>
     <symbol id="i-circle-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4M12 17h.01"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01"/></symbol>
   </svg>
   <header class="topbar">
-    <span class="brand">rterminal<span class="brand-dim"> / web</span></span>
-    <div class="actions">
+    <nav id="tabs" class="tabstrip" aria-label="Terminal tabs"></nav>
+    <div id="actions" class="actions">
       <button id="new-tab" class="icon-btn" title="New tab" aria-label="New tab"><svg class="ui-icon" aria-hidden="true"><use href="#i-plus"/></svg></button>
       <button id="scrollback" class="icon-btn" title="Scrollback" aria-label="Open scrollback"><svg class="ui-icon" aria-hidden="true"><use href="#i-history"/></svg></button>
       <button id="refresh" class="icon-btn" title="Refresh tabs" aria-label="Refresh tabs"><svg class="ui-icon" aria-hidden="true"><use href="#i-rotate-ccw"/></svg></button>
@@ -44,9 +45,8 @@
       </button>
       <button id="help-button" class="icon-btn" type="button" title="Help and touch gestures" aria-label="Open help" aria-haspopup="dialog"><svg class="ui-icon" aria-hidden="true"><use href="#i-circle-help"/></svg></button>
     </div>
+    <button id="tools-toggle" class="icon-btn tools-toggle" type="button" title="More tools" aria-label="More tools" aria-haspopup="true" aria-expanded="false"><svg class="ui-icon" aria-hidden="true"><use href="#i-more"/></svg></button>
   </header>
-
-  <nav id="tabs" class="tabstrip" aria-label="Terminal tabs"></nav>
 
   <main id="panes" class="panes">
     <div id="empty-state" class="empty-state" hidden>
@@ -67,6 +67,9 @@
   </section>
 
   <footer class="statusbar">
+    <span id="connection-badge" class="conn-badge" data-mode="connecting" title="Live PTY transport" aria-label="Connection mode: connecting">
+      <span class="conn-dot" aria-hidden="true"></span><span id="connection-label">Connecting</span>
+    </span>
     <span id="status">connecting…</span>
     <button id="steal-client" class="steal-client" type="button" title="Disconnect the other web client and take over this terminal" hidden>Steal</button>
     <form id="staged-input-form" class="staged-input-form" autocomplete="off">
@@ -102,6 +105,6 @@
   </div>
 
   <script src="/web/vendor/xterm.min.js?v=5.5.0"></script>
-  <script src="/web/app.js?v=20261125-18"></script>
+  <script src="/web/app.js?v=20261127-4"></script>
 </body>
 </html>

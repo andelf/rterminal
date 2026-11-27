@@ -5,9 +5,13 @@
 // all go through the same stable tab ids the native window uses.
 
 const tabStrip = document.getElementById("tabs");
+const actionsMenu = document.getElementById("actions");
+const toolsToggle = document.getElementById("tools-toggle");
 const panes = document.getElementById("panes");
 const statusEl = document.getElementById("status");
 const statusBar = document.querySelector(".statusbar");
+const connectionBadge = document.getElementById("connection-badge");
+const connectionLabel = document.getElementById("connection-label");
 const stealClientButton = document.getElementById("steal-client");
 const stagedInputForm = document.getElementById("staged-input-form");
 const stagedInput = document.getElementById("staged-input");
@@ -223,6 +227,7 @@ async function notifyClient(connected, force = false) {
     state.webConnected = connected;
     if (connected) state.clientBlocked = false;
     stealClientButton.hidden = true;
+    syncConnection();
     return true;
   } catch (error) {
     if (connected && /409|already connected/.test(String(error))) {
@@ -234,6 +239,7 @@ async function notifyClient(connected, force = false) {
         // A transient duplicate registration must not lock this page out
         // forever: retry once the server's 5 s stale-client window has passed.
         state.clientBlocked = true;
+        syncConnection();
         setTimeout(() => {
           state.clientBlocked = false;
           refresh();
@@ -280,6 +286,63 @@ function report(error) {
 function clearError() {
   statusBar.classList.remove("error");
 }
+
+// Transport indicator. WS is the live PTY data plane; HTTP is the degraded
+// snapshot-poll path where every keystroke is a separate POST.
+const CONNECTION_MODES = {
+  ws: { label: "WS", title: "WebSocket PTY stream active; keystrokes go over the socket" },
+  reconnect: { label: "Retry", title: "WebSocket dropped; retrying" },
+  http: { label: "HTTP", title: "HTTP polling fallback: full snapshot every 100ms, one POST per keystroke" },
+  blocked: { label: "Blocked", title: "Another web client owns this terminal" },
+  connecting: { label: "Connecting", title: "Establishing the live stream" },
+  idle: { label: "Idle", title: "No terminal tabs" },
+  offline: { label: "Offline", title: "Cannot reach the rterminal server" }
+};
+
+function setConnection(mode) {
+  const info = CONNECTION_MODES[mode] || CONNECTION_MODES.connecting;
+  if (connectionBadge.dataset.mode !== mode) connectionBadge.dataset.mode = mode;
+  if (connectionLabel.textContent !== info.label) connectionLabel.textContent = info.label;
+  connectionBadge.title = info.title;
+  connectionBadge.setAttribute("aria-label", `Connection: ${info.label}. ${info.title}`);
+}
+
+function syncConnection() {
+  if (state.clientBlocked) return setConnection("blocked");
+  const tab = currentTab();
+  if (!tab) return setConnection("idle");
+  if (tab.socket && tab.socket.readyState === WebSocket.OPEN) return setConnection("ws");
+  if (tab.reconnectTimer !== null || tab.wsFailures > 0) return setConnection("reconnect");
+  if (tab.timer !== null) return setConnection("http");
+  setConnection("connecting");
+}
+
+// On narrow viewports the tool row becomes a popup so the tabs keep the width.
+function closeToolsMenu() {
+  actionsMenu.classList.remove("open");
+  toolsToggle.setAttribute("aria-expanded", "false");
+}
+
+toolsToggle.addEventListener("click", () => {
+  const open = !actionsMenu.classList.contains("open");
+  actionsMenu.classList.toggle("open", open);
+  toolsToggle.setAttribute("aria-expanded", String(open));
+});
+
+actionsMenu.addEventListener("click", (event) => {
+  if (event.target instanceof Element && event.target.closest("button")) closeToolsMenu();
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (!actionsMenu.classList.contains("open")) return;
+  const target = event.target instanceof Element ? event.target : null;
+  if (target && target.closest("#actions, #tools-toggle")) return;
+  closeToolsMenu();
+});
+
+window.addEventListener("resize", () => {
+  if (window.innerWidth > 560) closeToolsMenu();
+});
 
 // ---------------------------------------------------------------------------
 // Input debug recorder
@@ -2046,6 +2109,7 @@ function streamUrl(tab) {
 function startStream(tab) {
   stopPolling(tab);
   if (state.clientBlocked || state.active !== tab.id) return;
+  syncConnection();
   // Snapshot tabs have no PTY, so they cannot be streamed. Their static
   // screen is served by the snapshot branch of /screen.ansi instead.
   if (tab.dto && tab.dto.kind === "snapshot") {
@@ -2068,6 +2132,7 @@ function startStream(tab) {
     if (gen !== tab.streamGen) return;
     tab.wsFailures = 0;
     clearError();
+    syncConnection();
   });
 
   socket.addEventListener("message", (event) => {
@@ -2101,7 +2166,10 @@ function startStream(tab) {
   socket.addEventListener("close", () => {
     if (gen !== tab.streamGen) return;
     tab.socket = null;
-    if (state.active !== tab.id || state.clientBlocked) return;
+    if (state.active !== tab.id || state.clientBlocked) {
+      syncConnection();
+      return;
+    }
     tab.wsFailures += 1;
     // A couple of quick retries cover a server restart. After that, fall back
     // to snapshots so the view is never permanently frozen.
@@ -2110,6 +2178,7 @@ function startStream(tab) {
       return;
     }
     tab.reconnectTimer = setTimeout(() => startStream(tab), 300 * tab.wsFailures);
+    syncConnection();
   });
 }
 
@@ -2151,6 +2220,7 @@ function flushPendingPaint(tab) {
 }
 
 async function poll(tab) {
+  syncConnection();
   if (state.clientBlocked || state.active !== tab.id) return;
   try {
     const raw = await api(`/tabs/${tab.id}/screen.ansi`);
@@ -2652,6 +2722,7 @@ async function refresh() {
     report(error);
   } finally {
     state.refreshing = false;
+    syncConnection();
   }
 }
 
@@ -2944,6 +3015,7 @@ async function bootstrap() {
     startWebApp(await response.json());
   } catch (error) {
     report(error);
+    setConnection("offline");
   }
 }
 

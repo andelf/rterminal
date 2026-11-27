@@ -68,14 +68,15 @@ body {
      iOS from panning the visual viewport over the unused layout-height gap. */
   touch-action: none;
   display: grid;
-  grid-template-rows: 38px 34px minmax(0, 1fr) 38px;
+  grid-template-rows: 38px minmax(0, 1fr) 38px;
 }
 
-/* The shell key toolbar is an extra grid row between the panes and the
+/* The tab strip shares the top bar with the tools; no separate grid row.
+   The shell key toolbar is an extra grid row between the panes and the
    status bar. Because body height tracks visualViewport.height, it ends up
    floating right above the soft keyboard on phones. */
 body.with-toolbar {
-  grid-template-rows: 38px 34px minmax(0, 1fr) auto 38px;
+  grid-template-rows: 38px minmax(0, 1fr) auto 38px;
 }
 
 .key-toolbar {
@@ -181,10 +182,10 @@ body.with-toolbar {
    remaining height instead of being covered; on narrow screens the keyboard
    scrolls sideways as one strip, like NanoKVM's fixed-width layout. */
 body.with-screen-keyboard {
-  grid-template-rows: 38px 34px minmax(0, 1fr) auto 38px;
+  grid-template-rows: 38px minmax(0, 1fr) auto 38px;
 }
 body.with-toolbar.with-screen-keyboard {
-  grid-template-rows: 38px 34px minmax(0, 1fr) auto auto 38px;
+  grid-template-rows: 38px minmax(0, 1fr) auto auto 38px;
 }
 
 .screen-keyboard {
@@ -321,9 +322,14 @@ body.with-toolbar.with-screen-keyboard {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+}
+
+.topbar {
+  position: relative;
+  gap: 6px;
+  padding: 0 6px;
 }
 
 .statusbar {
@@ -341,6 +347,39 @@ body.with-toolbar.with-screen-keyboard {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Live transport indicator: WS = WebSocket PTY stream, HTTP = polling fallback. */
+.conn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--muted);
+  white-space: nowrap;
+  user-select: none;
+}
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.08);
+}
+.conn-badge[data-mode="ws"] { color: #56d364; }
+.conn-badge[data-mode="http"] { color: #e3b341; }
+.conn-badge[data-mode="reconnect"],
+.conn-badge[data-mode="connecting"] { color: var(--muted); }
+.conn-badge[data-mode="blocked"],
+.conn-badge[data-mode="offline"] { color: #ff7b72; }
+.conn-badge[data-mode="reconnect"] .conn-dot,
+.conn-badge[data-mode="connecting"] .conn-dot { animation: conn-pulse 1.2s ease-in-out infinite; }
+@keyframes conn-pulse { 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) {
+  .conn-badge .conn-dot { animation: none !important; }
 }
 
 .steal-client {
@@ -391,13 +430,30 @@ body.with-toolbar.with-screen-keyboard {
 @media (max-width: 560px) {
   .staged-input-form { flex-basis: 68%; min-width: 130px; }
   #status { flex: 1 1 32%; }
+  /* Too little room for the whole tool row: keep one trigger and pop the rest. */
+  #actions {
+    display: none;
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 6px;
+    z-index: 40;
+    flex-wrap: wrap;
+    max-width: calc(100vw - 12px);
+    padding: 6px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+  #actions.open { display: flex; }
+  .topbar button.tools-toggle { display: inline-flex; }
 }
 
 .statusbar.error #status { color: #ff7b72; }
 
-.brand { font-weight: 600; letter-spacing: 0.2px; }
-.brand-dim { color: var(--muted); font-weight: 400; }
-.actions { margin-left: auto; display: flex; gap: 4px; }
+.actions { margin-left: auto; display: flex; gap: 4px; flex: 0 0 auto; }
+/* Higher specificity than .icon-btn so the narrow-screen override still wins. */
+.topbar .tools-toggle { display: none; }
 
 .icon-btn {
   min-width: 30px;
@@ -507,11 +563,13 @@ button.mode-toggle[aria-pressed="true"],
 
 .tabstrip {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: 2px;
-  padding: 4px 6px 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
   overflow-x: auto;
   touch-action: pan-x;
   overscroll-behavior: contain;
@@ -525,8 +583,7 @@ button.mode-toggle[aria-pressed="true"],
   max-width: 240px;
   padding: 4px 8px;
   border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 6px 6px 0 0;
+  border-radius: 6px;
   background: var(--panel-2);
   color: var(--muted);
   cursor: pointer;
