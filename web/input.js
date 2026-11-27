@@ -318,8 +318,10 @@ function encodeTyped(text) {
 }
 
 // A toolbar key is a semantic key, so latched modifiers turn a plain arrow
-// into Ctrl+Arrow etc. instead of appending to a pre-baked byte string.
+// into Ctrl+Arrow etc. instead of appending to a pre-baked byte string. A
+// literal chord already spells out its own modifiers and ignores latches.
 function encodeToolbarKey(key) {
+  if (key.literal) return key.data;
   if (!anyModifier()) return key.data;
   // Backspace must match the native encoder: plain DEL, Ctrl-BS, ESC prefix
   // for Alt/Meta. Treating it as a generic control byte would swallow Ctrl.
@@ -433,7 +435,9 @@ const EDIT_KEYS = [
   { label: "^U", data: "\x15", title: "clear line" },
   { label: "^K", data: "\x0b", title: "clear to end" },
   { label: "^L", data: "\x0c", title: "clear screen" },
-  { label: "^R", data: "\x12", title: "reverse search" }
+  { label: "^R", data: "\x12", title: "reverse search" },
+  // One-tap chord: CSI 1;5 F is what xterm sends for Ctrl+End.
+  { label: "^End", data: "\x1b[1;5F", literal: true, title: "Ctrl+End" }
 ];
 
 // Arrows are pinned in their own pad on the right and repeat while held.
