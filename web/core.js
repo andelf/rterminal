@@ -119,49 +119,88 @@ function applySizeModeUi() {
 applySizeModeUi();
 toolbarToggle.setAttribute("aria-pressed", String(state.showToolbar));
 
-// Command buttons act without stealing the editor's focus or dismissing the
-// OS keyboard. Keep native click and keyboard activation intact; modal Help
-// and keyboard-mode focus handling deliberately use their own rules.
-for (const id of [
-  "new-tab",
-  "empty-new-tab",
-  "scrollback",
-  "refresh",
-  "toggle-toolbar",
-  "debug",
-  "size-mode",
-  "sync-size",
-  "staged-input-send"
-]) {
-  const button = document.getElementById(id);
-  let suppressTrustedClickUntil = 0;
-  button.addEventListener("click", (event) => {
-    if (event.isTrusted && performance.now() < suppressTrustedClickUntil) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }
-  }, true);
-  button.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    if (event.pointerType === "touch") {
-      suppressTrustedClickUntil = performance.now() + 500;
-    }
-    event.preventDefault();
-  });
-  button.addEventListener("pointerup", (event) => {
-    if (event.button !== 0 || event.pointerType !== "touch") return;
-    // iOS/Chrome may suppress the compatibility click after pointerdown was
-    // cancelled. Complete the touch explicitly without allowing a duplicate.
-    event.preventDefault();
-    button.click();
-  });
+// Every control other than the terminal and the quick input field is an
+// action, never an editor. A button that takes focus swallows the hardware
+// keyboard's next keystrokes and dismisses the OS keyboard, so the terminal
+// looks dead until it is tapped again. Cancelling pointerdown suppresses the
+// focus change; native click and keyboard activation keep working, and dialogs
+// are exempt because their fields and close button are meant to hold focus.
+// iOS/Chrome can drop the compatibility click after a cancelled pointerdown,
+// so a touch tap is completed explicitly on pointerup; the trusted click that
+// may still follow is swallowed to keep it to a single activation.
+const focusKeptPresses = new Map();
+const focusKeptClicks = new WeakMap();
+const TAP_SLOP_PX = 10;
+
+function focusKeptControl(target) {
+  if (!(target instanceof Element)) return null;
+  const control = target.closest("button, .tab");
+  if (!control || control.closest("[role='dialog']")) return null;
+  return control;
 }
+
+document.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  const control = focusKeptControl(event.target);
+  if (!control) return;
+  const touch = event.pointerType === "touch";
+  focusKeptPresses.set(event.pointerId, {
+    control,
+    touch,
+    x: event.clientX,
+    y: event.clientY
+  });
+  if (touch) focusKeptClicks.set(control, performance.now() + 500);
+  event.preventDefault();
+}, true);
+
+document.addEventListener("pointerup", (event) => {
+  const press = focusKeptPresses.get(event.pointerId);
+  focusKeptPresses.delete(event.pointerId);
+  if (!press || !press.touch) return;
+  // A finger that travelled was scrolling or panning a strip, not tapping.
+  const dx = event.clientX - press.x;
+  const dy = event.clientY - press.y;
+  if (dx * dx + dy * dy > TAP_SLOP_PX * TAP_SLOP_PX) return;
+  if (!press.control.isConnected) return;
+  event.preventDefault();
+  press.control.click();
+}, true);
+
+document.addEventListener("pointercancel", (event) => {
+  focusKeptPresses.delete(event.pointerId);
+}, true);
+
+document.addEventListener("click", (event) => {
+  const control = focusKeptControl(event.target);
+  if (!control) return;
+  if (event.isTrusted && performance.now() < (focusKeptClicks.get(control) || 0)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
+
+// Closing help returns focus where it came from — the terminal or the quick
+// input field. A header button must not hold focus afterwards, or the next
+// hardware keystroke (including Enter) would activate that button instead of
+// reaching the terminal. With no editor to return to, nothing is focused.
+let helpReturnFocus = null;
 
 function closeHelp() {
   helpOverlay.hidden = true;
-  helpButton.focus({ preventScroll: true });
+  const back = helpReturnFocus;
+  helpReturnFocus = null;
+  if (back && back.isConnected &&
+      (back.tagName === "INPUT" || back.tagName === "TEXTAREA")) {
+    back.focus({ preventScroll: true });
+  } else {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) active.blur();
+  }
 }
 helpButton.addEventListener("click", () => {
+  const active = document.activeElement;
+  helpReturnFocus = active instanceof HTMLElement ? active : null;
   helpOverlay.hidden = false;
   helpCloseButton.focus({ preventScroll: true });
 });
