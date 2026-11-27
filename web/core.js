@@ -356,7 +356,8 @@ function syncConnection() {
   setConnection("connecting");
 }
 
-// On narrow viewports the tool row becomes a popup so the tabs keep the width.
+// When the measured header cannot hold the whole tool row and the tabs, the
+// row becomes a popup so the tabs keep the width.
 function closeToolsMenu() {
   actionsMenu.classList.remove("open");
   toolsToggle.setAttribute("aria-expanded", "false");
@@ -379,9 +380,84 @@ document.addEventListener("pointerdown", (event) => {
   closeToolsMenu();
 });
 
-window.addEventListener("resize", () => {
-  if (window.innerWidth > 560) closeToolsMenu();
+// The tool row folds into the "…" trigger as soon as it would squeeze the tab
+// strip below the width its tabs need. A viewport breakpoint cannot know that:
+// the tool row has a fixed width, the tabs do not. Re-measure on header resize
+// and on tab changes so the fold is timely, and expanding closes the menu.
+const topbar = document.querySelector("header.topbar");
+const newTabButton = document.getElementById("new-tab");
+let fitFrame = null;
+
+// The expanded row's width has to be measured even while it is folded away.
+// Force it back into one flex row off-screen and restore the inline style in
+// the same task, so the temporary layout is never painted.
+function expandedToolsWidth() {
+  const previous = actionsMenu.getAttribute("style");
+  actionsMenu.style.cssText =
+    "position:absolute;left:-9999px;right:auto;top:0;display:flex;visibility:hidden;" +
+    "pointer-events:none;flex-wrap:nowrap;width:max-content;max-width:none;" +
+    "padding:0;border:0;box-shadow:none";
+  const width = actionsMenu.scrollWidth;
+  if (previous === null) actionsMenu.removeAttribute("style");
+  else actionsMenu.setAttribute("style", previous);
+  return width;
+}
+
+// The width the tabs want, independent of how much the strip is currently
+// given: clone the strip off-screen at max-content so flex shrinking does not
+// report an already-squeezed width as the requirement.
+function tabContentWidth() {
+  if (!tabStrip.firstElementChild) return 0;
+  const clone = tabStrip.cloneNode(true);
+  clone.removeAttribute("id");
+  clone.style.cssText =
+    "position:absolute;left:-9999px;top:0;width:max-content;max-width:none;" +
+    "overflow:visible;visibility:hidden;pointer-events:none";
+  topbar.appendChild(clone);
+  const width = clone.scrollWidth;
+  clone.remove();
+  return width;
+}
+
+function updateHeaderFit() {
+  fitFrame = null;
+  const style = getComputedStyle(topbar);
+  // The header can be laid out wider than the viewport while its contents
+  // overflow, so the viewport is the budget — not the header's own width,
+  // which would grow with the very content this is trying to fold.
+  const budget = document.documentElement.clientWidth
+    - parseFloat(style.paddingLeft)
+    - parseFloat(style.paddingRight);
+  const gap = parseFloat(style.columnGap || style.gap) || 0;
+  const needed = newTabButton.offsetWidth + expandedToolsWidth()
+    + tabContentWidth() + gap * 2;
+  const compact = budget < needed;
+  topbar.classList.toggle("compact-tools", compact);
+  if (!compact) closeToolsMenu();
+}
+
+function scheduleHeaderFit() {
+  if (fitFrame !== null) return;
+  fitFrame = requestAnimationFrame(updateHeaderFit);
+}
+
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(scheduleHeaderFit).observe(topbar);
+} else {
+  window.addEventListener("resize", scheduleHeaderFit);
+}
+new MutationObserver(scheduleHeaderFit).observe(tabStrip, {
+  childList: true,
+  characterData: true,
+  subtree: true
 });
+// The sync-size button appears only in browser-size mode; the row gets wider.
+new MutationObserver(scheduleHeaderFit).observe(actionsMenu, {
+  attributes: true,
+  attributeFilter: ["hidden"],
+  subtree: true
+});
+scheduleHeaderFit();
 
 // ---------------------------------------------------------------------------
 // Input debug recorder

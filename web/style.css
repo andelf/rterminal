@@ -68,6 +68,11 @@ body {
      iOS from panning the visual viewport over the unused layout-height gap. */
   touch-action: none;
   display: grid;
+  /* One column, pinned to the viewport. Without this the implicit `auto`
+     column sizes to the widest row content, so a long tab strip (or any wide
+     child) pushes the whole chrome past the viewport and clips the right-hand
+     controls instead of letting the strip scroll. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 38px minmax(0, 1fr) 38px;
 }
 
@@ -430,24 +435,28 @@ body.with-toolbar.with-screen-keyboard {
 @media (max-width: 560px) {
   .staged-input-form { flex-basis: 68%; min-width: 130px; }
   #status { flex: 1 1 32%; }
-  /* Too little room for the whole tool row: keep one trigger and pop the rest. */
-  #actions {
-    display: none;
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 6px;
-    z-index: 40;
-    flex-wrap: wrap;
-    max-width: calc(100vw - 12px);
-    padding: 6px;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  }
-  #actions.open { display: flex; }
-  .topbar button.tools-toggle { display: inline-flex; }
 }
+
+/* Too little room for the whole tool row: keep one trigger and pop the rest.
+   The client applies this class from measured widths — tab count matters as
+   much as window width — so the row folds as soon as it would squeeze the tab
+   strip, instead of at a fixed breakpoint. */
+.topbar.compact-tools #actions {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 6px;
+  z-index: 40;
+  flex-wrap: wrap;
+  max-width: calc(100vw - 12px);
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.topbar.compact-tools #actions.open { display: flex; }
+.topbar.compact-tools .tools-toggle { display: inline-flex; }
 
 .statusbar.error #status { color: #ff7b72; }
 
