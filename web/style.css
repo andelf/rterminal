@@ -424,8 +424,11 @@ body.with-toolbar.with-screen-keyboard {
 
 #staged-input-send {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 28px;
-  padding: 3px 10px;
+  padding: 3px 7px;
   /* Submission is an action, not a persistent toggle. */
   color: var(--fg);
   background: var(--action-bg);

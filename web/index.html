@@ -27,6 +27,7 @@
     <symbol id="i-circle-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4M12 17h.01"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01"/></symbol>
+    <symbol id="i-return" viewBox="0 0 24 24"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></symbol>
   </svg>
   <header class="topbar">
     <button id="new-tab" class="icon-btn" title="New tab" aria-label="New tab"><svg class="ui-icon" aria-hidden="true"><use href="#i-plus"/></svg></button>
@@ -80,8 +81,8 @@
     <span id="status">connecting…</span>
     <button id="steal-client" class="steal-client" type="button" title="Disconnect the other web client and take over this terminal" hidden>Steal</button>
     <form id="staged-input-form" class="staged-input-form" autocomplete="off">
-      <input id="staged-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="input any text" aria-label="Text to insert into the active terminal; empty submission sends Enter" title="Type or dictate text. Click Input or press Enter to insert it. Empty submission sends Enter; Backspace on an empty field deletes in the terminal.">
-      <button id="staged-input-send" type="submit" title="Insert text at the active terminal cursor; submit an empty field to send Enter">Input</button>
+      <input id="staged-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="input any text" aria-label="Text to insert into the active terminal; empty submission sends Enter" title="Type or dictate text. Tap the return icon or press Enter to insert it. Empty submission sends Enter; Backspace on an empty field deletes in the terminal.">
+      <button id="staged-input-send" type="submit" aria-label="Insert staged text; an empty field sends Enter" title="Insert text at the active terminal cursor; submit an empty field to send Enter"><svg class="ui-icon" aria-hidden="true"><use href="#i-return"/></svg></button>
     </form>
   </footer>
 
