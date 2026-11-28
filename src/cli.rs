@@ -84,10 +84,9 @@ pub(crate) struct CliOptions {
     pub(crate) api_addr: String,
     #[arg(
         long,
-        default_value = "127.0.0.1:7879",
-        help = "Address to bind the browser WebSocket data stream on (host:port)"
+        help = "Deprecated and ignored: the WebSocket shares the HTTP port"
     )]
-    pub(crate) ws_addr: String,
+    pub(crate) ws_addr: Option<String>,
     #[arg(long, help = "Shared token required by the web/API endpoints")]
     pub(crate) web_token: Option<String>,
 }
@@ -261,15 +260,21 @@ mod tests {
     }
 
     #[test]
-    fn ws_addr_defaults_to_loopback() {
+    fn ws_addr_defaults_to_unset() {
         let cli = parse_cli_options_from(Vec::<String>::new());
-        assert_eq!(cli.ws_addr, "127.0.0.1:7879");
+        assert!(cli.ws_addr.is_none());
+
+        let cli = parse_cli_options_from(vec![
+            "--ws-addr".to_string(),
+            "127.0.0.1:7880".to_string(),
+        ]);
+        assert_eq!(cli.ws_addr.as_deref(), Some("127.0.0.1:7880"));
     }
 
     #[test]
-    fn ws_addr_accepts_override_and_ephemeral_port() {
-        let cli = parse_cli_options_from(vec!["--ws-addr".to_string(), "127.0.0.1:0".to_string()]);
-        assert_eq!(cli.ws_addr, "127.0.0.1:0");
+    fn ws_addr_accepts_override() {
+        let cli = parse_cli_options_from(vec!["--ws-addr".to_string(), "127.0.0.1:7880".to_string()]);
+        assert_eq!(cli.ws_addr.as_deref(), Some("127.0.0.1:7880"));
     }
 
     #[test]

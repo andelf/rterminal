@@ -198,7 +198,6 @@ fn main() {
         eprintln!("warning: --cursor-trail has no effect when --no-cursor-slide is set");
     }
     warn_if_public_bind("HTTP API", &cli.api_addr);
-    warn_if_public_bind("WebSocket", &cli.ws_addr);
 
     let _instance = match acquire_instance_lock() {
         Ok(guard) => guard,
@@ -208,23 +207,19 @@ fn main() {
         }
     };
 
+    if cli.ws_addr.is_some() {
+        eprintln!(
+            "warning: --ws-addr is deprecated and ignored; the web UI and \
+             WebSocket share the HTTP port ({})",
+            cli.api_addr
+        );
+    }
     let (api_tx, api_rx) = async_channel::unbounded::<crate::api_protocol::ApiCommand>();
-    if let Err(err) = crate::api_server::start_api_server(&cli.api_addr, api_tx.clone()) {
+    if let Err(err) = crate::api_server::start_api_server(&cli.api_addr, api_tx) {
         eprintln!("failed to start api server on {}: {err:#}", cli.api_addr);
         eprintln!("another instance may already be using this address; exiting.");
         std::process::exit(1);
     }
-    let ws_port = match crate::web_socket::start_ws_server(&cli.ws_addr, api_tx) {
-        Ok(port) => port,
-        Err(err) => {
-            eprintln!(
-                "failed to start web data stream on {}: {err:#}",
-                cli.ws_addr
-            );
-            std::process::exit(1);
-        }
-    };
-    crate::api_server::set_ws_port(ws_port);
 
     application().run(move |cx: &mut App| {
         cx.on_action(|_: &QuitApp, cx: &mut App| cx.quit());

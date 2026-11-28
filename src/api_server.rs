@@ -14,11 +14,8 @@ use std::thread;
 
 static WS_PORT: OnceLock<u16> = OnceLock::new();
 
-/// The browser builds its WebSocket URL from its own host plus this port, so
-/// an iPad reaching the PC by LAN address still connects to the right place.
-pub(crate) fn set_ws_port(port: u16) {
-    let _ = WS_PORT.set(port);
-}
+// Tests never assert /web/config, so first-writer-wins across parallel tests
+// is benign.
 
 #[derive(Debug)]
 pub(crate) struct RouteError {
@@ -386,12 +383,19 @@ async fn web_auth(body: axum::body::Bytes) -> Response {
         })
         .unwrap_or_default();
     if !crate::auth::token_matches(&token) {
-        return axum_error(401, "invalid token");
+        let mut response = axum_error(401, "invalid token");
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+        return response;
     }
     let mut response = axum_text(200, "application/json; charset=utf-8", r#"{"ok":true}"#);
     if let Ok(value) = header::HeaderValue::from_str(&crate::auth::auth_cookie_header()) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
     response
 }
 
