@@ -64,7 +64,7 @@ This is **not** intended to be a general-purpose terminal replacement. It is an 
 | `input.rs` | Keyboard/mouse/IME/paste handling, input-line shadow model, AX override logic, selection and clipboard copy |
 | `terminal.rs` | Core terminal state: PTY lifecycle, `Term` wiring, snapshot generation, cursor animation, scrollback dump, OSC 52 clipboard integration |
 | `tabs.rs` | Multi-tab management, HTTP command handling, tab bar rendering and browser-client coordination |
-| `api_server.rs` | HTTP listener (`tiny_http`), request routing and response rendering for the tmux-style control API |
+| `api_server.rs` | HTTP/WebSocket listener (`axum` + `tokio`), request routing and response rendering for the tmux-style control API |
 | `web_socket.rs` | Browser WebSocket data plane: attach snapshots, stream PTY output and accept input/control frames |
 | `web_ui.rs` | Serves the xterm.js browser client; reads assets from disk in debug builds and embeds them in release builds |
 | `web_ansi.rs` | Encodes `ScreenSnapshot` as an ANSI repaint (colour, cursor, alt screen and mouse mode) |
@@ -139,14 +139,14 @@ A consumer-side skill lives in `.claude/skills/driving-rterminal/` with the full
 
 ### Browser Client (`xterm.js`)
 
-Open **http://127.0.0.1:7878/web/** while the app is running. The page is served by the same tiny_http server and has no external assets — xterm.js 5.5.0 (MIT, see `web/vendor/xterm-LICENSE`) is vendored. An SVG favicon, Apple touch icon and Web App manifest with 192/512 px icons are included for browser tabs and home-screen installation. Toolbar controls use inline Lucide SVG icons (ISC, `web/vendor/lucide-LICENSE`), so they share one visual style and need no external icon service.
+Open **http://127.0.0.1:7878/web/** while the app is running. The page is served by the same HTTP server and has no external assets — xterm.js 5.5.0 (MIT, see `web/vendor/xterm-LICENSE`) is vendored. An SVG favicon, Apple touch icon and Web App manifest with 192/512 px icons are included for browser tabs and home-screen installation. Toolbar controls use inline Lucide SVG icons (ISC, `web/vendor/lucide-LICENSE`), so they share one visual style and need no external icon service.
 
 For development, debug builds read these assets from `web/` on every request, so editing JS/CSS only needs a browser refresh instead of a full rebuild. Set `RTERMINAL_WEB_DIR` to override the location; otherwise the app searches `web/` next to the executable, its parents, and finally the current directory. Release builds still embed the assets into the binary, so a single exe works from any cwd.
 
 HTML and unversioned resources use `Cache-Control: no-store`. Versioned JS, CSS, icons and vendored assets use a one-year `immutable` cache. The browser client is split into `core.js`, `debug.js`, `viewport.js`, `input.js`, `keyboard.js`, `client.js`, and `app.js`. After changing any browser module or `web/style.css`, increment its `?v=` value in `web/index.html`; use `?v=5.5.0` for vendored xterm and `?v=1` for the current icons. This keeps refreshes fast without leaving stale code on iOS Chrome.
 
 - The tab strip mirrors the native window's tab list (stable ids, titles, active tab). `+` / `×` / click create, close and activate real tabs.
-- Each active tab attaches a WebSocket data stream on a dedicated port (default `127.0.0.1:7879`, override with `--ws-addr`). The browser discovers the port through `GET /web/config` and connects to `ws(s)://<same-host>:<port>/ws/tabs/:id?client=<id>`. The server immediately sends a full ANSI snapshot (`{"type":"snapshot",...}`), then streams raw PTY output as **binary frames**; `term.write(Uint8Array)` handles split UTF-8 sequences. Resize and heartbeat are JSON control frames on the same socket; the HTTP control plane (`/tabs`, `/resize`, `/scroll`, `/web/client`, `/web/debug`) is unchanged. HTTP snapshot polling at 100 ms remains a fallback after repeated connection failures. Only one browser client may own the web session — a second one gets HTTP 409 until it explicitly uses Steal.
+- Each active tab attaches a WebSocket data stream on the **same port as the HTTP API** (default `127.0.0.1:7878`). The browser discovers the port through `GET /web/config` (its `ws_port` field now equals the HTTP port) and connects to `ws(s)://<same-host>:<port>/ws/tabs/:id?client=<id>`. The server immediately sends a full ANSI snapshot (`{"type":"snapshot",...}`), then streams raw PTY output as **binary frames**; `term.write(Uint8Array)` handles split UTF-8 sequences. Resize and heartbeat are JSON control frames on the same socket; the HTTP control plane (`/tabs`, `/resize`, `/scroll`, `/web/client`, `/web/debug`) is unchanged. HTTP snapshot polling at 100 ms remains a fallback after repeated connection failures. Only one browser client may own the web session — a second one gets HTTP 409 until it explicitly uses Steal. The former dedicated WS port (`--ws-addr`, default `127.0.0.1:7879`) is deprecated and ignored.
 - Keyboard input goes out as binary WebSocket frames on the same PTY the native window drives (`onData` is UTF-8 encoded, `onBinary` is forwarded byte-for-byte with its one-char-per-byte shape intact). `POST /tabs/:id/input` is still accepted as a fallback while reconnecting. The Bug-icon debug recorder adds `debug=1` to the socket URL so the server logs the exact bytes that reached the PTY alongside the HTTP trace.
 - A tiny embedded font supplies the four Powerline separators (`U+E0B0/E0B2/E0B4/E0B6`) used by `oh-my-posh`, so prompts render as solid triangles instead of boxes even on phones/clients without a Nerd Font installed.
 - On touch devices one-finger panning reaches a wider/taller PC grid, while pinch/double-tap zoom and page overscroll are disabled. The terminal is a fixed character grid, so zoom would desynchronise cells, selection and soft-keyboard detection. If a browser still zooms, the script ignores the zoomed `visualViewport` instead of treating it as a keyboard.
@@ -240,7 +240,7 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 | `--no-option-as-meta` | off | Treat Option key as native input instead of Meta/Alt |
 | `--show-status-bar` | off | Show debug status bar at bottom |
 | `--api-addr <host:port>` | `127.0.0.1:7878` | Bind address for the HTTP control API (use `:0` for an OS-assigned port; the actual port is logged on startup) |
-| `--ws-addr <host:port>` | `127.0.0.1:7879` | Bind address for the browser WebSocket data stream (`:0` is supported and reported through `/web/config`) |
+| `--ws-addr <host:port>` | — | Deprecated and ignored: the WebSocket shares the HTTP port (default `127.0.0.1:7878`) |
 | `--web-token <token>` | — | Shared token for web/API access; prefer `RTERMINAL_WEB_TOKEN` |
 | `--input-log-file <path>` | — | Write structured input events to JSONL file |
 | `--input-log-raw` | off | Include base64-encoded raw PTY bytes; requires `--input-log-file` |
@@ -255,8 +255,8 @@ cargo run -- --history-log-dir /tmp/agent-terminal-history
 - **PTY**: [portable-pty](https://crates.io/crates/portable-pty) — Cross-platform PTY abstraction
 - **macOS Interop** (macOS target only): [cocoa](https://crates.io/crates/cocoa) + [objc](https://crates.io/crates/objc) — Native Objective-C bridge for accessibility APIs
 - **CLI**: [clap](https://crates.io/crates/clap) — Argument parsing
-- **HTTP control**: [tiny_http](https://crates.io/crates/tiny_http) — Lightweight server for the control API and browser client
-- **Browser data stream**: [tungstenite](https://crates.io/crates/tungstenite) — WebSocket transport for PTY output and browser input
+- **HTTP control**: [axum](https://crates.io/crates/axum) on [tokio](https://crates.io/crates/tokio) — Control API and browser client
+- **Browser data stream**: axum's built-in WebSocket — PTY output and browser input, shared with the HTTP port
 
 ## Building
 

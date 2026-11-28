@@ -258,7 +258,7 @@ All error bodies have shape `{"error": "<message>"}` with `Content-Type: applica
 The spec acknowledges these gaps; if you hit one, work around it client-side or surface to the user:
 
 - **No rename endpoint** — but the shell can emit `\e]0;new title\a` (OSC 0) which rterminal honours and surfaces via `title`.
-- **No agent-facing streaming / SSE endpoint** — poll `/screen` or `counters.bytes_from_pty`. The built-in browser UI uses a separate WebSocket data plane on `127.0.0.1:7879` by default (`--ws-addr`).
+- **No agent-facing streaming / SSE endpoint** — poll `/screen` or `counters.bytes_from_pty`. The built-in browser UI's WebSocket data plane shares this same HTTP port (`GET /ws/tabs/:id`); the old dedicated `--ws-addr` port (default `127.0.0.1:7879`) is deprecated and ignored.
 - **No per-request timeout on the server side** — clients should use `curl --max-time 5` or equivalent to bound their waits.
 - **No auth** — the server binds to loopback by default. Don't use `--api-addr 0.0.0.0:...` on a shared or untrusted network.
 - **`POST /tabs` takes no parameters** — can't specify `cwd`, `command`, or environment. Workaround: create the tab, then `POST /input` a `cd …` and the command you want to run.
