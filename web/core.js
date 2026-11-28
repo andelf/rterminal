@@ -59,7 +59,7 @@ function savedToolbar() {
 }
 
 const FONT_SIZE_DEFAULT = 14;
-const FONT_SIZE_MIN = 8;
+const FONT_SIZE_MIN = 6;
 const FONT_SIZE_MAX = 32;
 
 function clampFontSize(size) {
