@@ -953,6 +953,34 @@ function closeScrollback() {
   scrollbackLoad += 1;
 }
 
+// The dump ends at the last non-empty row of the newest screen, so the line
+// the terminal is currently showing can be counted back from that end. Opening
+// the view lands on what the user was looking at instead of the oldest
+// history. Blank rows below the last content are absent from the dump, hence
+// the blankBelow correction.
+function scrollToTerminalViewport(tab) {
+  const term = tab && tab.term;
+  const buffer = term && term.buffer && term.buffer.active;
+  if (!buffer || !term.rows) return;
+  const rows = term.rows;
+  let blankBelow = 0;
+  for (let i = buffer.baseY + rows - 1; i >= buffer.baseY; i--) {
+    const line = buffer.getLine(i);
+    if (line && line.translateToString(true) !== "") break;
+    blankBelow++;
+  }
+  const lines = scrollbackText.textContent.split("\n");
+  // Every row is terminated by "\n"; the empty tail is not a content line.
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  const scrolledUp = Math.max(0, buffer.baseY - buffer.viewportY);
+  const top = Math.min(
+    Math.max(0, lines.length + blankBelow - rows - scrolledUp),
+    Math.max(0, lines.length - 1)
+  );
+  const lineHeight = parseFloat(getComputedStyle(scrollbackText).lineHeight);
+  if (lineHeight > 0) scrollbackText.scrollTop = top * lineHeight;
+}
+
 async function loadScrollback(tab) {
   const seq = ++scrollbackLoad;
   scrollbackTabId = tab.id;
@@ -961,7 +989,7 @@ async function loadScrollback(tab) {
     const text = await api(`/tabs/${tab.id}/scrollback`);
     if (seq !== scrollbackLoad) return;
     scrollbackText.textContent = text;
-    scrollbackText.scrollTop = 0;
+    scrollToTerminalViewport(tab);
   } catch (error) {
     if (seq !== scrollbackLoad) return;
     scrollbackText.textContent =
