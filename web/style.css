@@ -475,6 +475,19 @@ body.with-toolbar.with-screen-keyboard {
   justify-content: center;
 }
 
+/* The font-size pair reads as text, not icons; keep the caps compact. */
+#font-smaller,
+#font-larger {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#font-smaller:disabled,
+#font-larger:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .ui-icon {
   width: 17px;
   height: 17px;
@@ -730,8 +743,11 @@ button.mode-toggle[aria-pressed="true"],
   padding: 12px;
   overflow: auto;
   /* Same face and metrics as the terminal image, so the text view reads as the
-     terminal's own output rather than a separate document. */
-  font: 14px/1.2 "Cascadia Mono", Consolas, "rterm Powerline", "Segoe UI Symbol", monospace;
+     terminal's own output rather than a separate document. The size follows
+     the A−/A+ setting through --term-font-size. */
+  font-family: "Cascadia Mono", Consolas, "rterm Powerline", "Segoe UI Symbol", monospace;
+  font-size: var(--term-font-size, 14px);
+  line-height: 1.2;
   white-space: pre;
   touch-action: pan-x pan-y;
   -webkit-user-select: text;

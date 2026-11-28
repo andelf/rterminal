@@ -3,7 +3,7 @@ function makeTerm(cols, rows) {
     cols,
     rows,
     fontFamily: '"Cascadia Mono", Consolas, "rterm Powerline", "Segoe UI Symbol", monospace',
-    fontSize: 14,
+    fontSize: state.fontSize,
     lineHeight: 1.2,
     cursorBlink: false,
     scrollback: 2000,
@@ -422,6 +422,9 @@ function activate(id, fromUser) {
 
   const next = state.tabs.get(id);
   if (next) {
+    // Font size is a viewing preference, not per-tab state; apply it here so a
+    // hidden tab catches up when it becomes visible again.
+    applyFontToTab(next);
     fitTab(next);
     applyPadding(next);
     if (next.followCursor) scrollToCursor(next);
@@ -938,6 +941,54 @@ syncSizeButton.addEventListener("click", () => {
   fitTab(tab, true, true);
   applyPadding(tab);
 });
+
+// Web terminal font size. The PTY grid stays the server's; the font only
+// changes how large the same cells are drawn here. One click is one pixel, so
+// there is no repeat timer and no burst of resize requests.
+const fontSmallerButton = document.getElementById("font-smaller");
+const fontLargerButton = document.getElementById("font-larger");
+
+function applyFontToTab(tab) {
+  if (!tab || !tab.term || !tab.term.options) return;
+  if (tab.term.options.fontSize !== state.fontSize) {
+    tab.term.options.fontSize = state.fontSize;
+  }
+}
+
+function syncFontSizeUi() {
+  fontSmallerButton.disabled = state.fontSize <= FONT_SIZE_MIN;
+  fontLargerButton.disabled = state.fontSize >= FONT_SIZE_MAX;
+  const label = `Terminal font ${state.fontSize}px`;
+  fontSmallerButton.title = `${label} — make smaller`;
+  fontSmallerButton.setAttribute("aria-label", `${label}; make smaller`);
+  fontLargerButton.title = `${label} — make larger`;
+  fontLargerButton.setAttribute("aria-label", `${label}; make larger`);
+}
+
+function applyFontSize(size) {
+  const next = clampFontSize(size);
+  if (next === state.fontSize) return;
+  state.fontSize = next;
+  try {
+    localStorage.setItem("rterminal.fontSize", String(next));
+  } catch {
+    // Storage may be disabled; the size still applies for this session.
+  }
+  // The scrollback text view keeps matching the terminal's face and size.
+  document.documentElement.style.setProperty("--term-font-size", `${next}px`);
+  const tab = currentTab();
+  if (tab) {
+    applyFontToTab(tab);
+    fitTab(tab);
+    applyPadding(tab);
+  }
+  syncFontSizeUi();
+}
+
+fontSmallerButton.addEventListener("click", () => applyFontSize(state.fontSize - 1));
+fontLargerButton.addEventListener("click", () => applyFontSize(state.fontSize + 1));
+document.documentElement.style.setProperty("--term-font-size", `${state.fontSize}px`);
+syncFontSizeUi();
 
 const scrollbackText = document.getElementById("scrollback-text");
 // The overlay is a snapshot of one tab, so it follows the active tab: switching

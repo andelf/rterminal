@@ -58,6 +58,26 @@ function savedToolbar() {
   }
 }
 
+const FONT_SIZE_DEFAULT = 14;
+const FONT_SIZE_MIN = 8;
+const FONT_SIZE_MAX = 32;
+
+function clampFontSize(size) {
+  if (size === null || size === undefined || size === "") return FONT_SIZE_DEFAULT;
+  const value = Math.round(Number(size));
+  if (!Number.isFinite(value)) return FONT_SIZE_DEFAULT;
+  return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, value));
+}
+
+function savedFontSize() {
+  // A per-device reading preference: the iPad and a desktop can differ.
+  try {
+    return clampFontSize(localStorage.getItem("rterminal.fontSize"));
+  } catch {
+    return FONT_SIZE_DEFAULT;
+  }
+}
+
 function savedKeyboardMode() {
   // "system" (default) keeps the browser's own keyboard, IME and dictation.
   // "screen" uses the built-in keyboard and deliberately does not focus
@@ -93,6 +113,7 @@ const state = {
   keyboardMode: savedKeyboardMode(),
   screenLayout: savedScreenLayout(),
   showToolbar: savedToolbar(),
+  fontSize: savedFontSize(),
   // Toolbar modifiers have three states, matching a hardware keyboard and
   // the platform on-screen keyboards: off / one-shot (applies to the next
   // input only) / locked (double tap, applies until explicitly released).

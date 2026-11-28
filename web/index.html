@@ -11,7 +11,7 @@
   <link rel="apple-touch-icon" sizes="180x180" href="/web/icons/apple-touch-icon.png?v=1">
   <link rel="manifest" href="/web/manifest.webmanifest">
   <link rel="stylesheet" href="/web/vendor/xterm.min.css?v=5.5.0">
-  <link rel="stylesheet" href="/web/style.css?v=20261128-6">
+  <link rel="stylesheet" href="/web/style.css?v=20261128-7">
 </head>
 <body>
   <!-- Lucide Icons (ISC): web/vendor/lucide-LICENSE -->
@@ -41,6 +41,8 @@
         <span id="size-mode-label" class="mode-icon" aria-hidden="true"><svg class="ui-icon"><use href="#i-proportions"/></svg></span>
       </button>
       <button id="sync-size" class="sync-size" type="button" aria-label="Sync current browser size and lock it" title="Sync the current browser grid once and keep it fixed until the next click" hidden><svg class="ui-icon" aria-hidden="true"><use href="#i-scan"/></svg></button>
+      <button id="font-smaller" class="icon-btn" type="button" title="Smaller terminal font" aria-label="Smaller terminal font">A−</button>
+      <button id="font-larger" class="icon-btn" type="button" title="Larger terminal font" aria-label="Larger terminal font">A+</button>
       <button id="keyboard-mode" class="mode-toggle" aria-pressed="false" title="Switch input method. System keyboard (default): use the OS keyboard with dictation and IME. Screen keyboard: use the built-in keyboard without opening the OS keyboard.">
         <span id="keyboard-mode-label" class="mode-icon" aria-hidden="true"><svg class="ui-icon"><use href="#i-keyboard"/></svg></span>
       </button>
@@ -103,8 +105,8 @@
         <button id="help-close" class="icon-btn" type="button" aria-label="Close help"><svg class="ui-icon" aria-hidden="true"><use href="#i-x"/></svg></button>
       </header>
       <div class="help-sections">
-        <section><h3>Input</h3><p>Type or dictate in the bottom field. Input or Enter inserts text without running it. Empty submission sends Enter; Backspace on an empty field deletes in the terminal.</p></section>
-        <section><h3>Size</h3><p>PC size follows the desktop window. Browser size follows this viewport. The Scan button syncs once and freezes that grid; later rotation or keyboard changes only adjust dot padding.</p></section>
+        <section><h3>Input</h3><p>Type or dictate in the bottom field. The return button or Enter inserts text without running it. Empty submission sends Enter; Backspace on an empty field deletes in the terminal.</p></section>
+        <section><h3>Size</h3><p>PC size follows the desktop window. Browser size follows this viewport. The Scan button syncs once and freezes that grid; later rotation or keyboard changes only adjust dot padding. A− and A+ change the web terminal's font size by one pixel per click, remembered on this device.</p></section>
         <section><h3>Touch scrolling</h3><p>Swipe vertically in the right third of the terminal, away from the outer 24 px edge. It sends wheel reports in mouse mode and scrolls local history otherwise. Use the left two-thirds for selection and grid panning.</p></section>
         <section><h3>Keyboards</h3><p>System keyboard supports IME and dictation. Screen keyboard avoids the OS accessory bar. Hold a modifier for one second to latch it for the next key. Win/Mac layout switching is above the arrow pad.</p></section>
         <section><h3>Connection</h3><p>Only one browser owns the live connection. If another client is connected, Steal explicitly disconnects it and takes over.</p></section>
@@ -113,12 +115,12 @@
   </div>
 
   <script src="/web/vendor/xterm.min.js?v=5.5.0"></script>
-  <script src="/web/core.js?v=20261128-6"></script>
-  <script src="/web/debug.js?v=20261128-6"></script>
-  <script src="/web/viewport.js?v=20261128-6"></script>
-  <script src="/web/input.js?v=20261128-6"></script>
-  <script src="/web/keyboard.js?v=20261128-6"></script>
-  <script src="/web/client.js?v=20261128-6"></script>
-  <script src="/web/app.js?v=20261128-6"></script>
+  <script src="/web/core.js?v=20261128-7"></script>
+  <script src="/web/debug.js?v=20261128-7"></script>
+  <script src="/web/viewport.js?v=20261128-7"></script>
+  <script src="/web/input.js?v=20261128-7"></script>
+  <script src="/web/keyboard.js?v=20261128-7"></script>
+  <script src="/web/client.js?v=20261128-7"></script>
+  <script src="/web/app.js?v=20261128-7"></script>
 </body>
 </html>
