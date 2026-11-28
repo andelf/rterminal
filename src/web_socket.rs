@@ -245,17 +245,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn control_rejects_out_of_range_resize() {
-        // No command channel receiver: a dropped send means "rejected".
+    fn control_resize_range_validation() {
+        // Receiver dropped: the channel is disconnected, so any send that reaches
+        // it fails. A `false` return therefore means the resize passed validation
+        // and was sent; a `true` return means it was rejected before any send
+        // (out of range) — control() keeps the connection open in both cases.
         let (tx, rx) = async_channel::unbounded();
-        std::mem::forget(rx);
+        drop(rx);
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
             .block_on(async {
+                // Out of range (cols < 20): rejected before sending, kept open.
                 assert!(control(&tx, 1, "c", r#"{"type":"resize","cols":1,"rows":30}"#).await);
+                // In range: passes validation, send fails on the closed channel.
                 assert!(
-                    control(&tx, 1, "c", r#"{"type":"resize","cols":80,"rows":24}"#)
+                    !control(&tx, 1, "c", r#"{"type":"resize","cols":80,"rows":24}"#)
                         .await
                 );
             });
