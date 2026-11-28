@@ -241,10 +241,16 @@ function stopPolling(tab) {
 
 function streamUrl(tab) {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  const host = location.hostname || "127.0.0.1";
-  const port = state.wsPort || Number(location.port) + 1 || 7879;
+  // Same-origin: HTTP and the WebSocket data stream share one port.
+  // state.wsPort is only set from /web/config as an explicit override.
+  let host;
+  if (state.wsPort) {
+    host = `${location.hostname || "127.0.0.1"}:${state.wsPort}`;
+  } else {
+    host = location.host || location.hostname || "127.0.0.1";
+  }
   const debugFlag = debug.on ? "&debug=1" : "";
-  return `${scheme}://${host}:${port}/ws/tabs/${tab.id}?client=${encodeURIComponent(clientId)}${debugFlag}`;
+  return `${scheme}://${host}/ws/tabs/${tab.id}?client=${encodeURIComponent(clientId)}${debugFlag}`;
 }
 
 // Live PTY stream. The server sends one ANSI snapshot on attach, followed by

@@ -120,8 +120,9 @@ const state = {
   mods: { shift: "off", ctrl: "off", alt: "off", meta: "off" },
   webConnected: false,
   clientBlocked: false,
-  // WebSocket data plane. HTTP remains the control plane.
-  wsPort: 7879
+  // WebSocket data plane shares the HTTP port; 0 = same-origin.
+  // /web/config may still fill this in as an explicit override.
+  wsPort: 0
 };
 function applySizeModeUi() {
   const browser = state.sizeMode === "browser";
