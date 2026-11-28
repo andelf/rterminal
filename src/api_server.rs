@@ -12,10 +12,10 @@ use axum::Router;
 use std::sync::OnceLock;
 use std::thread;
 
+// Set once by `start_api_server`. The instance lock guarantees production sets
+// it exactly once; tests never assert /web/config, so a parallel test winning
+// the race is benign.
 static WS_PORT: OnceLock<u16> = OnceLock::new();
-
-// Tests never assert /web/config, so first-writer-wins across parallel tests
-// is benign.
 
 #[derive(Debug)]
 pub(crate) struct RouteError {
@@ -48,7 +48,7 @@ fn parse_request_with_client(
         return Ok(RouteOutcome::Immediate {
             status: 200,
             content_type: "application/json; charset=utf-8",
-            body: format!("{{\"ws_port\":{}}}", WS_PORT.get().copied().unwrap_or(7879)),
+            body: format!("{{\"ws_port\":{}}}", WS_PORT.get().copied().unwrap_or(7878)),
         });
     }
 
@@ -300,7 +300,7 @@ fn legacy_help_text() -> String {
         "  POST   /tabs/:id/keys          (tmux key tokens)",
         "web UI:",
         "  GET    /web/                   (xterm.js client with mirrored tabs)",
-        "  GET    /web/config             (port of the WebSocket data stream)",
+        "  GET    /web/config             (shared HTTP/WebSocket port)",
         "  POST   /web/client             (connect/heartbeat/disconnect, one client at a time)",
         "  POST   /web/debug              (browser input event stream, appended to a log file)",
         "  GET    /web/debug/log          (?lines=N, default 400)",
@@ -382,21 +382,16 @@ async fn web_auth(body: axum::body::Bytes) -> Response {
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    if !crate::auth::token_matches(&token) {
-        let mut response = axum_error(401, "invalid token");
+    let response = if !crate::auth::token_matches(&token) {
+        axum_error(401, "invalid token")
+    } else {
+        let mut response = axum_text(200, "application/json; charset=utf-8", r#"{"ok":true}"#);
+        if let Ok(value) = header::HeaderValue::from_str(&crate::auth::auth_cookie_header()) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
         response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
-        return response;
-    }
-    let mut response = axum_text(200, "application/json; charset=utf-8", r#"{"ok":true}"#);
-    if let Ok(value) = header::HeaderValue::from_str(&crate::auth::auth_cookie_header()) {
-        response.headers_mut().append(header::SET_COOKIE, value);
-    }
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
-    response
+    };
+    apply_cache_control(response, "/web/auth", "")
 }
 
 async fn api_fallback(
