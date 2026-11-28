@@ -384,7 +384,13 @@ fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
         }
         // Opt-in byte trace: the browser sets this header while its debug
         // recorder is on, so we can see exactly what reached the PTY.
-        if crate::web_debug::wants_input_trace(request.headers()) && path.contains("/input") {
+        if crate::web_debug::wants_input_trace(
+            request
+                .headers()
+                .iter()
+                .filter_map(|h| Some((h.field.as_str().as_str(), h.value.as_str()))),
+        ) && path.contains("/input")
+        {
             crate::web_debug::append_input(&path, &body);
         }
         let browser_client = request.headers().iter().find_map(|header| {

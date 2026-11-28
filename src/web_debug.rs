@@ -199,14 +199,12 @@ fn escape(text: &str) -> String {
 }
 
 /// True when the request explicitly asked for its bytes to be logged.
-pub(crate) fn wants_input_trace(headers: &[tiny_http::Header]) -> bool {
-    headers.iter().any(|header| {
-        header
-            .field
-            .as_str()
-            .as_str()
-            .eq_ignore_ascii_case("x-rterminal-debug")
-            && header.value.as_str() == "1"
+pub(crate) fn wants_input_trace<'a, I>(headers: I) -> bool
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    headers.into_iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("x-rterminal-debug") && value == "1"
     })
 }
 
