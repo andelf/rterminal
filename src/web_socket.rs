@@ -1,32 +1,27 @@
 //! Browser data plane: raw PTY bytes over a WebSocket.
 //!
-//! HTTP stays the control plane (tabs, resize, scroll, debug). This dedicated
-//! listener carries only the live stream so the browser no longer has to poll
-//! a full-screen ANSI snapshot every 100 ms. A freshly attached client first
-//! receives one ANSI snapshot, then incremental PTY bytes as binary frames.
+//! HTTP stays the control plane (tabs, resize, scroll, debug). The live
+//! stream shares the HTTP listener as `GET /ws/tabs/<id>`; a freshly attached
+//! client first receives one ANSI snapshot, then incremental PTY bytes as
+//! binary frames.
 
-use std::cell::Cell;
-use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::Duration;
 
-use async_channel::{Receiver, Sender};
+use async_channel::{Receiver, Sender, TryRecvError};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
-use tungstenite::Message;
-use tungstenite::accept_hdr;
-use tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tungstenite::http;
 
 use crate::api_protocol::{ApiCommand, ApiReply, ReplyBody, TabSelector, oneshot};
 
-const READ_TIMEOUT: Duration = Duration::from_millis(50);
 const MAX_BATCH: usize = 64 * 1024;
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Drop exactly one subscription. Called from the socket thread on every exit
-/// path, including a failed snapshot send.
+/// Drop exactly one subscription. Called on every exit path, including a
+/// failed snapshot send.
 fn detach_stream(cmd_tx: &Sender<ApiCommand>, stream_id: u64) {
     let (reply_tx, _) = oneshot();
     let _ = cmd_tx.send_blocking(ApiCommand::WebStreamDetach {
@@ -35,206 +30,145 @@ fn detach_stream(cmd_tx: &Sender<ApiCommand>, stream_id: u64) {
     });
 }
 
-struct Connection {
+/// Entry point for `GET /ws/tabs/<id>?client=<id>[&debug=1]`.
+/// Authentication already happened in the auth middleware.
+pub(crate) async fn ws_stream(
+    ws: WebSocketUpgrade,
+    Path(path): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    State(cmd_tx): State<Sender<ApiCommand>>,
+) -> Response {
+    let Ok(tab_id) = path.parse::<u64>() else {
+        return (StatusCode::NOT_FOUND, "invalid tab id").into_response();
+    };
+    let client = params.get("client").cloned().unwrap_or_default();
+    let debug = params.get("debug").map(|v| v == "1").unwrap_or(false);
+    if client.is_empty() {
+        return (StatusCode::NOT_FOUND, "missing client id").into_response();
+    }
+    ws.on_upgrade(move |socket| serve_client(socket, cmd_tx, tab_id, client, debug))
+}
+
+async fn serve_client(
+    mut socket: WebSocket,
+    cmd_tx: Sender<ApiCommand>,
     tab_id: u64,
     client: String,
     debug: bool,
-}
-
-pub(crate) fn start_ws_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> io::Result<u16> {
-    let listener = TcpListener::bind(addr)?;
-    let local_addr = listener.local_addr()?;
-    let port = local_addr.port();
-    eprintln!("web data stream listening on ws://{local_addr}");
-    thread::Builder::new()
-        .name("agent-web-ws".to_string())
-        .spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        let cmd_tx = cmd_tx.clone();
-                        let _ = thread::Builder::new()
-                            .name("agent-web-ws-client".to_string())
-                            .spawn(move || {
-                                if let Err(err) = serve_client(stream, cmd_tx) {
-                                    eprintln!("web socket: {err}");
-                                }
-                            });
-                    }
-                    Err(err) => eprintln!("web socket accept: {err}"),
-                }
-            }
-        })?;
-    Ok(port)
-}
-
-fn serve_client(stream: TcpStream, cmd_tx: Sender<ApiCommand>) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(READ_TIMEOUT))
-        .map_err(|err| format!("set read timeout: {err}"))?;
-    stream
-        .set_nodelay(true)
-        .map_err(|err| format!("set nodelay: {err}"))?;
-
-    // The handshake callback extracts the tab id and client id from the URL.
-    // Using a Cell keeps the closure FnOnce-friendly while retaining the data.
-    let conn = Cell::new(None);
-    let callback = |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
-        let headers = request
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value)));
-        if !crate::auth::authorized_by(headers) {
-            let mut err = ErrorResponse::new(Some("unauthorized".to_string()));
-            *err.status_mut() = http::StatusCode::UNAUTHORIZED;
-            return Err(err);
-        }
-        let path = request.uri().path();
-        let Some(tab) = path.strip_prefix("/ws/tabs/") else {
-            return Err(not_found("expected /ws/tabs/<id>"));
-        };
-        let tab_id = tab
-            .parse::<u64>()
-            .map_err(|_| not_found("invalid tab id"))?;
-        let mut client = String::new();
-        let mut debug = false;
-        if let Some(query) = request.uri().query() {
-            for pair in query.split('&') {
-                let mut parts = pair.splitn(2, '=');
-                let key = parts.next().unwrap_or("");
-                let value = parts.next().unwrap_or("");
-                if key == "client" {
-                    client = percent_decode(value);
-                } else if key == "debug" && value == "1" {
-                    debug = true;
-                }
-            }
-        }
-        if client.is_empty() {
-            return Err(not_found("missing client id"));
-        }
-        conn.set(Some(Connection {
-            tab_id,
-            client,
-            debug,
-        }));
-        Ok(response)
-    };
-    let mut socket = accept_hdr(stream, callback).map_err(|err| format!("handshake: {err}"))?;
-    let Connection {
-        tab_id,
-        client,
-        debug,
-    } = conn
-        .into_inner()
-        .ok_or_else(|| "handshake lost connection info".to_string())?;
+) {
     let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-
-    let (pty_rx, mut snapshot) = attach(&cmd_tx, tab_id, client.clone(), stream_id)?;
+    let (pty_rx, mut snapshot) = match attach(&cmd_tx, tab_id, &client, stream_id).await {
+        Ok(attach) => attach,
+        Err(err) => {
+            eprintln!("web socket attach: {err}");
+            return;
+        }
+    };
     snapshot["type"] = json!("snapshot");
-    if let Err(err) = socket.send(Message::Text(snapshot.to_string().into())) {
+    if socket
+        .send(Message::Text(snapshot.to_string().into()))
+        .await
+        .is_err()
+    {
         // The subscription is already registered: unwind it here, otherwise
         // this stream stays alive until its buffer fills up.
         detach_stream(&cmd_tx, stream_id);
-        return Err(format!("send snapshot: {err}"));
+        return;
     }
 
     loop {
-        // Drain what the PTY has produced. The first chunk goes out immediately;
-        // only an existing backlog is coalesced, so latency stays low.
-        // A closed channel means the tab is gone or the subscriber was dropped;
-        // keep polling would spin forever with a socket nobody closes.
-        let first = match pty_rx.try_recv() {
-            Ok(first) => Some(first),
-            Err(async_channel::TryRecvError::Empty) => None,
-            Err(async_channel::TryRecvError::Closed) => break,
-        };
-        if let Some(mut bytes) = first {
-            let mut disconnected = false;
-            while bytes.len() < MAX_BATCH {
-                match pty_rx.try_recv() {
-                    Ok(more) => bytes.extend_from_slice(&more),
-                    Err(async_channel::TryRecvError::Empty) => break,
-                    Err(async_channel::TryRecvError::Closed) => {
-                        disconnected = true;
+        // Drain PTY output and client frames concurrently. The first chunk
+        // goes out immediately; only an existing backlog is coalesced, so
+        // latency stays low.
+        tokio::select! {
+            chunk = pty_rx.recv() => match chunk {
+                Ok(first) => {
+                    let mut bytes = first;
+                    let mut disconnected = false;
+                    while bytes.len() < MAX_BATCH {
+                        match pty_rx.try_recv() {
+                            Ok(more) => bytes.extend_from_slice(&more),
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Closed) => {
+                                disconnected = true;
+                                break;
+                            }
+                        }
+                    }
+                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                        break;
+                    }
+                    if disconnected {
                         break;
                     }
                 }
-            }
-            if socket.send(Message::Binary(bytes.into())).is_err() {
-                break;
-            }
-            if disconnected {
-                break;
-            }
-        }
-
-        match socket.read() {
-            Ok(Message::Binary(data)) => {
-                if debug {
-                    crate::web_debug::append_input(&format!("/ws/tabs/{tab_id}"), &data);
-                }
-                let (reply_tx, reply_rx) = oneshot();
-                let cmd = ApiCommand::WebInput {
-                    id: TabSelector::Id(tab_id),
-                    client: client.clone(),
-                    bytes: data.to_vec(),
-                    reply: reply_tx,
-                };
-                if cmd_tx.send_blocking(cmd).is_err() {
-                    break;
-                }
-                match reply_rx.recv_blocking() {
-                    Ok(ApiReply::Ok { .. }) => {}
-                    Ok(ApiReply::Err { status, error }) => {
-                        eprintln!("web socket input rejected ({status}): {error}");
+                // Channel closed: the tab is gone or the subscriber was
+                // dropped. Without this the loop would spin forever on a
+                // socket nobody closes.
+                Err(_) => break,
+            },
+            frame = socket.recv() => match frame {
+                Some(Ok(Message::Binary(data))) => {
+                    if debug {
+                        crate::web_debug::append_input(
+                            &format!("/ws/tabs/{tab_id}"),
+                            &data,
+                        );
+                    }
+                    let (reply_tx, reply_rx) = oneshot();
+                    let cmd = ApiCommand::WebInput {
+                        id: TabSelector::Id(tab_id),
+                        client: client.clone(),
+                        bytes: data.to_vec(),
+                        reply: reply_tx,
+                    };
+                    if cmd_tx.send(cmd).await.is_err() {
                         break;
                     }
-                    Err(_) => break,
+                    match reply_rx.recv().await {
+                        Ok(ApiReply::Ok { .. }) => {}
+                        Ok(ApiReply::Err { status, error }) => {
+                            eprintln!("web socket input rejected ({status}): {error}");
+                            break;
+                        }
+                        Err(_) => break,
+                    }
                 }
-            }
-            Ok(Message::Text(text)) => {
-                if !control(&cmd_tx, tab_id, &client, &text) {
-                    break;
+                Some(Ok(Message::Text(text))) => {
+                    if !control(&cmd_tx, tab_id, &client, &text).await {
+                        break;
+                    }
                 }
-            }
-            Ok(Message::Close(_)) => break,
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(err))
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(err) => {
-                eprintln!("web socket read: {err}");
-                break;
-            }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
         }
     }
 
     detach_stream(&cmd_tx, stream_id);
-    Ok(())
 }
 
-fn attach(
+async fn attach(
     cmd_tx: &Sender<ApiCommand>,
     tab_id: u64,
-    client: String,
+    client: &str,
     stream_id: u64,
 ) -> Result<(Receiver<Vec<u8>>, Value), String> {
     let (reply_tx, reply_rx) = oneshot();
     let (stream_tx, stream_rx) = async_channel::bounded(1);
     cmd_tx
-        .send_blocking(ApiCommand::WebStreamAttach {
+        .send(ApiCommand::WebStreamAttach {
             id: TabSelector::Id(tab_id),
-            client,
+            client: client.to_string(),
             stream_id,
             reply: reply_tx,
             stream: stream_tx,
         })
+        .await
         .map_err(|_| "command channel closed".to_string())?;
     let reply = reply_rx
-        .recv_blocking()
+        .recv()
+        .await
         .map_err(|_| "attach reply channel closed".to_string())?;
     let snapshot = match reply {
         ApiReply::Ok {
@@ -245,13 +179,14 @@ fn attach(
         _ => return Err("unexpected attach reply".to_string()),
     };
     let rx = stream_rx
-        .recv_blocking()
+        .recv()
+        .await
         .map_err(|_| "stream channel closed".to_string())?;
     Ok((rx, snapshot))
 }
 
 /// JSON control frames. Returns false when the connection should be dropped.
-fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &str) -> bool {
+async fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return true;
     };
@@ -268,7 +203,7 @@ fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &str) -
             }
             let (reply_tx, _) = oneshot();
             cmd_tx
-                .send_blocking(ApiCommand::ResizeTab {
+                .send(ApiCommand::ResizeTab {
                     id: TabSelector::Id(tab_id),
                     cols: cols as u16,
                     rows: rows as u16,
@@ -278,12 +213,13 @@ fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &str) -
                         .unwrap_or(false),
                     reply: reply_tx,
                 })
+                .await
                 .is_ok()
         }
         Some("heartbeat") => {
             let (reply_tx, _) = oneshot();
             cmd_tx
-                .send_blocking(ApiCommand::WebClient {
+                .send(ApiCommand::WebClient {
                     id: client.to_string(),
                     connected: true,
                     cols: value.get("cols").and_then(Value::as_u64).unwrap_or(80) as u16,
@@ -295,6 +231,7 @@ fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &str) -
                     force: false,
                     reply: reply_tx,
                 })
+                .await
                 .is_ok()
         }
         // A fresh screen snapshot is sent by the server on every attach; the
@@ -303,49 +240,24 @@ fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &str) -
     }
 }
 
-fn not_found(message: &str) -> ErrorResponse {
-    http::Response::builder()
-        .status(http::StatusCode::NOT_FOUND)
-        .body(Some(message.to_string()))
-        .unwrap()
-}
-
-/// Only `client` is URL-encoded; keep this tiny instead of pulling in `url`.
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(hi << 4 | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn ephemeral_bind_returns_the_actual_port() {
-        let (tx, _rx) = async_channel::unbounded();
-        let port = start_ws_server("127.0.0.1:0", tx).expect("bind ephemeral port");
-        assert!(port > 0);
-    }
-}
-
-fn hex_val(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
+    fn control_rejects_out_of_range_resize() {
+        // No command channel receiver: a dropped send means "rejected".
+        let (tx, rx) = async_channel::unbounded();
+        std::mem::forget(rx);
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                assert!(control(&tx, 1, "c", r#"{"type":"resize","cols":1,"rows":30}"#).await);
+                assert!(
+                    control(&tx, 1, "c", r#"{"type":"resize","cols":80,"rows":24}"#)
+                        .await
+                );
+            });
     }
 }
