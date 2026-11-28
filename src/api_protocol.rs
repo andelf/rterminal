@@ -68,6 +68,7 @@ pub(crate) enum ApiCommand {
     },
     ActivateTab {
         id: TabSelector,
+        client: Option<String>,
         reply: Sender<ApiReply>,
     },
     GetTab {
@@ -76,22 +77,30 @@ pub(crate) enum ApiCommand {
     },
     GetScreen {
         id: TabSelector,
+        /// Browser page asking for the screen, when the request carried
+        /// `X-Rterminal-Client`. Agents and curl omit it and are never gated.
+        client: Option<String>,
         reply: Sender<ApiReply>,
     },
     /// Whole-screen repaint encoded as ANSI (colour + cursor + alt-screen flag
     /// in the first byte) for the built-in xterm.js web client.
     GetScreenAnsi {
         id: TabSelector,
+        client: Option<String>,
         reply: Sender<ApiReply>,
     },
     GetScrollback {
         id: TabSelector,
         lines: Option<usize>,
+        /// Browser page asking; omitted by the scrollback-dump UI that the
+        /// native side drives itself, so it stays unblocked.
+        client: Option<String>,
         reply: Sender<ApiReply>,
     },
     ScrollDisplay {
         id: TabSelector,
         action: ScrollAction,
+        client: Option<String>,
         reply: Sender<ApiReply>,
     },
     ResizeTab {
@@ -99,6 +108,7 @@ pub(crate) enum ApiCommand {
         cols: u16,
         rows: u16,
         sync_window: bool,
+        client: Option<String>,
         reply: Sender<ApiReply>,
     },
     /// `browser_size` is true in "浏览器尺寸" mode: the browser viewport is
@@ -111,6 +121,12 @@ pub(crate) enum ApiCommand {
         rows: u16,
         browser_size: bool,
         force: bool,
+        reply: Sender<ApiReply>,
+    },
+    /// `GET /web/owner` — who currently owns the browser data plane, if anyone.
+    /// Answered immediately from the UI thread so a blocked page can change its
+    /// presentation without waiting for a WebSocket attach to be refused.
+    QueryWebOwner {
         reply: Sender<ApiReply>,
     },
     /// Browser input is fenced to the current owner so a displaced client

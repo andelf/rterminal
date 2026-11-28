@@ -23,9 +23,10 @@ function startWebApp(config) {
   authOverlay.hidden = true;
   if (config && config.ws_port) state.wsPort = Number(config.ws_port);
   flushDebug(false);
-  // Register immediately instead of waiting for tab construction and a
-  // WebSocket attempt. A conflicting client must see Steal as soon as the
-  // server answers; clientBlocked prevents later stream attempts in refresh().
+  // Claim ownership before anything draws. If another page already owns the
+  // terminal the claim is refused and we stay a read-only bystander for the
+  // entire visit instead of retrying on a timer and trading the PTY back and
+  // forth with the owner.
   notifyClient(true);
   refresh();
   setInterval(refresh, 1000);

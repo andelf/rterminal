@@ -29,6 +29,7 @@ pub(super) fn apply(
             ApiCommand::ListTabs { .. }
             | ApiCommand::CreateTab { .. }
             | ApiCommand::WebClient { .. }
+            | ApiCommand::QueryWebOwner { .. }
             | ApiCommand::WebStreamDetach { .. } => Some(TabSelector::Active),
         };
         if let Some(sel) = selector
@@ -83,7 +84,12 @@ pub(super) fn apply(
                 });
             }
 
-            ApiCommand::ActivateTab { id, reply } => {
+            ApiCommand::ActivateTab { id, client, reply } => {
+                // Focusing a tab retargets the native window; only the owner
+                // may decide what the PC is looking at.
+                if this.is_blocked_web_client(client.as_deref()) {
+                    return reply_err(&reply, 409, "another web client owns this terminal");
+                }
                 let Some((index, tab)) = this.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -110,7 +116,12 @@ pub(super) fn apply(
                 });
             }
 
-            ApiCommand::GetScreen { id, reply } => {
+            ApiCommand::GetScreen { id, client, reply } => {
+                // A blocked page is never handed the screen. Checking before
+                // resolve_tab also keeps unknown-tab timing from leaking.
+                if this.is_blocked_web_client(client.as_deref()) {
+                    return reply_err(&reply, 409, "another web client owns this terminal");
+                }
                 let Some((_, tab)) = this.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -124,7 +135,10 @@ pub(super) fn apply(
                 });
             }
 
-            ApiCommand::GetScreenAnsi { id, reply } => {
+            ApiCommand::GetScreenAnsi { id, client, reply } => {
+                if this.is_blocked_web_client(client.as_deref()) {
+                    return reply_err(&reply, 409, "another web client owns this terminal");
+                }
                 let Some((_, tab)) = this.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -151,8 +165,15 @@ pub(super) fn apply(
                 cols,
                 rows,
                 sync_window,
+                client,
                 reply,
             } => {
+                // The viewport of a bystander page must never reshape the PTY
+                // or move the native window: a second iPad would otherwise
+                // squeeze the owner's grid every time it rotates.
+                if this.is_blocked_web_client(client.as_deref()) {
+                    return reply_err(&reply, 409, "another web client owns this terminal");
+                }
                 let Some((_, tab)) = this.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -175,6 +196,18 @@ pub(super) fn apply(
                 let _ = reply.send_blocking(ApiReply::Ok {
                     status: 200,
                     body: ReplyBody::Json(serde_json::json!({ "cols": cols, "rows": rows })),
+                });
+            }
+
+            ApiCommand::QueryWebOwner { reply } => {
+                let now = Instant::now();
+                let owner = this.web_client.as_ref().and_then(|client| {
+                    let fresh = now.duration_since(client.last_seen) <= WEB_CLIENT_TIMEOUT;
+                    fresh.then(|| client.id.clone())
+                });
+                let _ = reply.send_blocking(ApiReply::Ok {
+                    status: 200,
+                    body: ReplyBody::Json(serde_json::json!({ "owner": owner })),
                 });
             }
 
@@ -257,7 +290,16 @@ pub(super) fn apply(
                 });
             }
 
-            ApiCommand::GetScrollback { id, lines, reply } => {
+            ApiCommand::GetScrollback {
+                id,
+                lines,
+                client,
+                reply,
+            } => {
+                // Scrollback is terminal history: a bystander page gets none.
+                if this.is_blocked_web_client(client.as_deref()) {
+                    return reply_err(&reply, 409, "another web client owns this terminal");
+                }
                 let Some((_, tab)) = this.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };
@@ -275,7 +317,16 @@ pub(super) fn apply(
                 });
             }
 
-            ApiCommand::ScrollDisplay { id, action, reply } => {
+            ApiCommand::ScrollDisplay {
+                id,
+                action,
+                client,
+                reply,
+            } => {
+                // Scrolling moves the shared viewport the native window shows.
+                if this.is_blocked_web_client(client.as_deref()) {
+                    return reply_err(&reply, 409, "another web client owns this terminal");
+                }
                 let Some((_, tab)) = this.resolve_tab(id) else {
                     return reply_err(&reply, 404, "unknown tab");
                 };

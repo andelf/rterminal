@@ -160,6 +160,9 @@ function applyPadding(tab) {
 }
 
 function fitTab(tab, forceSync = false, allowKeyboardSync = false) {
+  // A blocked page is not the owner: it must never push a grid or a native
+  // window resize. Its own viewport size is irrelevant to the PTY.
+  if (state.clientBlocked) return;
   // The web grid is ALWAYS the native PTY grid. The screen.ansi repaint is
   // rendered for exactly dto.cols x dto.rows, so mirroring that grid 1:1 keeps
   // the cursor and every cell aligned. Letting the browser pick its own grid
@@ -386,8 +389,12 @@ async function poll(tab) {
     }
   } catch (error) {
     report(error);
+    // 409 means another page owns the terminal. Stop the 100 ms loop instead
+    // of hammering the server and repainting refused requests.
+    if (state.clientBlocked) return;
   }
-  if (state.active === tab.id && !tab.socket && tab.reconnectTimer === null) {
+  if (state.clientBlocked || state.active !== tab.id) return;
+  if (!tab.socket && tab.reconnectTimer === null) {
     tab.timer = setTimeout(() => poll(tab), 100);
   }
 }
@@ -401,6 +408,9 @@ function updateTabButtons() {
 
 function activate(id, fromUser) {
   if (state.active === id) return;
+  // A blocked page may look at whatever tab the server pushed, but it must not
+  // tell the PTY to switch focus: that is control, not viewing.
+  if (fromUser && state.clientBlocked) return;
   // A key held while switching tabs must not keep deleting in the new tab.
   stopAllRepeats();
   const previous = currentTab();
@@ -888,6 +898,16 @@ async function refresh() {
     emptyState.hidden = true;
     if (active !== state.active) activate(active, false);
     else updateTabButtons();
+    // A blocked client is a bystander: it must not claim the PTY grid, and it
+    // must not keep redrawing the live screen as if it were a viewer. This page
+    // only resumes driving after the owner leaves (the next tick sees an empty
+    // owner and claims) or after the user presses Steal.
+    if (state.clientBlocked) {
+      const owner = await api("/web/owner").catch(() => null);
+      if (!owner || owner.owner) return;
+      // The owner is gone; take the terminal back on our own next tick.
+      state.clientBlocked = false;
+    }
     // Re-sync the visible tab with the latest native dimensions, or re-fit it
     // to this viewport when browser-size mode is enabled.
     const activeTab = currentTab();
@@ -895,8 +915,7 @@ async function refresh() {
       fitTab(activeTab);
       applyPadding(activeTab);
     }
-    if (!state.clientBlocked) notifyClient(true);
-    clearError();
+    notifyClient(true);
   } catch (error) {
     report(error);
   } finally {
@@ -906,6 +925,12 @@ async function refresh() {
 }
 
 function createTabViaApi() {
+  // Creating a tab changes the session the owner is looking at, so a blocked
+  // page uses the same gate as the Steal path.
+  if (state.clientBlocked) {
+    statusEl.textContent = "This terminal is controlled by another client";
+    return;
+  }
   api("/tabs", { method: "POST" })
     .then(refresh)
     .catch(report);
@@ -1069,6 +1094,12 @@ document.getElementById("scrollback-close").addEventListener("click", closeScrol
 document.getElementById("scrollback").addEventListener("click", () => {
   if (!scrollbackView.hidden) {
     closeScrollback();
+    return;
+  }
+  // Scrollback is the same PTY text the owner is reading; a blocked page has no
+  // claim on it.
+  if (state.clientBlocked) {
+    statusEl.textContent = "This terminal is controlled by another client";
     return;
   }
   const tab = currentTab();

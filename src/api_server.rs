@@ -65,6 +65,7 @@ fn parse_request_with_client(
         },
         ("POST", ["tabs", sel, "activate"]) => ApiCommand::ActivateTab {
             id: parse_selector(sel)?,
+            client: browser_client,
             reply: tx,
         },
         ("GET", ["tabs", sel]) => ApiCommand::GetTab {
@@ -73,12 +74,18 @@ fn parse_request_with_client(
         },
         ("GET", ["tabs", sel, "screen"]) => ApiCommand::GetScreen {
             id: parse_selector(sel)?,
+            client: browser_client,
             reply: tx,
         },
         ("GET", ["tabs", sel, "screen.ansi"]) => ApiCommand::GetScreenAnsi {
             id: parse_selector(sel)?,
+            client: browser_client,
             reply: tx,
         },
+        // Ownership gate for the built-in page. It is asked before the page
+        // renders anything, so a client that is not allowed to see the terminal
+        // never has to receive a screen in order to find that out.
+        ("GET", ["web", "owner"]) => ApiCommand::QueryWebOwner { reply: tx },
         ("POST", ["tabs", sel, "resize"]) => {
             let req: ResizeRequest = serde_json::from_slice(&body).map_err(|err| RouteError {
                 status: 400,
@@ -100,17 +107,20 @@ fn parse_request_with_client(
                 cols: req.cols,
                 rows: req.rows,
                 sync_window: req.sync_window,
+                client: browser_client,
                 reply: tx,
             }
         }
         ("GET", ["tabs", sel, "scrollback"]) => ApiCommand::GetScrollback {
             id: parse_selector(sel)?,
             lines: parse_lines_query(query)?,
+            client: browser_client,
             reply: tx,
         },
         ("POST", ["tabs", sel, "scroll"]) => ApiCommand::ScrollDisplay {
             id: parse_selector(sel)?,
             action: parse_scroll_body(&body)?,
+            client: browser_client,
             reply: tx,
         },
         ("POST", ["tabs", sel, "input"]) => {
@@ -193,6 +203,7 @@ fn parse_request_with_client(
         },
         ("GET", ["debug", "screen"]) => ApiCommand::GetScreen {
             id: TabSelector::Active,
+            client: browser_client,
             reply: tx,
         },
         ("POST", ["debug", "input"]) => ApiCommand::WriteInput {
@@ -594,6 +605,78 @@ mod tests {
             route("GET", "/tabs/3/screen.ansi", b"").unwrap(),
             ApiCommand::GetScreenAnsi { .. }
         ));
+    }
+
+    #[test]
+    fn browser_client_header_reaches_state_changing_routes() {
+        // Screen reads, resizes and scrolls all consult the header so the UI
+        // thread can refuse a bystander page. Losing it on any one of these
+        // routes would let a second iPad reshape the owner's terminal.
+        let client = parse_request_with_client(
+            "GET",
+            "/tabs/1/screen.ansi",
+            "",
+            Vec::new(),
+            Some("page-b".to_string()),
+        )
+        .expect("screen route");
+        let RouteOutcome::Command(ApiCommand::GetScreenAnsi { client: seen, .. }, _) = client
+        else {
+            panic!("unexpected route: {client:?}");
+        };
+        assert_eq!(seen.as_deref(), Some("page-b"));
+
+        let resize = parse_request_with_client(
+            "POST",
+            "/tabs/1/resize",
+            "",
+            br#"{"cols":120,"rows":30}"#.to_vec(),
+            Some("page-b".to_string()),
+        )
+        .expect("resize route");
+        let RouteOutcome::Command(ApiCommand::ResizeTab { client: seen, .. }, _) = resize else {
+            panic!("unexpected route: {resize:?}");
+        };
+        assert_eq!(seen.as_deref(), Some("page-b"));
+
+        let activate = parse_request_with_client(
+            "POST",
+            "/tabs/1/activate",
+            "",
+            Vec::new(),
+            Some("page-b".to_string()),
+        )
+        .expect("activate route");
+        let RouteOutcome::Command(ApiCommand::ActivateTab { client: seen, .. }, _) = activate else {
+            panic!("unexpected route: {activate:?}");
+        };
+        assert_eq!(seen.as_deref(), Some("page-b"));
+    }
+
+    #[test]
+    fn requests_without_a_client_header_are_never_gated() {
+        // Agents and curl call the same endpoints with only the token. They
+        // must keep working while a browser is attached.
+        for (method, path) in [
+            ("GET", "/tabs/1/screen.ansi"),
+            ("GET", "/tabs/1/screen"),
+            ("POST", "/tabs/1/activate"),
+        ] {
+            let outcome = parse_request(method, path, "", Vec::new()).expect("route");
+            let RouteOutcome::Command(cmd, _) = outcome else {
+                panic!("expected command for {method} {path}");
+            };
+            let client = match cmd {
+                ApiCommand::GetScreenAnsi { client, .. }
+                | ApiCommand::GetScreen { client, .. }
+                | ApiCommand::ActivateTab { client, .. }
+                | ApiCommand::ResizeTab { client, .. }
+                | ApiCommand::ScrollDisplay { client, .. }
+                | ApiCommand::GetScrollback { client, .. } => client,
+                other => panic!("unexpected command: {other:?}"),
+            };
+            assert!(client.is_none(), "{method} {path} invented a client id");
+        }
     }
 
     #[test]

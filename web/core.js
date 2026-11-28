@@ -296,16 +296,11 @@ async function notifyClient(connected, force = false) {
       stealClientButton.hidden = false;
       const active = currentTab();
       if (active) stopPolling(active);
-      if (!state.clientBlocked) {
-        // A transient duplicate registration must not lock this page out
-        // forever: retry once the server's 5 s stale-client window has passed.
-        state.clientBlocked = true;
-        syncConnection();
-        setTimeout(() => {
-          state.clientBlocked = false;
-          refresh();
-        }, 6000);
-      }
+      // Stay read-only until the user explicitly presses Steal. Retrying on a
+      // timer made two browsers trade ownership back and forth: whichever had
+      // been idle past the server's stale window looked abandoned, so each
+      // retry seized the PTY and the other side went blank.
+      state.clientBlocked = true;
     } else if (connected) {
       report(error);
     }

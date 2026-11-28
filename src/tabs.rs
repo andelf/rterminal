@@ -351,6 +351,22 @@ impl TerminalTabs {
         api_handlers::apply(self, cmd, window, cx)
     }
 
+    /// Who owns the browser data plane right now, if the registration is still
+    /// fresh. A browser page that does not own it may not reshape the PTY,
+    /// retarget the native window, or pull the screen.
+    fn web_owner(&self) -> Option<&str> {
+        self.web_client
+            .as_ref()
+            .filter(|client| client.last_seen.elapsed() <= WEB_CLIENT_TIMEOUT)
+            .map(|client| client.id.as_str())
+    }
+
+    /// True when `client` names a page that is not the current owner. A request
+    /// with no client header is an operator/agent call and is never blocked.
+    fn is_blocked_web_client(&self, client: Option<&str>) -> bool {
+        web_client_should_yield(client, self.web_owner())
+    }
+
     fn resolve_tab(
         &self,
         selector: crate::api_protocol::TabSelector,
@@ -709,9 +725,39 @@ fn truncate_tab_title(title: &str, max_chars: usize) -> String {
     format!("{truncated}...")
 }
 
+/// Whether a request from `client` must be refused because a different page
+/// owns the terminal. A missing client header (agent, curl) is never refused.
+fn web_client_should_yield(client: Option<&str>, owner: Option<&str>) -> bool {
+    match (client, owner) {
+        (Some(candidate), Some(owner)) => candidate != owner,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{next_active_tab_index, truncate_tab_title, window_sizes_match};
+    use super::{next_active_tab_index, truncate_tab_title, web_client_should_yield, window_sizes_match};
+
+    #[test]
+    fn nobody_owns_the_terminal_so_every_client_may_drive_it() {
+        assert!(!web_client_should_yield(Some("page-a"), None));
+        assert!(!web_client_should_yield(None, None));
+    }
+
+    #[test]
+    fn the_owner_may_drive_the_terminal() {
+        assert!(!web_client_should_yield(Some("page-a"), Some("page-a")));
+    }
+
+    #[test]
+    fn a_second_page_must_yield_to_the_owner() {
+        assert!(web_client_should_yield(Some("page-b"), Some("page-a")));
+    }
+
+    #[test]
+    fn agents_and_curl_without_a_client_header_are_never_gated() {
+        assert!(!web_client_should_yield(None, Some("page-a")));
+    }
 
     #[test]
     fn closing_tab_before_active_shifts_active_left() {

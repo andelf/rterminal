@@ -68,10 +68,18 @@ function revealBottom(tab) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  // Every browser request identifies its page, so the server can tell the
+  // owner from a bystander on screen reads as well as on writes. Agents and
+  // curl that call this API directly send no such header and are never gated.
+  const headers = { ...(options.headers || {}), "X-Rterminal-Client": clientId };
+  const response = await fetch(path, { ...options, headers });
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 300);
     if (response.status === 401) showAuthOverlay("Session expired. Unlock again.");
+    if (response.status === 409 && /owns this terminal/.test(detail)) {
+      state.clientBlocked = true;
+      syncConnection();
+    }
     throw new Error(`${response.status} ${detail}`);
   }
   const contentType = response.headers.get("content-type") || "";

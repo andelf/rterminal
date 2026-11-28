@@ -58,6 +58,11 @@ stagedInput.addEventListener("beforeinput", forwardEmptyStagedBackspace);
 // toolbar Enter cannot overtake characters still queued from the soft keyboard.
 function sendInput(tab, data, source = "key") {
   if (!tab || !data) return;
+  // A blocked page is a viewer, not a controller. Every input route — xterm
+  // onData/onBinary, the toolbar, the screen keyboard, the staged field — funnels
+  // through here, so this is the one gate that cannot be bypassed. Without it the
+  // WebSocket check below only defers the write to the HTTP fallback.
+  if (state.clientBlocked) return;
   followCursor(tab);
   // A queued retraction must reach the PTY before anything typed after it.
   if (source !== "reconcile") flushHold(tab);

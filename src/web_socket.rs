@@ -207,6 +207,7 @@ async fn control(cmd_tx: &Sender<ApiCommand>, tab_id: u64, client: &str, text: &
                     id: TabSelector::Id(tab_id),
                     cols: cols as u16,
                     rows: rows as u16,
+                    client: Some(client.to_string()),
                     sync_window: value
                         .get("sync_window")
                         .and_then(Value::as_bool)
