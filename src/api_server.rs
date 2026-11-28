@@ -3,10 +3,14 @@ use crate::api_protocol::{
     TabSelector, WebClientRequest, oneshot,
 };
 use async_channel::Sender;
-use std::io::Cursor;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::Router;
 use std::sync::OnceLock;
 use std::thread;
-use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 static WS_PORT: OnceLock<u16> = OnceLock::new();
 
@@ -316,115 +320,136 @@ fn legacy_help_text() -> String {
 }
 
 pub(crate) fn start_api_server(addr: &str, cmd_tx: Sender<ApiCommand>) -> std::io::Result<()> {
-    let server = Server::http(addr).map_err(|err| {
+    let listener = std::net::TcpListener::bind(addr).map_err(|err| {
         std::io::Error::new(std::io::ErrorKind::AddrInUse, format!("bind {addr}: {err}"))
     })?;
-    // Resolve the OS-assigned port when the caller passed `:0`, and round-trip
-    // hostnames into their concrete socket address. The user-facing log should
-    // always be reachable as-is.
-    let bound = server.server_addr().to_string();
+    let local_addr = listener.local_addr()?;
+    let _ = WS_PORT.set(local_addr.port());
+    let addr_display = local_addr.to_string();
     thread::Builder::new()
-        .name("agent-api-http".to_string())
-        .spawn(move || serve(server, cmd_tx, bound))?;
+        .name("agent-web".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            runtime.block_on(async move {
+                // from_std requires a non-blocking socket; tokio re-arms
+                // readiness through its own poller.
+                listener.set_nonblocking(true).expect("nonblocking listener");
+                let listener =
+                    tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+                eprintln!("agent api listening on http://{addr_display}");
+                eprintln!("web ui available at http://{addr_display}/web/");
+                eprintln!("web debug log: {}", crate::web_debug::path_display());
+                axum::serve(listener, build_router(cmd_tx))
+                    .await
+                    .expect("axum serve");
+            });
+        })?;
     Ok(())
 }
 
-fn auth_response(status: u16, body: impl Into<Vec<u8>>) -> Response<Cursor<Vec<u8>>> {
-    let mut resp = text_response(status, "application/json; charset=utf-8", body);
-    if let Ok(header) = Header::from_bytes("Set-Cookie", crate::auth::auth_cookie_header().as_str())
-    {
-        resp = resp.with_header(header);
-    }
-    resp
+fn build_router(cmd_tx: Sender<ApiCommand>) -> Router {
+    Router::new()
+        .route("/web/auth", post(web_auth))
+        .route("/ws/tabs/{path}", get(crate::web_socket::ws_stream))
+        .fallback(api_fallback)
+        .layer(middleware::from_fn(auth_middleware))
+        .with_state(cmd_tx)
 }
 
-fn serve(server: Server, cmd_tx: Sender<ApiCommand>, addr: String) {
-    eprintln!("agent api listening on http://{addr}");
-    eprintln!("web ui available at http://{addr}/web/");
-    eprintln!("web debug log: {}", crate::web_debug::path_display());
-    for mut request in server.incoming_requests() {
-        let method = method_str(request.method()).to_string();
-        let url = request.url();
-        let mut parts = url.splitn(2, '?');
-        let path = parts.next().unwrap_or("/").to_string();
-        let query = parts.next().unwrap_or("").to_string();
-        let mut body = Vec::new();
-        if let Err(err) = request.as_reader().read_to_end(&mut body) {
-            let _ = request.respond(error_response(400, &format!("read body: {err}")));
-            continue;
-        }
-        if method == "POST" && path == "/web/auth" {
-            let token = serde_json::from_slice::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("token")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or_default();
-            let response = if crate::auth::token_matches(&token) {
-                auth_response(200, r#"{"ok":true}"#)
-            } else {
-                error_response(401, "invalid token")
-            };
-            let _ = request.respond(response);
-            continue;
-        }
-        if !crate::web_ui::is_public_path(&path)
-            && !crate::auth::authorized_by(
-                request
-                    .headers()
-                    .iter()
-                    .map(|h| (h.field.as_str().as_str(), h.value.as_str())),
-            )
-        {
-            let _ = request.respond(error_response(401, "unauthorized"));
-            continue;
-        }
-        // Opt-in byte trace: the browser sets this header while its debug
-        // recorder is on, so we can see exactly what reached the PTY.
-        if crate::web_debug::wants_input_trace(
-            request
-                .headers()
-                .iter()
-                .filter_map(|h| Some((h.field.as_str().as_str(), h.value.as_str()))),
-        ) && path.contains("/input")
-        {
-            crate::web_debug::append_input(&path, &body);
-        }
-        let browser_client = request.headers().iter().find_map(|header| {
-            header
-                .field
-                .equiv("X-Rterminal-Client")
-                .then(|| header.value.as_str().to_string())
-        });
-        let response = match parse_request_with_client(&method, &path, &query, body, browser_client)
-        {
-            Ok(RouteOutcome::Immediate {
-                status,
-                content_type,
-                body,
-            }) => text_response(status, content_type, body),
-            Ok(RouteOutcome::ImmediateBinary {
-                status,
-                content_type,
-                body,
-            }) => text_response(status, content_type, body),
-            Ok(RouteOutcome::Command(cmd, rx)) => match cmd_tx.send_blocking(cmd) {
-                Ok(()) => match rx.recv_blocking() {
-                    Ok(reply) => render_reply(reply),
-                    Err(_) => error_response(504, "command channel closed"),
-                },
-                Err(_) => error_response(503, "command channel closed"),
-            },
-            Err(err) => error_response(err.status, &err.message),
-        };
-        let response = with_cache_control(response, cache_policy(&path, &query));
-        if let Err(err) = request.respond(response) {
-            eprintln!("agent api: failed to send response: {err}");
-        }
+async fn auth_middleware(req: axum::extract::Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    if crate::web_ui::is_public_path(&path) || path == "/web/auth" {
+        return next.run(req).await;
     }
+    let headers = req
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)));
+    if crate::auth::authorized_by(headers) {
+        next.run(req).await
+    } else {
+        axum_error(401, "unauthorized")
+    }
+}
+
+async fn web_auth(body: axum::body::Bytes) -> Response {
+    let token = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("token")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    if !crate::auth::token_matches(&token) {
+        return axum_error(401, "invalid token");
+    }
+    let mut response = axum_text(200, "application/json; charset=utf-8", r#"{"ok":true}"#);
+    if let Ok(value) = header::HeaderValue::from_str(&crate::auth::auth_cookie_header()) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+}
+
+async fn api_fallback(
+    State(cmd_tx): State<Sender<ApiCommand>>,
+    method: axum::http::Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let path = uri.path().to_string();
+    let query = uri.query().unwrap_or("").to_string();
+    let browser_client = headers
+        .get("x-rterminal-client")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    // Opt-in byte trace: the browser sets this header while its debug
+    // recorder is on, so we can see exactly what reached the PTY.
+    let trace_headers = headers
+        .iter()
+        .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)));
+    if crate::web_debug::wants_input_trace(trace_headers) && path.contains("/input") {
+        crate::web_debug::append_input(&path, &body);
+    }
+    let response = match parse_request_with_client(
+        method.as_str(),
+        &path,
+        &query,
+        body.to_vec(),
+        browser_client,
+    ) {
+        Ok(RouteOutcome::Immediate {
+            status,
+            content_type,
+            body,
+        }) => axum_text(status, content_type, body),
+        Ok(RouteOutcome::ImmediateBinary {
+            status,
+            content_type,
+            body,
+        }) => axum_text(status, content_type, body),
+        Ok(RouteOutcome::Command(cmd, rx)) => match cmd_tx.send(cmd).await {
+            Ok(()) => match rx.recv().await {
+                Ok(reply) => render_reply(reply),
+                Err(_) => axum_error(504, "command channel closed"),
+            },
+            Err(_) => axum_error(503, "command channel closed"),
+        },
+        Err(err) => axum_error(err.status, &err.message),
+    };
+    apply_cache_control(response, &path, &query)
+}
+
+fn apply_cache_control(mut response: Response, path: &str, query: &str) -> Response {
+    if let Ok(value) = header::HeaderValue::from_str(cache_policy(path, query)) {
+        response.headers_mut().insert(header::CACHE_CONTROL, value);
+    }
+    response
 }
 
 fn cache_policy(path: &str, query: &str) -> &'static str {
@@ -451,56 +476,32 @@ fn cache_policy(path: &str, query: &str) -> &'static str {
     }
 }
 
-fn with_cache_control(
-    mut response: Response<Cursor<Vec<u8>>>,
-    policy: &'static str,
-) -> Response<Cursor<Vec<u8>>> {
-    if let Ok(header) = Header::from_bytes("Cache-Control", policy) {
-        response = response.with_header(header);
-    }
-    response
+fn axum_text(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> Response {
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(axum::body::Body::from(body.into()))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-fn method_str(m: &Method) -> &'static str {
-    match m {
-        Method::Get => "GET",
-        Method::Post => "POST",
-        Method::Put => "PUT",
-        Method::Delete => "DELETE",
-        Method::Patch => "PATCH",
-        _ => "OTHER",
-    }
+fn axum_error(status: u16, message: &str) -> Response {
+    let body = serde_json::json!({ "error": message }).to_string();
+    axum_text(status, "application/json; charset=utf-8", body)
 }
 
-fn render_reply(reply: ApiReply) -> Response<Cursor<Vec<u8>>> {
+fn render_reply(reply: ApiReply) -> Response {
     match reply {
         ApiReply::Ok { status, body } => match body {
-            ReplyBody::Json(value) => text_response(
+            ReplyBody::Json(value) => axum_text(
                 status,
                 "application/json; charset=utf-8",
                 serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string()),
             ),
-            ReplyBody::Text(text) => text_response(status, "text/plain; charset=utf-8", text),
+            ReplyBody::Text(text) => axum_text(status, "text/plain; charset=utf-8", text),
         },
-        ApiReply::Err { status, error } => error_response(status, &error),
+        ApiReply::Err { status, error } => axum_error(status, &error),
     }
-}
-
-fn text_response(
-    status: u16,
-    content_type: &str,
-    body: impl Into<Vec<u8>>,
-) -> Response<Cursor<Vec<u8>>> {
-    let mut resp = Response::from_data(body.into()).with_status_code(StatusCode(status));
-    if let Ok(header) = Header::from_bytes("Content-Type", content_type) {
-        resp = resp.with_header(header);
-    }
-    resp
-}
-
-fn error_response(status: u16, message: &str) -> Response<Cursor<Vec<u8>>> {
-    let body = serde_json::json!({ "error": message }).to_string();
-    text_response(status, "application/json; charset=utf-8", body)
 }
 
 #[cfg(test)]
@@ -838,7 +839,10 @@ mod tests {
     fn send_http(addr: &str, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).expect("connect");
         stream.write_all(request.as_bytes()).expect("write");
-        let _ = stream.shutdown(std::net::Shutdown::Write);
+        // No write half-close here: hyper treats a read-side EOF as an
+        // aborted request and never answers. The requests below all use
+        // `Connection: close`, so the server closes the stream itself and
+        // read_to_string still terminates.
         let mut response = String::new();
         stream.read_to_string(&mut response).expect("read");
         response
@@ -929,5 +933,93 @@ mod tests {
         );
         assert!(response.contains("200 OK"), "response: {response}");
         assert!(response.contains("/tabs"), "response: {response}");
+    }
+
+    #[tokio::test]
+    async fn ws_round_trip_snapshot_input_and_output() {
+        let _ = crate::auth::configure("test-token".to_string());
+        let addr = reserve_local_addr();
+        let (cmd_tx, cmd_rx) = async_channel::unbounded::<ApiCommand>();
+
+        // Fake tab: replies to attach with a snapshot, then feeds PTY bytes
+        // through the stream channel.
+        std::thread::spawn(move || {
+            while let Ok(cmd) = cmd_rx.recv_blocking() {
+                match cmd {
+                    ApiCommand::WebStreamAttach { reply, stream, .. } => {
+                        let (bytes_tx, bytes_rx) = async_channel::unbounded::<Vec<u8>>();
+                        let _ = stream.send_blocking(bytes_rx);
+                        let _ = reply.send_blocking(ApiReply::Ok {
+                            status: 200,
+                            body: ReplyBody::Json(serde_json::json!({"screen": "hi"})),
+                        });
+                        std::thread::spawn(move || {
+                            // Give the client time to attach before output.
+                            std::thread::sleep(Duration::from_millis(100));
+                            let _ = bytes_tx.send_blocking(b"pty out".to_vec());
+                            // Keep the stream channel open: dropping the
+                            // sender would make the server treat the PTY as
+                            // gone and end the WebSocket connection.
+                            std::mem::forget(bytes_tx);
+                        });
+                    }
+                    ApiCommand::WebInput { reply, .. } => {
+                        let _ = reply.send_blocking(ApiReply::Ok {
+                            status: 200,
+                            body: ReplyBody::Json(serde_json::json!({})),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        start_api_server(&addr, cmd_tx).expect("server starts");
+        wait_for_server(&addr);
+
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{addr}/ws/tabs/3?client=test")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("x-rterminal-token", "test-token".parse().unwrap());
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+        use tokio_tungstenite::tungstenite::Message;
+        // First frame: the snapshot.
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            snapshot.to_text().unwrap().contains("\"screen\":\"hi\""),
+            "snapshot: {snapshot}"
+        );
+        // PTY bytes arrive as a binary frame.
+        let output = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(output.is_binary(), "expected binary frame: {output}");
+        // Client -> PTY input round trip: server answers, connection stays up.
+        ws.send(Message::Binary(b"abc".to_vec().into()))
+            .await
+            .unwrap();
+        ws.send(Message::text(r#"{"type":"heartbeat"}"#))
+            .await
+            .unwrap();
+        // Give the server a moment to process; then the connection should
+        // still be open (recv returns pending/timeout, not a close frame).
+        let result = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+        match result {
+            Err(_elapsed) => {} // no message within 300ms: connection alive, good
+            Ok(Some(Ok(msg))) => panic!("unexpected message: {msg}"),
+            Ok(Some(Err(err))) => panic!("ws error: {err}"),
+            Ok(None) => panic!("connection closed unexpectedly"),
+        }
     }
 }
